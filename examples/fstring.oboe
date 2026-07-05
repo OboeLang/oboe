@@ -1,5 +1,3 @@
-// there're a few ways we can go about this
-
 let string name = "Jade"
 
 let string hello = "Hello, ${name}!"
