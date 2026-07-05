@@ -1,29 +1,14 @@
-// pick options in the groups
-
 // untyped
-
 let x = 1
-var x = 1
-x = 1
 
 // typed
 let int x = 1
-int x = 1
-x: int = 1
-x := 1 // typed as int (godot has this)
 
 // constants, untyped
-
-let const x = 1
-const var x = 1
 const x = 1
 
 // constants, typed
-
 let const int x = 1
-const int x = 1
-const x: int = 1
-const x := 1 // see typed
 
 // also, are types always inferred?
 // if so, do we allow for specification?
