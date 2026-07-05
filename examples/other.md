@@ -1,3 +1,9 @@
+strings are immutable
+ints are 32-bit everywhere
+we also have bools, python-style arrays (they can have more than one type of variable in them), and dict
+
+---
+
 just throwing other questions here.
 
 was looking stuff up and
