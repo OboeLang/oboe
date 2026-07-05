@@ -1,0 +1,16 @@
+class Person {
+    func init(this, str name, int age) {
+        this.name = name
+        this.age = age
+    }
+
+    func greet(this) {
+        print("Hello! My name is {this.name}, and I'm {str(this.age)} years old!")
+    }
+}
+
+// could maybe use self instead of this?
+
+let john = Person("John", 26) 
+
+john.greet() // Hello! My name is John, and I'm 26 years old!

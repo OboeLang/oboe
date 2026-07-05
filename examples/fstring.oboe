@@ -1,0 +1,7 @@
+// there're a few ways we can go about this
+
+let name = "Jade"
+
+let hello = f"Hello, {name}!"
+let hello = "Hello, ${name}!"
+let hello = "Hello, {name}!"

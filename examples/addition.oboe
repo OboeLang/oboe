@@ -1,0 +1,26 @@
+// not sure what looks better.
+
+// no specification
+func add(int x, int y) {
+    return x + y
+}
+
+// after function name and arguments
+func add(int x, int y) ==> int {
+    return x + y
+}
+
+// after function declaration
+func add(int x, int y) {
+    return x + y
+} ==> int
+
+// before everything, incl. func
+int func add(int x, int y) {
+    return x + y
+}
+
+// before everything, don't incl. func (basically func just means void, but it also means undefined return type)
+int add(int x, int y) {
+    return x + y
+}
