@@ -1,0 +1,14 @@
+{
+    "project": {
+        "name": "my_project",
+        "version": "1.0.0",
+        "entry": "main.oboe",
+        "description": "description goes here", // Optional
+        "author": "author", // Optional
+        "license": "license" // Optional
+    },
+    "dependencies": { // This is where libraries are checked when running oboe tidy
+        "oboe": ">=1.0.0", // Added on init. Uses the version of oboe that is running init
+        "some_library": ">=1.0.0"
+    }
+}
