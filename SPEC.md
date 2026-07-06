@@ -15,7 +15,7 @@ oboe tidy # Cleans up build/temp files and installs needed packages.
 
 # Running and Building
 oboe run helloworld.oboe # Runs a singular Oboe file as-is. Only useful for certain cases, really.
-oboe run # Runs a program from main.oboe, or something else as defined by project.json
+oboe run # Runs a program from main.oboe, or something else as defined by project.json. By default, builds in /tmp (or other OS equivalent), executes, and then deletes the build
 oboe build # Self-explanatory. Builds the program into an executable, in the dist folder.
            # Embeds all required libraries into various DLLs/.so files, or with the --consolidate / -c
            # flag, all in one executable.
