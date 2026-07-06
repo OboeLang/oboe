@@ -5,7 +5,6 @@ library1.method()
 // don't know which of these two looks better
 
 import method, class from library2
-import [method, class] from library2
 
 method()
 

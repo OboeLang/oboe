@@ -29,7 +29,9 @@ oboe build # Self-explanatory. Builds the program into an executable, in the dis
 - Parentheses around conditions in `if`, `while`, `switch`-like constructs (e.g. `if ( i % 3 == 0 )`, `while (true)`).
 - Semicolons are optional.
 - Line comments use `//`.
-- Logical negation is `!`. Logical AND is `&&` *or* the keyword *and*.
+- Logical negation is `!`. 
+- Logical AND is `&&` *or* the keyword `and`.
+- Logical OR is `||` *or* the keyword `or`.
 - Modulo is `%`.
 
 ## Variables and constants
@@ -38,10 +40,10 @@ oboe build # Self-explanatory. Builds the program into an executable, in the dis
 let x = 1           // untyped, type inferred
 let int x = 1       // explicitly typed
 const x = 1         // untyped constant
-let const int x = 1 // typed constant
+const int x = 1 // typed constant
 ```
 
-- `let` declares a variable, `let const` declares a constant
+- `let` declares a variable, `const` declares a constant
 - Type annotations are optional and go before the variable name
 
 ## Primitive types
@@ -49,7 +51,7 @@ let const int x = 1 // typed constant
 - `int`s are 32-bit
 - `bool`
 - `string`s are immutable
-- Arrays, which are ordered and may hold more than one type in the same array (not statically homogeneous).
+- `array`s, which are ordered and may hold more than one type in the same array (not statically homogeneous).
 - `dict`
 
 ## Functions
@@ -61,7 +63,7 @@ int func add(int x, int y) {
 ```
 
 - Declared with the `func` keyword.
-- Return type is written before `func`.
+- Return type is written before `func`, though it is optional.
 - Parameters are `type name` pairs.
 - `array args` is the convention for a program's `main` entry point:
   `func main(array args) { ... }`.
@@ -152,13 +154,15 @@ l.method()
 
 - `import <name>` brings in a module, accessed via `<name>.member`.
 - `import <name> as <alias>` renames the imported module.
-- Importing specific members from a module is intended (`import method, class
-  from library2`), but the exact syntax is unresolved (see Open Questions).
+- `import <member> from <name>` imports a specific member.
+- `import <member>, <member> from <name>` imports specific members.
 
 ## Standard library philosophy
 
 - Prefer short access paths (e.g. `io.print`) over long chains (are built-ins are namespaced at all?).
+    - let's not namespace it
 - Whether `print` is a true built-in or lives in a std module (`io`/`std`) is still undecided
+    - We COULD make a standard module that is just automatically imported?? and you still call `print()`
 
 ## Object model
 
@@ -169,11 +173,18 @@ Oboe leans toward classes/OOP as a first-class construct, though "object-oriente
 ## Open  questions
 
 - String interpolation syntax: `fstring.oboe` uses `"${name}"` (JS/shell-style) while `classes.oboe` uses `"{this.name}"`
+    - use `"${name}"`
 - `this` vs. `self` for instance methods
-- `import method, class from library2` vs. `import [method, class] from library2`.
+    - this
 - Built-in vs. stdlib print
+    - built in is more intuitive
 - Operator overloading / custom operators
+    - yes. both. i like this.
 - Domain-specific operators (pipeline `|>`, null-coalescing `??`, spread `...`): raised as a possibility
+    - i like having some of these? but i'd need to have like a fuckton of them listed out to me to pick and choose from
 - Functional-pattern constructs?
+    - ummmmmmm i like the way linq does it how it kinda looks like sql i like that we can do that
 - Whether types are always inferred
+    - yes unless they're specified
 - How OO are we
+    - i asked about this in dms
