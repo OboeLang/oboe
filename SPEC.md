@@ -21,7 +21,7 @@ oboe build # Self-explanatory. Builds the program into an executable, in the dis
            # flag, all in one executable.
 ```
 
-- Oboe is a compiled language. The reference implementation is expected to transpile to C and compile with `gcc`.
+- Oboe is a compiled language. The reference implementation transpiles to C and compiles with `gcc`.
 
 ## Syntax
 
@@ -29,7 +29,7 @@ oboe build # Self-explanatory. Builds the program into an executable, in the dis
 - Parentheses around conditions in `if`, `while`, `switch`-like constructs (e.g. `if ( i % 3 == 0 )`, `while (true)`).
 - Semicolons are optional.
 - Line comments use `//`.
-- Logical negation is `!`. 
+- Logical negation is `!`.
 - Logical AND is `&&` *or* the keyword `and`.
 - Logical OR is `||` *or* the keyword `or`.
 - Modulo is `%`.
@@ -43,8 +43,9 @@ const x = 1         // untyped constant
 const int x = 1 // typed constant
 ```
 
-- `let` declares a variable, `const` declares a constant
-- Type annotations are optional and go before the variable name
+- `let` declares a variable, `const` declares a constant.
+- Type annotations are optional and go before the variable name.
+- Types are inferred unless explicitly specified.
 
 ## Primitive types
 
@@ -53,6 +54,7 @@ const int x = 1 // typed constant
 - `string`s are immutable
 - `array`s, which are ordered and may hold more than one type in the same array (not statically homogeneous).
 - `dict`
+- Primitives have methods.
 
 ## Functions
 
@@ -67,12 +69,12 @@ int func add(int x, int y) {
 - Parameters are `type name` pairs.
 - `array args` is the convention for a program's `main` entry point:
   `func main(array args) { ... }`.
+- Free functions are allowed; functions do not have to belong to a class.
 
 ## Strings and interpolation
 
 - String literals use double quotes.
-- Interpolation is supported inside string literals for embedding
-  expressions (exact delimiter syntax is undecided)
+- Interpolation uses `"${name}"` syntax for embedding expressions.
 - String concatenation/formatting can call `str(x)` to convert non-strings.
 
 ## Classes
@@ -94,10 +96,27 @@ john.greet()
 ```
 
 - `class` declares a class; `init` is the constructor method.
-- Instance methods take an explicit first parameter (`this`) rather than an implicit receiver
+- Instance methods take an explicit first parameter (`this`) rather than an implicit receiver.
 - Fields are set via `this.field = value` inside methods.
 - Instantiation looks like a function call: `ClassName(args...)`.
 - Method calls use dot syntax: `instance.method(args...)`.
+
+### Inheritance
+
+- Single inheritance only: a class has at most one parent.
+- Method dispatch is resolved at compile time, not via runtime/virtual dispatch.
+
+### Access control
+
+- Members are public by default; `private` is an explicit modifier to restrict access.
+
+### Constructors
+
+- A class may define multiple `init`s (overloading), allowing different construction signatures.
+- `static` declares class-level members/functions, shared across all instances and accessed via `ClassName.member` rather than through an instance.
+- A class with no `init` at all gets an implicit no-arg, no-op constructor.
+- Errors thrown inside `init` can be caught by `try`/`catch` like any other exception.
+- Fields can be marked constant/locked so they can't be changed after being set once.
 
 ## Control flow
 
@@ -119,6 +138,7 @@ switch x {
 - `if` / `else if` / `else` with parenthesized conditions.
 - `while` with parenthesized condition.
 - `switch`/`case` exists, with each `case` given its own `{ }` block body.
+- Type checking uses the `is` keyword: `if (100 is int) { ... }`.
 
 ## Error handling
 
@@ -142,6 +162,13 @@ func main(array args) {
 - A generic `Exception` type exists as a catch-all.
 - File-related exceptions (e.g. `FileNotFoundError`) are expected to live in a file/IO standard-library module (`os.FileNotFoundError`), not the language core.
 
+## Operators
+
+- Operator overloading and custom operators are both supported.
+- `??` null-coalescing: `x ?? default`.
+- `?.` safe navigation / optional chaining: `user?.address?.city` short-circuits instead of throwing.
+- Repetition operator: `x`, e.g. `"ab" x 3` → `"ababab"`.
+
 ## Modules / imports
 
 ```
@@ -159,32 +186,31 @@ l.method()
 
 ## Standard library philosophy
 
-- Prefer short access paths (e.g. `io.print`) over long chains (are built-ins are namespaced at all?).
-    - let's not namespace it
-- Whether `print` is a true built-in or lives in a std module (`io`/`std`) is still undecided
-    - We COULD make a standard module that is just automatically imported?? and you still call `print()`
+- Prefer short access paths (e.g. `io.print`) over long chains; built-ins are not namespaced.
+- `print` is a built-in, not a stdlib function.
+
+## Project structure
+
+```
+my_project/
+├── dist            # Not created on init.
+├── .gitignore      # Includes dist/ and .oboe/ by default.
+├── main.oboe
+├── .oboe
+│   └── libraries
+└── project.json    # See project.example.json for the format.
+```
 
 ## Object model
 
-Oboe leans toward classes/OOP as a first-class construct, though "object-oriented by default" is not quite locked in
+Classes are a first-class construct in Oboe.
 
 ---
 
-## Open  questions
+## Open questions
 
-- String interpolation syntax: `fstring.oboe` uses `"${name}"` (JS/shell-style) while `classes.oboe` uses `"{this.name}"`
-    - use `"${name}"`
-- `this` vs. `self` for instance methods
-    - this
-- Built-in vs. stdlib print
-    - built in is more intuitive
-- Operator overloading / custom operators
-    - yes. both. i like this.
-- Domain-specific operators (pipeline `|>`, null-coalescing `??`, spread `...`): raised as a possibility
-    - i like having some of these? but i'd need to have like a fuckton of them listed out to me to pick and choose from
-- Functional-pattern constructs?
-    - ummmmmmm i like the way linq does it how it kinda looks like sql i like that we can do that
-- Whether types are always inferred
-    - yes unless they're specified
-- How OO are we
-    - i asked about this in dms
+- Inheritance: syntax for declaring a parent, constructor chaining, and override rules.
+- Rust-style `?` error-propagation operator: whether it fits Oboe's error-handling model.
+- Further domain-specific operators
+- Functional-pattern constructs (LINQ-style query syntax is of interest, not yet designed).
+- How object-oriented Oboe is by default.
