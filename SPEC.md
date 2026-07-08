@@ -186,7 +186,7 @@ l.method()
 
 ## Standard library philosophy
 
-- Prefer short access paths (e.g. `io.print`) over long chains; built-ins are not namespaced.
+- Prefer short access paths (e.g. `print`) over long chains; built-ins are not namespaced.
 - `print` is a built-in, not a stdlib function.
 
 ## Project structure
