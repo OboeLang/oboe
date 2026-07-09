@@ -1,0 +1,19 @@
+func risky(int n) {
+    if (n < 0) {
+        throw ValueError("n must not be negative")
+    }
+    print(n)
+}
+
+func main(array args) {
+    try {
+        risky(5)
+        risky(-1)
+    } catch (ValueError e) {
+        print("caught a ValueError")
+    } catch (Exception e) {
+        print("caught something else")
+    } finally {
+        print("done")
+    }
+}

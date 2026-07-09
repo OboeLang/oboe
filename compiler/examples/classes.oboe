@@ -1,0 +1,49 @@
+class Animal {
+    func init(this, string name) {
+        this.name = name
+    }
+
+    func speak(this) {
+        print("${this.name} makes a sound")
+    }
+}
+
+class Dog extends Animal {
+    func init(this, string name) {
+        this.name = name
+    }
+
+    func speak(this) {
+        print("${this.name} barks")
+    }
+}
+
+class Counter {
+    static let int count = 0
+
+    static func increment() {
+        Counter.count = Counter.count + 1
+    }
+}
+
+func main(array args) {
+    let john = Animal("Generic Animal")
+    john.speak()
+
+    let rex = Dog("Rex")
+    rex.speak()
+
+    Counter.increment()
+    Counter.increment()
+    print(Counter.count)
+
+    if (100 is int) {
+        print("100 is an int")
+    }
+
+    let x = 5
+    let y = x ?? 10
+    print(y)
+
+    print("ab" x 3)
+}
