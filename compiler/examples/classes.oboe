@@ -1,3 +1,5 @@
+// © 2026 Sushii64
+// © 2026 robinpie
 class Animal {
     func init(this, string name) {
         this.name = name

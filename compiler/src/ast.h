@@ -1,3 +1,5 @@
+/* © 2026 Sushii64
+ * © 2026 robinpie */
 #ifndef OBOE_AST_H
 #define OBOE_AST_H
 

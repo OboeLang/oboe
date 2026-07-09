@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# © 2026 Sushii64
+# © 2026 robinpie
 # Runs every tests/*.oboe file and diffs its output against tests/*.expected.
 # A test that is expected to fail compilation has a .expect_fail file instead,
 # whose contents (if non-empty) must appear in the compiler's stderr.

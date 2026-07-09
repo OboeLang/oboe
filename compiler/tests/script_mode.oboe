@@ -1,3 +1,5 @@
+// © 2026 Sushii64
+// © 2026 robinpie
 // top-level statements without a main function (single-file script mode)
 let string name = "Jade"
 let string hello = "Hello, ${name}!"

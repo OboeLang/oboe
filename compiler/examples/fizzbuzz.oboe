@@ -1,3 +1,5 @@
+// © 2026 Sushii64
+// © 2026 robinpie
 func FizzBuzz(int n) {
     for ( i in range(1, n + 1) ) {
         if ( i % 3 == 0 and i % 5 == 0 ) {

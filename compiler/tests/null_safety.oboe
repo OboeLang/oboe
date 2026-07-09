@@ -1,3 +1,5 @@
+// © 2026 Sushii64
+// © 2026 robinpie
 class Address {
     func init(this, string city) {
         this.city = city

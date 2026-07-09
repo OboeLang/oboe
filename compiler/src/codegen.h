@@ -1,3 +1,5 @@
+/* © 2026 Sushii64
+ * © 2026 robinpie */
 #ifndef OBOE_CODEGEN_H
 #define OBOE_CODEGEN_H
 

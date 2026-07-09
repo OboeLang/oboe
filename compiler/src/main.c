@@ -1,3 +1,5 @@
+/* © 2026 Sushii64
+ * © 2026 robinpie */
 #include "lexer.h"
 #include "parser.h"
 #include "codegen.h"

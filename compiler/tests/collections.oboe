@@ -1,3 +1,5 @@
+// © 2026 Sushii64
+// © 2026 robinpie
 func main(array args) {
     // heterogeneous and nested arrays
     let mixed = [1, "two", true, [3, 4]]

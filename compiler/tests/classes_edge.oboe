@@ -1,3 +1,5 @@
+// © 2026 Sushii64
+// © 2026 robinpie
 // constructor overloading by arity, implicit default constructor,
 // three-level inheritance, static const, methods calling methods via this
 class Point {

@@ -1,3 +1,5 @@
+// © 2026 Sushii64
+// © 2026 robinpie
 import _shapes
 
 int func rectArea(int w, int h) {

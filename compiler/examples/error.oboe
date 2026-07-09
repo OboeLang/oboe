@@ -1,3 +1,5 @@
+// © 2026 Sushii64
+// © 2026 robinpie
 func risky(int n) {
     if (n < 0) {
         throw ValueError("n must not be negative")

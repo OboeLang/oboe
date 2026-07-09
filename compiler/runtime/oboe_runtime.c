@@ -1,3 +1,5 @@
+/* © 2026 Sushii64
+ * © 2026 robinpie */
 #include "oboe_runtime.h"
 #include <stdio.h>
 #include <stdlib.h>

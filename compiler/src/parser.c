@@ -1,3 +1,5 @@
+/* © 2026 Sushii64
+ * © 2026 robinpie */
 #include "parser.h"
 #include <stdlib.h>
 #include <string.h>

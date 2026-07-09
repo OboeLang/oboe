@@ -1,3 +1,5 @@
+// © 2026 Sushii64
+// © 2026 robinpie
 class Circle {
     func init(this, int r) {
         this.r = r

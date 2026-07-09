@@ -1,3 +1,5 @@
+// © 2026 Sushii64
+// © 2026 robinpie
 class Fragile {
     func init(this, int n) {
         if (n < 0) {

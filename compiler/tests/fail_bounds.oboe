@@ -1,3 +1,5 @@
+// © 2026 Sushii64
+// © 2026 robinpie
 func main(array args) {
     let a = [1, 2, 3]
     print(a[5])
