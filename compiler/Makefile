@@ -17,8 +17,11 @@ $(BIN): bin $(OBJ)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+test: $(BIN)
+	./tests/run_tests.sh
+
 clean:
 	rm -f $(OBJ) $(BIN)
 	rmdir bin 2>/dev/null || true
 
-.PHONY: all clean
+.PHONY: all test clean

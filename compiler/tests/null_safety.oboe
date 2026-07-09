@@ -1,0 +1,26 @@
+class Address {
+    func init(this, string city) {
+        this.city = city
+    }
+}
+
+class User {
+    func init(this, Address address) {
+        this.address = address
+    }
+}
+
+func main(array args) {
+    let u = User(Address("Berlin"))
+    print(u.address.city)
+    print(u?.address)
+    print(u.address?.city)
+
+    // ?? chooses the right side only when the left is null
+    print(null ?? "fallback")
+    print("kept" ?? "unused")
+    print(0 ?? 1)
+
+    // chaining ?? associates left-to-right
+    print(null ?? null ?? "third")
+}

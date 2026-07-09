@@ -1,0 +1,7 @@
+// top-level statements without a main function (single-file script mode)
+let string name = "Jade"
+let string hello = "Hello, ${name}!"
+print(hello)
+
+const int answer = 42
+print(answer)

@@ -1,0 +1,46 @@
+func main(array args) {
+    // nested loops
+    for (i in range(0, 3)) {
+        for (j in range(0, 2)) {
+            print("${i},${j}")
+        }
+    }
+
+    // empty range body never runs
+    for (i in range(5, 5)) {
+        print("never")
+    }
+
+    // while with negation and counter
+    let done = false
+    let count = 0
+    while (!done) {
+        count = count + 1
+        if (count >= 3) {
+            done = true
+        }
+    }
+    print(count)
+
+    // switch on strings, and a switch where nothing matches
+    let word = "two"
+    switch word {
+        case "one" { print("1") }
+        case "two" { print("2") }
+    }
+    switch 99 {
+        case 1 { print("unreachable") }
+    }
+    print("after switch")
+
+    // deep else-if chain
+    let n = 7
+    if (n == 1) { print("one") }
+    else if (n == 2) { print("two") }
+    else if (n == 7) { print("seven") }
+    else { print("other") }
+
+    // semicolons are optional but allowed
+    let s = 1;
+    print(s);
+}

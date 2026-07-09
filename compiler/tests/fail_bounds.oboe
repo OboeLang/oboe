@@ -1,0 +1,4 @@
+func main(array args) {
+    let a = [1, 2, 3]
+    print(a[5])
+}

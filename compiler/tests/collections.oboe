@@ -1,0 +1,34 @@
+func main(array args) {
+    // heterogeneous and nested arrays
+    let mixed = [1, "two", true, [3, 4]]
+    print(mixed)
+    print(mixed[3])
+    print(mixed[3][1])
+
+    // element assignment
+    let nums = [10, 20, 30]
+    nums[1] = 99
+    print(nums)
+
+    // iterating a variable, not just range()
+    let total = 0
+    for (n in [1, 2, 3, 4, 5]) {
+        total = total + n
+    }
+    print(total)
+
+    // dicts: overwrite, missing key is null, non-string values
+    let d = {"a": 1, "b": 2}
+    d["a"] = 100
+    print(d["a"])
+    print(d["missing"])
+    print(d["missing"] ?? "default")
+    d["nested"] = [7, 8]
+    print(d["nested"][0])
+
+    // empty containers
+    let ea = []
+    let ed = {}
+    print(ea)
+    print(ed)
+}

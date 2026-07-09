@@ -1,0 +1,7 @@
+inner finally
+outer caught TypeError
+specific
+catch-all works
+init throw caught
+ok path
+success finally

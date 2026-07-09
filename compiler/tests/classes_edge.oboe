@@ -1,0 +1,75 @@
+// constructor overloading by arity, implicit default constructor,
+// three-level inheritance, static const, methods calling methods via this
+class Point {
+    func init(this) {
+        this.px = 0
+        this.py = 0
+    }
+
+    func init(this, int x, int y) {
+        this.px = x
+        this.py = y
+    }
+
+    func show(this) {
+        print("(${this.px}, ${this.py})")
+    }
+}
+
+class Empty {
+}
+
+class A {
+    func init(this) {
+        this.tag = "A"
+    }
+
+    func who(this) {
+        print("who: ${this.tag}")
+    }
+
+    func speak(this) {
+        this.who()
+    }
+}
+
+class B extends A {
+    func init(this) {
+        this.tag = "B"
+    }
+}
+
+class C extends B {
+    func init(this) {
+        this.tag = "C"
+    }
+}
+
+class Config {
+    static const int max = 99
+}
+
+func main(array args) {
+    let origin = Point()
+    origin.show()
+    let p = Point(3, 4)
+    p.show()
+
+    let e = Empty()
+    print(e is Empty)
+
+    // grandchild uses methods inherited from grandparent
+    let c = C()
+    c.speak()
+
+    // `is` respects the inheritance chain
+    print(c is C)
+    print(c is B)
+    print(c is A)
+    print(c is Empty)
+
+    print(Config.max)
+
+    // fields never assigned default to null
+    print(e is int)
+}

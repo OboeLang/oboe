@@ -1,0 +1,61 @@
+class Fragile {
+    func init(this, int n) {
+        if (n < 0) {
+            throw ValueError("bad n")
+        }
+        this.n = n
+    }
+}
+
+func inner() {
+    try {
+        throw TypeError("from inner")
+    } catch (ValueError e) {
+        print("inner: wrong handler")
+    } finally {
+        print("inner finally")
+    }
+}
+
+func main(array args) {
+    // unmatched exception propagates out of a nested try to the outer catch,
+    // and the inner finally still runs first
+    try {
+        inner()
+    } catch (TypeError e) {
+        print("outer caught TypeError")
+    }
+
+    // catch order: most specific first
+    try {
+        throw ValueError("v")
+    } catch (ValueError e) {
+        print("specific")
+    } catch (Exception e) {
+        print("generic")
+    }
+
+    // Exception is a catch-all for any type
+    try {
+        throw WeirdCustomError("?")
+    } catch (Exception e) {
+        print("catch-all works")
+    }
+
+    // throwing constructors are catchable
+    try {
+        let f = Fragile(-1)
+        print("not reached")
+    } catch (ValueError e) {
+        print("init throw caught")
+    }
+
+    // finally runs on the success path too
+    try {
+        print("ok path")
+    } catch (Exception e) {
+        print("no")
+    } finally {
+        print("success finally")
+    }
+}

@@ -1,0 +1,27 @@
+func main(array args) {
+    // escapes
+    print("line1\nline2")
+    print("quote: \" backslash: \\")
+    print("tab:\tend")
+
+    // empty string and interpolation edges
+    let empty = ""
+    print("[${empty}]")
+    let a = 3
+    let b = 4
+    print("${a} + ${b} = ${a + b}")
+    print("${a}${b}")
+    print("start ${a} middle ${b} end")
+
+    // str() conversions
+    print(str(true) + " " + str(42) + " " + str(null))
+    print(str([1, "two", false]))
+
+    // string comparison
+    if ("apple" < "banana") {
+        print("apple first")
+    }
+
+    // concatenation coerces
+    print("n=" + 5)
+}

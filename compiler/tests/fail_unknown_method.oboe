@@ -1,0 +1,10 @@
+class Thing {
+    func init(this) {
+        this.v = 1
+    }
+}
+
+func main(array args) {
+    let t = Thing()
+    t.doesNotExist()
+}

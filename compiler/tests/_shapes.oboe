@@ -1,0 +1,13 @@
+class Circle {
+    func init(this, int r) {
+        this.r = r
+    }
+
+    func diameter(this) {
+        return this.r * 2
+    }
+}
+
+int func squareArea(int s) {
+    return s * s
+}

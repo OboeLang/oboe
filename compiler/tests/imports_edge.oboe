@@ -1,0 +1,15 @@
+// transitive imports (_geometry itself imports _shapes),
+// aliasing, member imports, and classes defined in a module
+import _geometry as g
+import _shapes
+import squareArea from _shapes
+
+func main(array args) {
+    print(g.rectArea(3, 4))
+    print(g.cubeVolume(2))
+    print(_shapes.squareArea(5))
+    print(squareArea(6))
+
+    let c = Circle(10)
+    print(c.diameter())
+}

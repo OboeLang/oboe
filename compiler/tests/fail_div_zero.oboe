@@ -1,0 +1,4 @@
+func main(array args) {
+    let zero = 0
+    print(10 / zero)
+}

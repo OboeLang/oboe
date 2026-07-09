@@ -1,0 +1,38 @@
+// recursion, typed return prefix, mutual recursion, early return
+int func fact(int n) {
+    if (n <= 1) {
+        return 1
+    }
+    return n * fact(n - 1)
+}
+
+bool func isEven(int n) {
+    if (n == 0) { return true }
+    return isOdd(n - 1)
+}
+
+bool func isOdd(int n) {
+    if (n == 0) { return false }
+    return isEven(n - 1)
+}
+
+func noReturn() {
+    let unused = 1
+}
+
+func earlyReturn(int n) {
+    if (n > 0) {
+        return "positive"
+    }
+    return "non-positive"
+}
+
+func main(array args) {
+    print(fact(10))
+    print(isEven(10))
+    print(isOdd(7))
+    // a function without a return implicitly returns null
+    print(noReturn())
+    print(earlyReturn(5))
+    print(earlyReturn(-5))
+}

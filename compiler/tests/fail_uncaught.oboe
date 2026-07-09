@@ -1,0 +1,5 @@
+func main(array args) {
+    print("before")
+    throw ValueError("nobody catches this")
+    print("after")
+}

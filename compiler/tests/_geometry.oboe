@@ -1,0 +1,9 @@
+import _shapes
+
+int func rectArea(int w, int h) {
+    return w * h
+}
+
+int func cubeVolume(int s) {
+    return _shapes.squareArea(s) * s
+}

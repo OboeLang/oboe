@@ -1,0 +1,14 @@
+class Vault {
+    func init(this) {
+        this.combo = 1234
+    }
+
+    private func open(this) {
+        print(this.combo)
+    }
+}
+
+func main(array args) {
+    let v = Vault()
+    v.open()
+}
