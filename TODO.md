@@ -1,0 +1,9 @@
+- Fully flesh out every feature in spec
+    - FFI
+- Everything mentioned in SPEC.md
+- Everything mentioned in things yet to be written.md
+- Implement above features in compiler
+- Finish spec
+- Create library/tool repository
+- Create various libraries
+- Create various tools
