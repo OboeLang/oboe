@@ -214,3 +214,7 @@ Classes are a first-class construct in Oboe.
 - Further domain-specific operators
 - Functional-pattern constructs (LINQ-style query syntax is of interest, not yet designed).
 - How object-oriented Oboe is by default.
+- `repeat` syntax vs `x` syntax (see `unformalizedExamples/things yet to be written.md`)
+- Various other things within above file
+- Lambda functions or whatever they're called in JS? (the () => {} thing)
+- If/Else shorthand?
