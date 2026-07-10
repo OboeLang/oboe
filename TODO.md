@@ -2,7 +2,10 @@
     - FFI
 - Everything mentioned in SPEC.md
 - Everything mentioned in things yet to be written.md
+- Everything mentioned in compiler readme
 - Implement above features in compiler
+- Implement all unimplemented features in compiler
+    - Custom operator syntax
 - Finish spec
 - Create library/tool repository
 - Create various libraries
