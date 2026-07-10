@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # © 2026 Sushii64
 # © 2026 robinpie
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 2 as
+# published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
 # Runs every tests/*.oboe file and diffs its output against tests/*.expected.
 # A test that is expected to fail compilation has a .expect_fail file instead,
 # whose contents (if non-empty) must appear in the compiler's stderr.
