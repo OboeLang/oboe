@@ -35,3 +35,18 @@ cimport add {
 } from "mathlib.so"
 ```
 or something i don't really know how these things work
+
+# Other shit idk
+
+`input()` - pauses execution and waits for user input, returns that input. same as python
+`write()` - print without newline
+
+# Changing the way Variables are formatted
+
+this is it now
+```
+var x = 1 // untyped
+int x = 1 // typed
+const var x = 1 // constant untyped
+const int x = 1 // constant typed
+```
