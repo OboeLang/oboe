@@ -16,6 +16,7 @@ oboe run helloworld.oboe # Runs a singular Oboe file as-is. Only useful for cert
 oboe run # Runs a program from main.oboe, or something else as defined by project.json
 oboe build # Self-explanatory. Builds the program into an executable, in the dist folder.
            # Embeds all required libraries into various DLLs/.so files.
+    oboe build <file> # Builds a specific script to an executable of the same name in the current folder.
     -v --verbose # Self-explanatory.
     -o --output # Manually describes the output file. Creates nonexistent folders when specified.
                 # e.g. -o my_folder/output.exe will create my_folder.
