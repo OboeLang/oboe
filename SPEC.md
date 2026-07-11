@@ -6,19 +6,24 @@ Many things are still left unresolved; this is incomplete.
 
 ```bash
 # Projects and Packages
-oboe init # Initializes a project structure.
-          # This will be elaborated on.
+oboe init # Initializes a project structure in the current directory.
+    oboe init <directory> # Initializes a project in a new or existing empty directory.
 
 oboe get <package name> # Installs a library package to the current project, similar to PyPI or NPM.
 oboe install <package name> # Installs a program made in Oboe on the repository, like CLI tools.
 oboe tidy # Cleans up build/temp files and installs needed packages.
+          # Should not do anything if not in a project directory.
+    -v --verbose # Self-explanatory.
 
 # Running and Building
 oboe run helloworld.oboe # Runs a singular Oboe file as-is. Only useful for certain cases, really.
-oboe run # Runs a program from main.oboe, or something else as defined by project.json. By default, builds in /tmp (or other OS equivalent), executes, and then deletes the build
+oboe run # Runs a program from main.oboe, or something else as defined by project.json
 oboe build # Self-explanatory. Builds the program into an executable, in the dist folder.
-           # Embeds all required libraries into various DLLs/.so files, or with the --consolidate / -c
-           # flag, all in one executable.
+           # Embeds all required libraries into various DLLs/.so files.
+    oboe build <file> # Builds a specific script to an executable of the same name in the current folder.
+    -v --verbose # Self-explanatory.
+    -o --output # Manually describes the output file. Creates nonexistent folders when specified.
+                # e.g. -o my_folder/output.exe will create my_folder.
 ```
 
 - Oboe is a compiled language. The reference implementation transpiles to C and compiles with `gcc`.
@@ -37,14 +42,14 @@ oboe build # Self-explanatory. Builds the program into an executable, in the dis
 ## Variables and constants
 
 ```
-let x = 1           // untyped, type inferred
-let int x = 1       // explicitly typed
-const x = 1         // untyped constant
-const int x = 1 // typed constant
+var x = 1        // untyped, type inferred
+int x = 1        // explicitly typed
+const var x = 1  // untyped constant
+const int x = 1  // typed constant
 ```
 
-- `let` declares a variable, `const` declares a constant.
-- Type annotations are optional and go before the variable name.
+- `var` declares an untyped variable, `const` declares a constant.
+- Type annotations are optional and replace `var`.
 - Types are inferred unless explicitly specified.
 
 ## Primitive types
@@ -91,7 +96,7 @@ class Person {
     }
 }
 
-let john = Person("John", 26)
+var john = Person("John", 26)
 john.greet()
 ```
 
@@ -189,6 +194,9 @@ l.method()
 - Prefer short access paths (e.g. `print`) over long chains; built-ins are not namespaced.
 - `print` is a built-in, not a stdlib function.
 
+- `write()` - Print without newline.
+- `input()` - Pauses execution and waits for user input, returns that input. Same as Python.
+
 ## Project structure
 
 ```
@@ -205,6 +213,115 @@ my_project/
 
 Classes are a first-class construct in Oboe.
 
+> [!NOTE]
+> Perhaps add examples?
+
+# Events System
+
+The events system is a powerful system, akin to the broadcast system from Scratch.
+
+This is built into the language.
+
+`on <event> { ... }` - runs code when an event happens
+```
+on KeyboardInterruptEvent {
+    print("Quitting...")
+}
+```
+
+`on <event> as <variable> { ... }` - runs code when an event happens, passes data to the variable.
+```
+on ExampleEvent as e {
+    print(e.name)
+}
+```
+
+`event` - type, used to create events. could also be `Event`, but i dunno
+```
+event MyEvent = event()
+
+func main(array args) {
+    MyEvent.fire()
+}
+
+on MyEvent {
+    print("woah")
+}
+```
+
+events may also come with data.
+
+```
+event MyEvent = event(str name)
+
+MyEvent.fire("Jade")
+MyEvent.fire("Robin")
+
+on MyEvent as e {
+    print(e.name) // prints "Jade" the first time and "Robin" the second time
+}
+```
+
+`event.fire()` - fires/broadcasts the event, appropriate data goes in.
+
+maybe other methods and such.
+
+## Built-in events
+
+`KeyboardInterruptEvent` - gets sent whenever the user inputs ^C (Ctrl+C) in the terminal
+```
+on KeyboardInterruptEvent {
+    print("Quitting...")
+}
+```
+important for the compiler: here's what should happen when a keyboard interrupt happens:
+
+- keyboard interrupt
+- stop everything
+- fire that event
+- when that finishes, THEN quit
+
+BUT, if another interrupt is sent while that code is running, then it just quits immediately
+
+# Custom operators
+
+Oboe allows users to declare custom operators.
+
+Use the `operator <operator> (type a, type b) { ... }` syntax. Then, return an object.
+```
+operator ||> (int a, int b) {
+    var c = a * 10
+    return c + b
+}
+
+print(5 ||> 8) // prints 58
+```
+
+When defining an operator, you are given two variables. 
+
+`a`, which is the left side, and `b`, the right side.
+
+# Operator overloading
+
+```
+class Vector2 {
+    func init(this, float x, float y) {
+        let this.x = x
+        let this.y = y
+    }
+
+    func $add(this, Vector2 other) {
+        return Vector2(this.x + other.x, this.y + other.y)
+    }
+}
+```
+This example uses $add, which overrides the + operation, specifically between a Vector2 and a Vector2.
+
+# FFI
+
+> [!NOTE]
+> TODO: Write FFI syntax.
+
 ---
 
 ## Open questions
@@ -214,7 +331,5 @@ Classes are a first-class construct in Oboe.
 - Further domain-specific operators
 - Functional-pattern constructs (LINQ-style query syntax is of interest, not yet designed).
 - How object-oriented Oboe is by default.
-- `repeat` syntax vs `x` syntax (see `unformalizedExamples/things yet to be written.md`)
-- Various other things within above file
 - Lambda functions or whatever they're called in JS? (the () => {} thing)
 - If/Else shorthand?
