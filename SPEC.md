@@ -310,12 +310,12 @@ class Vector2 {
         let this.y = y
     }
 
-    func $add(this, Vector2 other) {
+    operator + (this, Vector2 other) {
         return Vector2(this.x + other.x, this.y + other.y)
     }
 }
 ```
-This example uses $add, which overrides the + operation, specifically between a Vector2 and a Vector2.
+This example overrides the + operation, specifically between a Vector2 and another Vector2.
 
 # FFI
 
