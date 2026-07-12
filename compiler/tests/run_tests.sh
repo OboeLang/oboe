@@ -47,7 +47,12 @@ for src in tests/*.oboe; do
         echo "SKIP $base (no .expected file)"
         continue
     fi
-    out="$($OBOE run "$src" 2>&1)"
+    # a test reading from input() provides its stdin in a .stdin file
+    if [ -f "$name.stdin" ]; then
+        out="$($OBOE run "$src" <"$name.stdin" 2>&1)"
+    else
+        out="$($OBOE run "$src" </dev/null 2>&1)"
+    fi
     rc=$?
     if [ $rc -eq 0 ] && [ "$out" = "$(cat "$expected")" ]; then
         echo "PASS $base"

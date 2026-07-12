@@ -69,12 +69,13 @@ static char *transpile_to_c(const char *oboe_path, const char *c_out_path) {
     return strdup(c_out_path);
 }
 
-static int compile_c_to_binary(const char *c_path, const char *out_path) {
+static int compile_c_to_binary(const char *c_path, const char *out_path, bool verbose) {
     char *home = oboe_home();
     char cmd[8192];
     snprintf(cmd, sizeof cmd,
-             "gcc -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -O2 -I\"%s/../runtime\" \"%s\" \"%s/../runtime/oboe_runtime.c\" -o \"%s\" 2>&1",
+             "gcc -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -O2 -I\"%s/../runtime\" \"%s\" \"%s/../runtime/oboe_runtime.c\" -ldl -o \"%s\" 2>&1",
              home, c_path, home, out_path);
+    if (verbose) printf("oboe: %s\n", cmd);
     FILE *p = popen(cmd, "r");
     if (!p) return 1;
     char line[1024];
@@ -82,6 +83,21 @@ static int compile_c_to_binary(const char *c_path, const char *out_path) {
     int status = pclose(p);
     free(home);
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+}
+
+/* mkdir -p: creates every missing directory along the path */
+static void mkdirs(const char *path) {
+    char buf[4096];
+    strncpy(buf, path, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    for (char *p = buf + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(buf, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(buf, 0755);
 }
 
 static void cmd_run_file(const char *path) {
@@ -96,7 +112,7 @@ static void cmd_run_file(const char *path) {
     if (bfd < 0) { perror("mkstemp"); exit(1); }
     close(bfd);
 
-    int rc = compile_c_to_binary(c_path, bin_path);
+    int rc = compile_c_to_binary(c_path, bin_path, false);
     remove(c_path);
     if (rc != 0) { remove(bin_path); exit(rc); }
 
@@ -124,8 +140,22 @@ static char *json_extract_string_field(const char *json, const char *field) {
     return strndup(p, end - p);
 }
 
-static void cmd_init(void) {
+static void cmd_init(const char *dir) {
     struct stat st;
+    if (dir) {
+        if (stat(dir, &st) == 0) {
+            if (!S_ISDIR(st.st_mode)) {
+                fprintf(stderr, "oboe: '%s' exists and is not a directory\n", dir);
+                exit(1);
+            }
+        } else {
+            mkdirs(dir);
+        }
+        if (chdir(dir) != 0) {
+            fprintf(stderr, "oboe: cannot enter directory '%s'\n", dir);
+            exit(1);
+        }
+    }
     if (stat("main.oboe", &st) == 0) {
         fprintf(stderr, "oboe: main.oboe already exists; refusing to overwrite an existing project\n");
         exit(1);
@@ -177,38 +207,71 @@ static void cmd_run_project(void) {
     cmd_run_file(entry);
 }
 
-static void cmd_build(bool consolidate) {
-    (void)consolidate; /* the reference implementation always produces a single executable for now */
-    char *json = read_whole_file("project.json");
+/* `oboe build` builds the project entry into dist/<name>;
+   `oboe build <file>` builds a single script into ./<file-without-.oboe>;
+   `-o path` overrides the output location, creating missing directories. */
+static void cmd_build(const char *file, const char *output, bool verbose) {
     char *entry = NULL;
-    char *name = NULL;
-    if (json) {
-        entry = json_extract_string_field(json, "entry");
-        name = json_extract_string_field(json, "name");
-        free(json);
-    }
-    if (!entry) entry = strdup("main.oboe");
-    if (!name) name = strdup("program");
+    char out_path[4096];
 
-    mkdir("dist", 0755);
+    if (file) {
+        entry = strdup(file);
+        char base[4096];
+        strncpy(base, file, sizeof(base) - 1);
+        base[sizeof(base) - 1] = '\0';
+        char *b = basename(base);
+        char *dot = strrchr(b, '.');
+        if (dot && strcmp(dot, ".oboe") == 0) *dot = '\0';
+        snprintf(out_path, sizeof out_path, "%s", b);
+    } else {
+        char *json = read_whole_file("project.json");
+        char *name = NULL;
+        if (json) {
+            entry = json_extract_string_field(json, "entry");
+            name = json_extract_string_field(json, "name");
+            free(json);
+        }
+        if (!entry) entry = strdup("main.oboe");
+        if (!name) name = strdup("program");
+        mkdir("dist", 0755);
+        snprintf(out_path, sizeof out_path, "dist/%s", name);
+        free(name);
+    }
+
+    if (output) {
+        snprintf(out_path, sizeof out_path, "%s", output);
+        char parent[4096];
+        strncpy(parent, output, sizeof(parent) - 1);
+        parent[sizeof(parent) - 1] = '\0';
+        char *dir = dirname(parent);
+        if (strcmp(dir, ".") != 0) mkdirs(dir);
+    }
+
     char c_path[] = "/tmp/oboe_build_XXXXXX.c";
     int fd = mkstemps(c_path, 2);
     if (fd < 0) { perror("mkstemps"); exit(1); }
     close(fd);
     transpile_to_c(entry, c_path);
+    if (verbose) printf("oboe: transpiled %s\n", entry);
 
-    char out_path[4096];
-    snprintf(out_path, sizeof out_path, "dist/%s", name);
-    int rc = compile_c_to_binary(c_path, out_path);
+    int rc = compile_c_to_binary(c_path, out_path, verbose);
     remove(c_path);
     if (rc != 0) exit(rc);
-    printf("Built dist/%s\n", name);
+    printf("Built %s\n", out_path);
+    free(entry);
 }
 
-static void cmd_tidy(void) {
+static void cmd_tidy(bool verbose) {
+    struct stat st;
+    if (stat("project.json", &st) != 0) {
+        /* not a project directory: tidy does nothing */
+        if (verbose) printf("oboe: no project.json here; nothing to tidy\n");
+        return;
+    }
     mkdir(".oboe", 0755);
     mkdir(".oboe/libraries", 0755);
-    printf("Cleaned build artifacts. No package registry is configured yet, so no dependencies were fetched.\n");
+    if (verbose) printf("oboe: ensured .oboe/libraries exists\n");
+    printf("Cleaned build artifacts. No package repository is configured yet, so no dependencies were fetched.\n");
 }
 
 static void cmd_get_or_install(const char *what, const char *name) {
@@ -222,20 +285,34 @@ int main(int argc, char **argv) {
         return 1;
     }
     const char *cmd = argv[1];
-    if (strcmp(cmd, "init") == 0) { cmd_init(); return 0; }
+    if (strcmp(cmd, "init") == 0) { cmd_init(argc >= 3 ? argv[2] : NULL); return 0; }
     if (strcmp(cmd, "run") == 0) {
         if (argc >= 3) cmd_run_file(argv[2]);
         else cmd_run_project();
         return 0;
     }
     if (strcmp(cmd, "build") == 0) {
-        bool consolidate = false;
-        for (int i = 2; i < argc; i++)
-            if (strcmp(argv[i], "--consolidate") == 0 || strcmp(argv[i], "-c") == 0) consolidate = true;
-        cmd_build(consolidate);
+        const char *file = NULL, *output = NULL;
+        bool verbose = false;
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) verbose = true;
+            else if (strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") == 0) {
+                if (i + 1 >= argc) { fprintf(stderr, "oboe: %s requires a path\n", argv[i]); return 1; }
+                output = argv[++i];
+            }
+            else if (argv[i][0] == '-') { fprintf(stderr, "oboe: unknown build flag '%s'\n", argv[i]); return 1; }
+            else file = argv[i];
+        }
+        cmd_build(file, output, verbose);
         return 0;
     }
-    if (strcmp(cmd, "tidy") == 0) { cmd_tidy(); return 0; }
+    if (strcmp(cmd, "tidy") == 0) {
+        bool verbose = false;
+        for (int i = 2; i < argc; i++)
+            if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) verbose = true;
+        cmd_tidy(verbose);
+        return 0;
+    }
     if (strcmp(cmd, "get") == 0) { cmd_get_or_install("get", argc >= 3 ? argv[2] : NULL); return 0; }
     if (strcmp(cmd, "install") == 0) { cmd_get_or_install("install", argc >= 3 ? argv[2] : NULL); return 0; }
 

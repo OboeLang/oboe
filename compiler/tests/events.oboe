@@ -10,22 +10,28 @@
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
-import mathlib as m
-import square from mathlib
+// events: payloads, `as` binding, multiple handlers in declaration order
+event Plain = event()
+event Named = event(str name, int age)
+
+on Plain {
+    print("plain fired")
+}
+
+on Named as e {
+    print("${e.name} is ${e.age}")
+}
+
+on Named {
+    print("second handler")
+}
+
+on Named as n {
+    print("third: ${n.name}")
+}
 
 func main(array args) {
-    print(m.square(6))
-    print(square(7))
-
-    var numbers = [1, 2, 3, 4]
-    var total = 0
-    for (n in numbers) {
-        total = total + n
-    }
-    print(total)
-
-    var person = {"name": "Ada", "age": 36}
-    print(person["name"])
-    person["age"] = 37
-    print(person["age"])
+    Plain.fire()
+    Named.fire("Jade", 20)
+    Named.fire("Robin", 21)
 }

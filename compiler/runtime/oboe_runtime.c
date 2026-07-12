@@ -324,6 +324,7 @@ static void ob_sigint_handler(int sig) {
     if (ob_in_sigint) _exit(130);
     ob_in_sigint = 1;
     if (ob_sigint_fire) ob_sigint_fire();
+    fflush(NULL);
     _exit(130);
 }
 

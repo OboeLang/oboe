@@ -10,22 +10,13 @@
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
-import mathlib as m
-import square from mathlib
-
+// write() has no trailing newline; input() reads one line (null on EOF)
 func main(array args) {
-    print(m.square(6))
-    print(square(7))
-
-    var numbers = [1, 2, 3, 4]
-    var total = 0
-    for (n in numbers) {
-        total = total + n
-    }
-    print(total)
-
-    var person = {"name": "Ada", "age": 36}
-    print(person["name"])
-    person["age"] = 37
-    print(person["age"])
+    write("a")
+    write("b")
+    print("c")
+    var line = input()
+    print("got ${line}")
+    var second = input()
+    print(second ?? "eof")
 }

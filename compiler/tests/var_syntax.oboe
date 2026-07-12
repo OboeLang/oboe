@@ -10,28 +10,15 @@
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
-class Animal {
-    func init(this, string name) {
-        this.name = name
-    }
-
-    func speak(this) {
-        print("${this.name} makes a sound")
-    }
-}
-
-class Dog extends Animal {
-    func init(this, string name) {
-        this.name = name
-    }
-
-    func speak(this) {
-        print("${this.name} barks")
-    }
-}
+// the four declaration forms from the spec, plus class fields in new syntax
+var a = 1
+int b = 2
+const var c = 3
+const int d = 4
 
 class Counter {
     static int count = 0
+    string label = "counter"
 
     static func increment() {
         Counter.count = Counter.count + 1
@@ -39,23 +26,15 @@ class Counter {
 }
 
 func main(array args) {
-    var john = Animal("Generic Animal")
-    john.speak()
-
-    var rex = Dog("Rex")
-    rex.speak()
-
+    print(a + b + c + d)
+    var s = "typed"
+    string t = "and untyped"
+    print("${s} ${t}")
+    Counter.increment()
     Counter.increment()
     Counter.increment()
     print(Counter.count)
-
-    if (100 is int) {
-        print("100 is an int")
-    }
-
-    var x = 5
-    var y = x ?? 10
-    print(y)
-
-    print("ab" x 3)
+    int i = 10
+    i = i + 5
+    print(i)
 }
