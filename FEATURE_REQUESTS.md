@@ -21,6 +21,8 @@
 - Build option to generate a desktop file, perhaps using above metadata
 - Ability to choose to set these build flags in the project json
 - Syntax for choosing a C file to import based on OS
+- File operation methods?
+    - Or should this just be in the OS library
 
 # Approved but uncompleted syntax drafts
 
