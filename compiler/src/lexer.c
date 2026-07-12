@@ -21,7 +21,8 @@
 typedef struct { const char *word; TokenType type; } Keyword;
 
 static Keyword keywords[] = {
-    {"let", T_LET}, {"const", T_CONST}, {"func", T_FUNC}, {"return", T_RETURN},
+    {"let", T_LET}, {"var", T_LET}, /* `var` is the spec spelling; `let` is a legacy alias */
+    {"const", T_CONST}, {"func", T_FUNC}, {"return", T_RETURN},
     {"class", T_CLASS}, {"static", T_STATIC}, {"private", T_PRIVATE},
     {"if", T_IF}, {"else", T_ELSE}, {"while", T_WHILE}, {"for", T_FOR}, {"in", T_IN},
     {"switch", T_SWITCH}, {"case", T_CASE},
@@ -29,8 +30,71 @@ static Keyword keywords[] = {
     {"import", T_IMPORT}, {"as", T_AS}, {"from", T_FROM},
     {"true", T_TRUE}, {"false", T_FALSE}, {"null", T_NULL},
     {"and", T_AND}, {"or", T_OR}, {"is", T_IS}, {"extends", T_EXTENDS},
+    {"event", T_EVENT}, {"on", T_ON}, {"operator", T_OPERATOR}, {"cimport", T_CIMPORT},
     {NULL, T_EOF}
 };
+
+/* ---- custom operator symbols ----
+   `operator ||> (...)` declarations introduce new operator tokens. Symbols are
+   collected in a text pre-scan of each file before tokenizing (the registry is
+   global, so a symbol declared in any already-lexed file keeps lexing in later
+   files). Builtin operator spellings are excluded so `operator + (...)` never
+   changes how `+` itself lexes. */
+#define MAX_CUSTOM_OPS 64
+static char *custom_ops[MAX_CUSTOM_OPS];
+static int custom_op_count = 0;
+
+static bool is_op_char(char c) { return strchr("+-*/%<>=!&|^~?@#$:.", c) != NULL; }
+
+static bool is_builtin_op(const char *s) {
+    static const char *builtins[] = {
+        "+", "-", "*", "/", "%", "=", "==", "!=", "<", "<=", ">", ">=",
+        "&&", "||", "??", "?.", "!", "?", ".", "->", ":", NULL
+    };
+    for (int i = 0; builtins[i]; i++) if (strcmp(builtins[i], s) == 0) return true;
+    return false;
+}
+
+static void register_custom_op(const char *sym) {
+    if (is_builtin_op(sym)) return;
+    for (int i = 0; i < custom_op_count; i++) if (strcmp(custom_ops[i], sym) == 0) return;
+    if (custom_op_count >= MAX_CUSTOM_OPS) {
+        fprintf(stderr, "oboe: too many custom operators\n");
+        exit(1);
+    }
+    custom_ops[custom_op_count++] = strdup(sym);
+}
+
+static void prescan_custom_ops(const char *src, size_t len) {
+    for (size_t i = 0; i + 8 < len; i++) {
+        if (strncmp(src + i, "operator", 8) != 0) continue;
+        if (i > 0 && (isalnum((unsigned char)src[i-1]) || src[i-1] == '_')) continue;
+        size_t p = i + 8;
+        if (p < len && (isalnum((unsigned char)src[p]) || src[p] == '_')) continue;
+        while (p < len && isspace((unsigned char)src[p])) p++;
+        size_t start = p;
+        while (p < len && is_op_char(src[p])) p++;
+        if (p > start) {
+            char *sym = strndup(src + start, p - start);
+            register_custom_op(sym);
+            free(sym);
+        }
+    }
+}
+
+/* longest registered custom operator matching at src[pos], or NULL */
+static const char *match_custom_op(const char *src, size_t pos, size_t len) {
+    const char *best = NULL;
+    size_t best_len = 0;
+    for (int i = 0; i < custom_op_count; i++) {
+        size_t n = strlen(custom_ops[i]);
+        if (n > best_len && pos + n <= len && strncmp(src + pos, custom_ops[i], n) == 0) {
+            best = custom_ops[i];
+            best_len = n;
+        }
+    }
+    return best;
+}
 
 static Token make(TokenType type, const char *text, int line) {
     Token t;
@@ -102,6 +166,8 @@ Token *lex_all(const char *src, int *out_count) {
     size_t len = strlen(src);
     int line = 1;
 
+    prescan_custom_ops(src, len);
+
     while (pos < len) {
         char c = src[pos];
         if (c == '\n') { line++; pos++; continue; }
@@ -109,6 +175,14 @@ Token *lex_all(const char *src, int *out_count) {
         if (c == '/' && pos + 1 < len && src[pos + 1] == '/') {
             while (pos < len && src[pos] != '\n') pos++;
             continue;
+        }
+        if (is_op_char(c)) {
+            const char *cop = match_custom_op(src, pos, len);
+            if (cop) {
+                push_tok(&buf, make(T_CUSTOMOP, cop, line));
+                pos += strlen(cop);
+                continue;
+            }
         }
         if (c == '"') {
             pos++;

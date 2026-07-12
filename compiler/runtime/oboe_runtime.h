@@ -101,6 +101,8 @@ OboeValue ob_index_set(OboeValue container, OboeValue key, OboeValue value);
 
 /* io / conversion */
 void ob_print(OboeValue v);
+void ob_write(OboeValue v);  /* print without a trailing newline */
+OboeValue ob_input(void);    /* reads one line from stdin (newline stripped); null on EOF */
 OboeValue ob_str(OboeValue v);
 char *ob_to_cstr(OboeValue v); /* borrowed pointer, valid until value freed */
 OboeValue ob_interpolate(int count, ...); /* args are OboeValue strings, concatenated */
@@ -140,6 +142,21 @@ bool ob_is_object_of(OboeValue v, const OboeClassInfo *cls);
 typedef OboeValue (*OboeOpFunc)(OboeValue, OboeValue);
 void ob_register_operator(const OboeClassInfo *cls, const char *op, OboeOpFunc fn);
 OboeValue ob_binop(const char *op, OboeValue a, OboeValue b, OboeOpFunc fallback);
+/* fallback for operators that only exist as class overloads: errors at runtime
+   when neither operand's class provides a handler */
+OboeValue ob_op_missing(OboeValue a, OboeValue b);
+
+/* events: installs a SIGINT handler that fires the KeyboardInterruptEvent
+   handlers once and then exits; a second SIGINT while they run exits
+   immediately. */
+void ob_install_sigint(void (*fire)(void));
+
+/* FFI (cimport): resolves `sym` in `lib` via dlopen/dlsym (exits on failure).
+   ob_ffi_call invokes the symbol with up to 8 word-sized arguments — ints,
+   bools and nulls pass by value, strings pass as C string pointers — and
+   wraps the word-sized return value as an int. */
+void *ob_ffi_sym(const char *lib, const char *sym);
+OboeValue ob_ffi_call(void *fn, int nargs, ...);
 
 /* range() and array-args entry point */
 OboeValue ob_range(int64_t a, int64_t b);

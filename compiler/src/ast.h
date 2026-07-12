@@ -128,6 +128,7 @@ struct FuncDecl {
     Param *params;
     bool is_static;
     bool is_private;
+    char *op_symbol;   /* non-NULL for `operator <sym> (...)` declarations */
     Stmt **body;
     int body_count;
     int line;
@@ -152,7 +153,10 @@ struct ClassDecl {
     int line;
 };
 
-typedef enum { DECL_FUNC, DECL_CLASS, DECL_IMPORT, DECL_STMT } DeclKind;
+typedef enum {
+    DECL_FUNC, DECL_CLASS, DECL_IMPORT, DECL_STMT,
+    DECL_OPERATOR, DECL_EVENT, DECL_ON, DECL_CIMPORT
+} DeclKind;
 
 typedef struct {
     char *module;      /* module name imported */
@@ -161,13 +165,36 @@ typedef struct {
     int member_count;
 } ImportDecl;
 
+typedef struct {
+    char *name;        /* event name, e.g. MyEvent */
+    Param *params;     /* payload fields, e.g. (str name) */
+    int line;
+} EventDecl;
+
+typedef struct {
+    char *event_name;
+    char *var_name;    /* `as e` binding, may be NULL */
+    Stmt **body;
+    int body_count;
+    int line;
+} OnDecl;
+
+typedef struct {
+    char *name;        /* imported C symbol */
+    char *lib;         /* shared library path/soname */
+    int line;
+} CImportDecl;
+
 struct Decl {
     DeclKind kind;
     union {
-        FuncDecl *func;
+        FuncDecl *func;   /* DECL_FUNC and DECL_OPERATOR */
         ClassDecl *klass;
         ImportDecl import;
         Stmt *stmt;
+        EventDecl event;
+        OnDecl on;
+        CImportDecl cimport;
     } as;
     Decl *next;
 };

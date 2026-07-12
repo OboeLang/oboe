@@ -16,6 +16,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <signal.h>
+#include <unistd.h>
+#include <dlfcn.h>
 
 OboeExceptionFrame *ob_exc_stack = NULL;
 OboeValue ob_current_exception;
@@ -229,6 +232,22 @@ void ob_print(OboeValue v) {
     free(s);
 }
 
+void ob_write(OboeValue v) {
+    char *s = ob_to_cstr(v);
+    printf("%s", s);
+    fflush(stdout);
+    free(s);
+}
+
+OboeValue ob_input(void) {
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n = getline(&line, &cap, stdin);
+    if (n < 0) { free(line); return ob_null(); }
+    if (n > 0 && line[n - 1] == '\n') line[n - 1] = '\0';
+    return ob_string_take(line);
+}
+
 OboeValue ob_str(OboeValue v) {
     if (v.tag == OB_STRING) return ob_string(v.as.s);
     char *s = ob_to_cstr(v);
@@ -257,15 +276,15 @@ OboeValue ob_interpolate(int count, ...) {
 }
 
 #define OB_MAX_OPERATORS 256
-typedef struct { const OboeClassInfo *cls; char op[4]; OboeOpFunc fn; } OboeOpEntry;
+typedef struct { const OboeClassInfo *cls; char op[16]; OboeOpFunc fn; } OboeOpEntry;
 static OboeOpEntry ob_op_table[OB_MAX_OPERATORS];
 static int ob_op_count = 0;
 
 void ob_register_operator(const OboeClassInfo *cls, const char *op, OboeOpFunc fn) {
     if (ob_op_count >= OB_MAX_OPERATORS) { fprintf(stderr, "oboe: too many operator overloads\n"); exit(1); }
     ob_op_table[ob_op_count].cls = cls;
-    strncpy(ob_op_table[ob_op_count].op, op, 3);
-    ob_op_table[ob_op_count].op[3] = '\0';
+    strncpy(ob_op_table[ob_op_count].op, op, 15);
+    ob_op_table[ob_op_count].op[15] = '\0';
     ob_op_table[ob_op_count].fn = fn;
     ob_op_count++;
 }
@@ -286,6 +305,112 @@ OboeValue ob_binop(const char *op, OboeValue a, OboeValue b, OboeOpFunc fallback
         if (fn) return fn(a, b);
     }
     return fallback(a, b);
+}
+
+OboeValue ob_op_missing(OboeValue a, OboeValue b) {
+    (void)a; (void)b;
+    fprintf(stderr, "oboe: no operator overload matches these operands\n");
+    exit(1);
+}
+
+/* ---- events: SIGINT handling ----
+   First ^C: run the KeyboardInterruptEvent handlers, then exit.
+   Second ^C while the handlers run: exit immediately. */
+static void (*ob_sigint_fire)(void) = NULL;
+static volatile sig_atomic_t ob_in_sigint = 0;
+
+static void ob_sigint_handler(int sig) {
+    (void)sig;
+    if (ob_in_sigint) _exit(130);
+    ob_in_sigint = 1;
+    if (ob_sigint_fire) ob_sigint_fire();
+    _exit(130);
+}
+
+void ob_install_sigint(void (*fire)(void)) {
+    ob_sigint_fire = fire;
+    struct sigaction sa = {0};
+    sa.sa_handler = ob_sigint_handler;
+    sigemptyset(&sa.sa_mask);
+    /* SA_NODEFER so a second SIGINT is delivered while the handlers run */
+    sa.sa_flags = SA_NODEFER;
+    sigaction(SIGINT, &sa, NULL);
+}
+
+/* ---- FFI ---- */
+#define OB_MAX_FFI_LIBS 32
+static struct { char *name; void *handle; } ob_ffi_libs[OB_MAX_FFI_LIBS];
+static int ob_ffi_lib_count = 0;
+
+void *ob_ffi_sym(const char *lib, const char *sym) {
+    void *handle = NULL;
+    for (int i = 0; i < ob_ffi_lib_count; i++) {
+        if (strcmp(ob_ffi_libs[i].name, lib) == 0) { handle = ob_ffi_libs[i].handle; break; }
+    }
+    if (!handle) {
+        handle = dlopen(lib, RTLD_NOW | RTLD_GLOBAL);
+        if (!handle) {
+            fprintf(stderr, "oboe: cannot load library '%s': %s\n", lib, dlerror());
+            exit(1);
+        }
+        if (ob_ffi_lib_count < OB_MAX_FFI_LIBS) {
+            ob_ffi_libs[ob_ffi_lib_count].name = strdup(lib);
+            ob_ffi_libs[ob_ffi_lib_count].handle = handle;
+            ob_ffi_lib_count++;
+        }
+    }
+    void *fn = dlsym(handle, sym);
+    if (!fn) {
+        fprintf(stderr, "oboe: cannot find symbol '%s' in '%s'\n", sym, lib);
+        exit(1);
+    }
+    return fn;
+}
+
+static intptr_t ob_ffi_word(OboeValue v) {
+    switch (v.tag) {
+        case OB_NULL: return 0;
+        case OB_INT: return (intptr_t)v.as.i;
+        case OB_BOOL: return v.as.b ? 1 : 0;
+        case OB_STRING: return (intptr_t)v.as.s;
+        default:
+            fprintf(stderr, "oboe: cannot pass this value through the C FFI\n");
+            exit(1);
+    }
+}
+
+OboeValue ob_ffi_call(void *fn, int nargs, ...) {
+    if (nargs > 8) {
+        fprintf(stderr, "oboe: FFI calls support at most 8 arguments\n");
+        exit(1);
+    }
+    intptr_t a[8] = {0};
+    va_list ap;
+    va_start(ap, nargs);
+    for (int i = 0; i < nargs; i++) a[i] = ob_ffi_word(va_arg(ap, OboeValue));
+    va_end(ap);
+    typedef intptr_t (*F0)(void);
+    typedef intptr_t (*F1)(intptr_t);
+    typedef intptr_t (*F2)(intptr_t, intptr_t);
+    typedef intptr_t (*F3)(intptr_t, intptr_t, intptr_t);
+    typedef intptr_t (*F4)(intptr_t, intptr_t, intptr_t, intptr_t);
+    typedef intptr_t (*F5)(intptr_t, intptr_t, intptr_t, intptr_t, intptr_t);
+    typedef intptr_t (*F6)(intptr_t, intptr_t, intptr_t, intptr_t, intptr_t, intptr_t);
+    typedef intptr_t (*F7)(intptr_t, intptr_t, intptr_t, intptr_t, intptr_t, intptr_t, intptr_t);
+    typedef intptr_t (*F8)(intptr_t, intptr_t, intptr_t, intptr_t, intptr_t, intptr_t, intptr_t, intptr_t);
+    intptr_t r = 0;
+    switch (nargs) {
+        case 0: r = ((F0)fn)(); break;
+        case 1: r = ((F1)fn)(a[0]); break;
+        case 2: r = ((F2)fn)(a[0], a[1]); break;
+        case 3: r = ((F3)fn)(a[0], a[1], a[2]); break;
+        case 4: r = ((F4)fn)(a[0], a[1], a[2], a[3]); break;
+        case 5: r = ((F5)fn)(a[0], a[1], a[2], a[3], a[4]); break;
+        case 6: r = ((F6)fn)(a[0], a[1], a[2], a[3], a[4], a[5]); break;
+        case 7: r = ((F7)fn)(a[0], a[1], a[2], a[3], a[4], a[5], a[6]); break;
+        case 8: r = ((F8)fn)(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]); break;
+    }
+    return ob_int((int64_t)r);
 }
 
 static void ob_type_error(const char *op) {

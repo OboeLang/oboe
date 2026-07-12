@@ -37,6 +37,30 @@ static int g_import_direct_count = 0;
 static char **g_processed_modules = NULL;
 static int g_processed_module_count = 0;
 
+/* top-level `operator <sym> (a, b)` declarations: symbol -> generated C function */
+typedef struct { char *symbol; char *cfunc; FuncDecl *decl; } UserOp;
+static UserOp *g_user_ops = NULL;
+static int g_user_op_count = 0;
+
+/* class `operator <sym> (this, other)` overloads, for registration in static init
+   and for knowing a symbol is meaningful even without a top-level definition */
+typedef struct { ClassDecl *cls; char *symbol; char *cfunc; FuncDecl *decl; } ClassOp;
+static ClassOp *g_class_ops = NULL;
+static int g_class_op_count = 0;
+
+/* events and their `on` handlers */
+typedef struct { EventDecl *decl; ClassDecl *cls; } EventInfo;
+static EventInfo *g_events = NULL;
+static int g_event_count = 0;
+typedef struct { OnDecl *decl; char *cfunc; } HandlerInfo;
+static HandlerInfo *g_handlers = NULL;
+static int g_handler_count = 0;
+
+/* cimport FFI bindings: Oboe-visible name -> library */
+typedef struct { char *name; char *lib; } FfiBinding;
+static FfiBinding *g_ffi = NULL;
+static int g_ffi_count = 0;
+
 static FILE *OUT;
 
 static void codegen_error(int line, const char *msg) {
@@ -76,6 +100,30 @@ static ClassDecl *find_method_owner(ClassDecl *c, const char *name, FuncDecl **o
         if (m) { *out = m; return c; }
         c = c->parent_name ? find_class(c->parent_name) : NULL;
     }
+    return NULL;
+}
+
+static UserOp *find_user_op(const char *sym) {
+    for (int i = 0; i < g_user_op_count; i++)
+        if (strcmp(g_user_ops[i].symbol, sym) == 0) return &g_user_ops[i];
+    return NULL;
+}
+
+static bool class_op_exists(const char *sym) {
+    for (int i = 0; i < g_class_op_count; i++)
+        if (strcmp(g_class_ops[i].symbol, sym) == 0) return true;
+    return false;
+}
+
+static EventInfo *find_event(const char *name) {
+    for (int i = 0; i < g_event_count; i++)
+        if (strcmp(g_events[i].decl->name, name) == 0) return &g_events[i];
+    return NULL;
+}
+
+static FfiBinding *find_ffi(const char *name) {
+    for (int i = 0; i < g_ffi_count; i++)
+        if (strcmp(g_ffi[i].name, name) == 0) return &g_ffi[i];
     return NULL;
 }
 
@@ -331,6 +379,13 @@ static char *gen_expr(Expr *e) {
                     strcmp(op, ">") == 0 ? "ob_gt" :
                     strcmp(op, ">=") == 0 ? "ob_gte" :
                     strcmp(op, "x") == 0 ? "ob_repeat" : NULL;
+                if (!fallback) {
+                    /* user-declared operator: dispatch through the overload
+                       registry, falling back to the top-level definition */
+                    UserOp *uo = find_user_op(op);
+                    if (uo) fallback = uo->cfunc;
+                    else if (class_op_exists(op)) fallback = "ob_op_missing";
+                }
                 if (!fallback) codegen_error(e->line, "unknown binary operator");
                 result = fmt("ob_binop(\"%s\", %s, %s, %s)", op, l, r, fallback);
             }
@@ -370,6 +425,15 @@ static char *gen_expr(Expr *e) {
                     char *r = fmt("(ob_print(%s), ob_null())", a);
                     free(a);
                     return r;
+                }
+                if (strcmp(callee->as.ident, "write") == 0 && e->as.call.arg_count == 1) {
+                    char *a = gen_expr(e->as.call.args[0]);
+                    char *r = fmt("(ob_write(%s), ob_null())", a);
+                    free(a);
+                    return r;
+                }
+                if (strcmp(callee->as.ident, "input") == 0 && e->as.call.arg_count == 0) {
+                    return strdup("ob_input()");
                 }
                 if (strcmp(callee->as.ident, "str") == 0 && e->as.call.arg_count == 1) {
                     char *a = gen_expr(e->as.call.args[0]);
@@ -411,6 +475,19 @@ static char *gen_expr(Expr *e) {
                     for (int i = 0; i < argc; i++) {
                         char *a = gen_expr(e->as.call.args[i]);
                         off += snprintf(buf + off, sizeof(buf) - off, "%s%s", i ? ", " : "", a);
+                        free(a);
+                    }
+                    off += snprintf(buf + off, sizeof(buf) - off, ")");
+                    return strdup(buf);
+                }
+                /* cimport FFI binding */
+                FfiBinding *ffi = find_ffi(callee->as.ident);
+                if (ffi) {
+                    char buf[4096];
+                    int off = snprintf(buf, sizeof buf, "ob_ffi_call(__ffi_%s, %d", ffi->name, e->as.call.arg_count);
+                    for (int i = 0; i < e->as.call.arg_count; i++) {
+                        char *a = gen_expr(e->as.call.args[i]);
+                        off += snprintf(buf + off, sizeof(buf) - off, ", %s", a);
                         free(a);
                     }
                     off += snprintf(buf + off, sizeof(buf) - off, ")");
@@ -738,6 +815,12 @@ static void emit_class_predecls(ClassDecl *c) {
     if (init_count == 0) fprintf(OUT, "OboeValue %s__new_default(void);\n", c->name);
     for (int i = 0; i < c->method_count; i++) {
         FuncDecl *m = c->methods[i];
+        if (m->op_symbol) {
+            for (int j = 0; j < g_class_op_count; j++)
+                if (g_class_ops[j].decl == m)
+                    fprintf(OUT, "static OboeValue %s(OboeValue __self, OboeValue __rhs);\n", g_class_ops[j].cfunc);
+            continue;
+        }
         if (strcmp(m->name, "init") == 0) {
             fprintf(OUT, "void %s__init_%d(%s *this", c->name, idx, c->name);
             for (Param *p = m->params; p; p = p->next) {
@@ -856,10 +939,36 @@ static void gen_class(ClassDecl *c) {
     }
     pop_scope();
 
+    /* operator overloads: emitted as (self, rhs) pairs matching OboeOpFunc so
+       they can be registered with the runtime dispatch table */
+    for (int i = 0; i < c->method_count; i++) {
+        FuncDecl *m = c->methods[i];
+        if (!m->op_symbol) continue;
+        const char *cfunc = NULL;
+        for (int j = 0; j < g_class_op_count; j++) if (g_class_ops[j].decl == m) cfunc = g_class_ops[j].cfunc;
+        Param *self = m->params;
+        if (!self || strcmp(self->name, "this") != 0 || !self->next || self->next->next)
+            codegen_error(m->line, "a class operator must take exactly (this, other)");
+        Param *rhs = self->next;
+        fprintf(OUT, "static OboeValue %s(OboeValue __self, OboeValue %s) {\n", cfunc, rhs->name);
+        fprintf(OUT, "    %s *this = (%s*)__self.as.obj;\n", c->name, c->name);
+        fprintf(OUT, "    (void)this;\n");
+        push_scope();
+        define_var("this", c->name);
+        define_var(rhs->name, (rhs->type_name && find_class(rhs->type_name)) ? rhs->type_name : NULL);
+        const char *saved_class = current_class;
+        current_class = c->name;
+        gen_stmt_list(m->body, m->body_count, 4);
+        current_class = saved_class;
+        pop_scope();
+        fprintf(OUT, "    return ob_null();\n");
+        fprintf(OUT, "}\n\n");
+    }
+
     /* regular methods */
     for (int i = 0; i < c->method_count; i++) {
         FuncDecl *m = c->methods[i];
-        if (strcmp(m->name, "init") == 0) continue;
+        if (strcmp(m->name, "init") == 0 || m->op_symbol) continue;
         if (m->is_static) {
             fprintf(OUT, "OboeValue %s__%s(", c->name, m->name);
             bool first = true;
@@ -1022,14 +1131,29 @@ static void infer_instance_fields(ClassDecl *c) {
     g_scan_method = NULL;
 }
 
+static void add_class(ClassDecl *c) {
+    g_classes = realloc(g_classes, (g_class_count + 1) * sizeof(ClassDecl *));
+    g_class_emitted = realloc(g_class_emitted, (g_class_count + 1) * sizeof(bool));
+    g_class_emitted[g_class_count] = false;
+    g_classes[g_class_count++] = c;
+
+    /* register the class's operator overloads so expressions can dispatch on
+       them even before the definitions are emitted */
+    for (int i = 0; i < c->method_count; i++) {
+        FuncDecl *m = c->methods[i];
+        if (!m->op_symbol) continue;
+        g_class_ops = realloc(g_class_ops, (g_class_op_count + 1) * sizeof(ClassOp));
+        g_class_ops[g_class_op_count].cls = c;
+        g_class_ops[g_class_op_count].symbol = strdup(m->op_symbol);
+        g_class_ops[g_class_op_count].cfunc = fmt("%s__opov_%d", c->name, g_class_op_count);
+        g_class_ops[g_class_op_count].decl = m;
+        g_class_op_count++;
+    }
+}
+
 static void collect_classes(Decl *decls) {
     for (Decl *d = decls; d; d = d->next) {
-        if (d->kind == DECL_CLASS) {
-            g_classes = realloc(g_classes, (g_class_count + 1) * sizeof(ClassDecl *));
-            g_class_emitted = realloc(g_class_emitted, (g_class_count + 1) * sizeof(bool));
-            g_class_emitted[g_class_count] = false;
-            g_classes[g_class_count++] = d->as.klass;
-        }
+        if (d->kind == DECL_CLASS) add_class(d->as.klass);
     }
 }
 
@@ -1084,6 +1208,8 @@ static void process_import(ImportDecl *imp) {
 
     collect_classes(modprog->decls);
     for (Decl *d = modprog->decls; d; d = d->next) {
+        if (d->kind == DECL_EVENT || d->kind == DECL_ON || d->kind == DECL_OPERATOR || d->kind == DECL_CIMPORT)
+            codegen_error(0, "events, top-level operators and cimport are not yet supported inside imported modules");
         if (d->kind == DECL_IMPORT) process_import(&d->as.import);
     }
     for (Decl *d = modprog->decls; d; d = d->next) {
@@ -1113,9 +1239,176 @@ void codegen_set_source_dir(const char *dir) {
     g_source_dir = strdup(dir);
 }
 
+/* ============================= events / operators / FFI ============================= */
+
+/* Each event gets a synthesized class whose fields are the payload params;
+   `on E as e` handlers bind `e` to that class so `e.field` resolves like any
+   member access, and `E.fire(...)` resolves like a static call to E__fire. */
+static void register_event_decl(EventDecl *ev) {
+    ClassDecl *c = calloc(1, sizeof(ClassDecl));
+    c->name = strdup(ev->name);
+    FieldDecl head = {0};
+    FieldDecl *tail = &head;
+    for (Param *p = ev->params; p; p = p->next) {
+        FieldDecl *fd = calloc(1, sizeof(FieldDecl));
+        fd->name = strdup(p->name);
+        fd->type_name = p->type_name ? strdup(p->type_name) : NULL;
+        tail->next = fd;
+        tail = fd;
+    }
+    c->fields = head.next;
+    add_class(c);
+    g_events = realloc(g_events, (g_event_count + 1) * sizeof(EventInfo));
+    g_events[g_event_count].decl = ev;
+    g_events[g_event_count].cls = c;
+    g_event_count++;
+}
+
+static void collect_extras(Decl *decls) {
+    for (Decl *d = decls; d; d = d->next) {
+        switch (d->kind) {
+            case DECL_OPERATOR: {
+                FuncDecl *f = d->as.func;
+                int pc = 0;
+                for (Param *p = f->params; p; p = p->next) pc++;
+                if (pc != 2) codegen_error(f->line, "a top-level operator must take exactly two parameters");
+                if (find_user_op(f->op_symbol)) codegen_error(f->line, "operator is already defined");
+                g_user_ops = realloc(g_user_ops, (g_user_op_count + 1) * sizeof(UserOp));
+                g_user_ops[g_user_op_count].symbol = strdup(f->op_symbol);
+                g_user_ops[g_user_op_count].cfunc = fmt("__oboe_userop_%d", g_user_op_count);
+                g_user_ops[g_user_op_count].decl = f;
+                g_user_op_count++;
+                break;
+            }
+            case DECL_EVENT:
+                if (find_event(d->as.event.name) || find_class(d->as.event.name))
+                    codegen_error(d->as.event.line, "an event or class with this name already exists");
+                register_event_decl(&d->as.event);
+                break;
+            case DECL_ON:
+                g_handlers = realloc(g_handlers, (g_handler_count + 1) * sizeof(HandlerInfo));
+                g_handlers[g_handler_count].decl = &d->as.on;
+                g_handlers[g_handler_count].cfunc = fmt("__on_%s_%d", d->as.on.event_name, g_handler_count);
+                g_handler_count++;
+                break;
+            case DECL_CIMPORT:
+                g_ffi = realloc(g_ffi, (g_ffi_count + 1) * sizeof(FfiBinding));
+                g_ffi[g_ffi_count].name = strdup(d->as.cimport.name);
+                g_ffi[g_ffi_count].lib = strdup(d->as.cimport.lib);
+                g_ffi_count++;
+                break;
+            default: break;
+        }
+    }
+}
+
+/* The built-in KeyboardInterruptEvent exists without a declaration; synthesize
+   it when a handler references it. Any other unknown event is an error. */
+static void finalize_events(void) {
+    for (int i = 0; i < g_handler_count; i++) {
+        OnDecl *h = g_handlers[i].decl;
+        if (find_event(h->event_name)) continue;
+        if (strcmp(h->event_name, "KeyboardInterruptEvent") == 0) {
+            EventDecl *ev = calloc(1, sizeof(EventDecl));
+            ev->name = strdup("KeyboardInterruptEvent");
+            register_event_decl(ev);
+        } else {
+            codegen_error(h->line, "'on' handler references an undeclared event");
+        }
+    }
+}
+
+static bool has_kbint_handlers(void) {
+    for (int i = 0; i < g_handler_count; i++)
+        if (strcmp(g_handlers[i].decl->event_name, "KeyboardInterruptEvent") == 0) return true;
+    return false;
+}
+
+static void emit_extras_predecls(void) {
+    for (int i = 0; i < g_user_op_count; i++)
+        fprintf(OUT, "static OboeValue %s(OboeValue, OboeValue);\n", g_user_ops[i].cfunc);
+    for (int i = 0; i < g_handler_count; i++)
+        fprintf(OUT, "static OboeValue %s(OboeValue __ev);\n", g_handlers[i].cfunc);
+    for (int i = 0; i < g_event_count; i++) {
+        fprintf(OUT, "OboeValue %s__fire(", g_events[i].decl->name);
+        bool first = true;
+        for (Param *p = g_events[i].decl->params; p; p = p->next) {
+            if (!first) fprintf(OUT, ", ");
+            fprintf(OUT, "OboeValue %s", p->name);
+            first = false;
+        }
+        if (first) fprintf(OUT, "void");
+        fprintf(OUT, ");\n");
+    }
+    for (int i = 0; i < g_ffi_count; i++)
+        fprintf(OUT, "static void *__ffi_%s;\n", g_ffi[i].name);
+}
+
+static void emit_extras_defs(void) {
+    /* top-level custom operators */
+    for (int i = 0; i < g_user_op_count; i++) {
+        FuncDecl *f = g_user_ops[i].decl;
+        Param *a = f->params, *b = f->params->next;
+        fprintf(OUT, "static OboeValue %s(OboeValue %s, OboeValue %s) {\n", g_user_ops[i].cfunc, a->name, b->name);
+        push_scope();
+        define_var(a->name, (a->type_name && find_class(a->type_name)) ? a->type_name : NULL);
+        define_var(b->name, (b->type_name && find_class(b->type_name)) ? b->type_name : NULL);
+        gen_stmt_list(f->body, f->body_count, 4);
+        pop_scope();
+        fprintf(OUT, "    return ob_null();\n");
+        fprintf(OUT, "}\n\n");
+    }
+
+    /* event handlers, in declaration order */
+    for (int i = 0; i < g_handler_count; i++) {
+        OnDecl *h = g_handlers[i].decl;
+        fprintf(OUT, "static OboeValue %s(OboeValue __ev) {\n", g_handlers[i].cfunc);
+        fprintf(OUT, "    (void)__ev;\n");
+        push_scope();
+        if (h->var_name) {
+            fprintf(OUT, "    OboeValue %s = __ev;\n", h->var_name);
+            define_var(h->var_name, h->event_name);
+        }
+        gen_stmt_list(h->body, h->body_count, 4);
+        pop_scope();
+        fprintf(OUT, "    return ob_null();\n");
+        fprintf(OUT, "}\n\n");
+    }
+
+    /* fire functions: build the payload object, then invoke every handler */
+    for (int i = 0; i < g_event_count; i++) {
+        EventDecl *ev = g_events[i].decl;
+        fprintf(OUT, "OboeValue %s__fire(", ev->name);
+        bool first = true;
+        for (Param *p = ev->params; p; p = p->next) {
+            if (!first) fprintf(OUT, ", ");
+            fprintf(OUT, "OboeValue %s", p->name);
+            first = false;
+        }
+        if (first) fprintf(OUT, "void");
+        fprintf(OUT, ") {\n");
+        fprintf(OUT, "    %s *obj = calloc(1, sizeof(%s));\n", ev->name, ev->name);
+        fprintf(OUT, "    ((OboeObject*)obj)->cls = &%s__classinfo;\n", ev->name);
+        for (Param *p = ev->params; p; p = p->next)
+            fprintf(OUT, "    obj->%s = %s;\n", p->name, p->name);
+        fprintf(OUT, "    OboeValue __ev = ob_object_wrap(obj);\n");
+        fprintf(OUT, "    (void)__ev;\n");
+        for (int j = 0; j < g_handler_count; j++)
+            if (strcmp(g_handlers[j].decl->event_name, ev->name) == 0)
+                fprintf(OUT, "    %s(__ev);\n", g_handlers[j].cfunc);
+        fprintf(OUT, "    return ob_null();\n");
+        fprintf(OUT, "}\n\n");
+    }
+
+    if (has_kbint_handlers())
+        fprintf(OUT, "static void __oboe_fire_kbint(void) { KeyboardInterruptEvent__fire(); }\n\n");
+}
+
 void codegen_program(Program *prog, FILE *out) {
     OUT = out;
     collect_classes(prog->decls);
+    collect_extras(prog->decls);
+    finalize_events();
 
     fprintf(out, "#include \"oboe_runtime.h\"\n#include <stdlib.h>\n#include <stdio.h>\n\n");
 
@@ -1132,6 +1425,7 @@ void codegen_program(Program *prog, FILE *out) {
         if (d->kind == DECL_CLASS) emit_class_predecls(d->as.klass);
         else if (d->kind == DECL_FUNC) emit_func_prototype(NULL, NULL, d->as.func);
     }
+    emit_extras_predecls();
     fprintf(out, "\n");
 
     bool has_main = false;
@@ -1144,9 +1438,15 @@ void codegen_program(Program *prog, FILE *out) {
         if (d->kind == DECL_CLASS) gen_class(d->as.klass);
         else if (d->kind == DECL_FUNC) gen_func_def(NULL, NULL, d->as.func);
     }
+    emit_extras_defs();
 
-    /* static field initializers */
+    /* static field initializers, operator registrations, FFI resolution */
     fprintf(out, "static void __oboe_static_init(void) {\n");
+    for (int i = 0; i < g_class_op_count; i++)
+        fprintf(out, "    ob_register_operator(&%s__classinfo, \"%s\", %s);\n",
+                g_class_ops[i].cls->name, g_class_ops[i].symbol, g_class_ops[i].cfunc);
+    for (int i = 0; i < g_ffi_count; i++)
+        fprintf(out, "    __ffi_%s = ob_ffi_sym(\"%s\", \"%s\");\n", g_ffi[i].name, g_ffi[i].lib, g_ffi[i].name);
     for (int i = 0; i < g_class_count; i++) {
         ClassDecl *c = g_classes[i];
         const char *saved_class = current_class;
@@ -1171,6 +1471,7 @@ void codegen_program(Program *prog, FILE *out) {
 
     fprintf(out, "int main(int argc, char **argv) {\n");
     fprintf(out, "    __oboe_static_init();\n");
+    if (has_kbint_handlers()) fprintf(out, "    ob_install_sigint(__oboe_fire_kbint);\n");
     fprintf(out, "    __oboe_toplevel();\n");
     if (has_main) fprintf(out, "    oboe_user_main(ob_args_from_argv(argc, argv));\n");
     fprintf(out, "    return 0;\n");

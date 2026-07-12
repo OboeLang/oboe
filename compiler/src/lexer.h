@@ -25,6 +25,7 @@ typedef enum {
     T_IMPORT, T_AS, T_FROM,
     T_TRUE, T_FALSE, T_NULL,
     T_AND, T_OR, T_IS, T_X_OP, T_EXTENDS,
+    T_EVENT, T_ON, T_OPERATOR, T_CIMPORT,
     /* punctuation / operators */
     T_LBRACE, T_RBRACE, T_LPAREN, T_RPAREN, T_LBRACKET, T_RBRACKET,
     T_COMMA, T_DOT, T_COLON, T_SEMI,
@@ -32,7 +33,8 @@ typedef enum {
     T_ASSIGN, T_EQ, T_NEQ, T_LT, T_LTE, T_GT, T_GTE,
     T_NOT, T_ANDAND, T_OROR,
     T_QQ, T_QDOT, T_QUESTION,
-    T_ARROW
+    T_ARROW,
+    T_CUSTOMOP /* a user-declared operator symbol, e.g. `||>`; text holds the symbol */
 } TokenType;
 
 typedef struct {

@@ -340,12 +340,29 @@ static Expr *parse_equality(Parser *p) {
     return e;
 }
 
-static Expr *parse_and(Parser *p) {
+/* user-declared operators (`operator ||> (...)`) bind looser than equality
+   and tighter than `and`, left-associative */
+static Expr *parse_custom_op(Parser *p) {
     Expr *e = parse_equality(p);
+    while (check(p, T_CUSTOMOP)) {
+        int line = peek(p)->line;
+        Token *op = advance(p);
+        Expr *rhs = parse_equality(p);
+        Expr *b = new_expr(EXPR_BINARY, line);
+        b->as.binary.op = strdup(op->text);
+        b->as.binary.l = e;
+        b->as.binary.r = rhs;
+        e = b;
+    }
+    return e;
+}
+
+static Expr *parse_and(Parser *p) {
+    Expr *e = parse_custom_op(p);
     while (check(p, T_ANDAND) || check(p, T_AND)) {
         int line = peek(p)->line;
         advance(p);
-        Expr *rhs = parse_equality(p);
+        Expr *rhs = parse_custom_op(p);
         Expr *b = new_expr(EXPR_BINARY, line);
         b->as.binary.op = strdup("&&");
         b->as.binary.l = e;
@@ -439,6 +456,7 @@ static Param *parse_params(Parser *p) {
 /* ---------- statements ---------- */
 static Stmt *parse_let(Parser *p, bool is_const) {
     int line = peek(p)->line;
+    match(p, T_LET); /* `const var x` / `const let x` — the keyword is optional filler */
     char *type_name, *name;
     parse_typed_name(p, &type_name, &name);
     Expr *init = NULL;
@@ -606,8 +624,20 @@ static Stmt *parse_throw(Parser *p) {
 
 static Stmt *parse_statement(Parser *p) {
     int line = peek(p)->line;
+    /* `var this.x = v` inside a method is field assignment, not a declaration */
+    if (check(p, T_LET) && peekAt(p, 1)->type == T_IDENT && peekAt(p, 2)->type == T_DOT) {
+        advance(p);
+        Expr *e = parse_expression(p);
+        match(p, T_SEMI);
+        Stmt *s = new_stmt(STMT_EXPR, line);
+        s->as.expr_stmt.expr = e;
+        return s;
+    }
     if (match(p, T_LET)) return parse_let(p, false);
     if (match(p, T_CONST)) return parse_let(p, true);
+    /* explicitly typed declaration without keyword: `int x = 1` */
+    if (check(p, T_IDENT) && peekAt(p, 1)->type == T_IDENT && peekAt(p, 2)->type == T_ASSIGN)
+        return parse_let(p, false);
     if (match(p, T_RETURN)) {
         Expr *value = NULL;
         if (!check(p, T_RBRACE) && !check(p, T_SEMI)) value = parse_expression(p);
@@ -673,6 +703,23 @@ static FuncDecl *parse_func(Parser *p, bool is_static, bool is_private) {
     return f;
 }
 
+/* `operator <sym> (params) { body }` — the T_OPERATOR keyword has already been
+   consumed. The symbol is either a T_CUSTOMOP token or any builtin operator
+   token (for class overloads like `operator + (this, Vector2 other)`). */
+static FuncDecl *parse_operator_decl(Parser *p) {
+    int line = peek(p)->line;
+    Token *sym = advance(p);
+    if (!sym->text || !*sym->text || sym->type == T_LPAREN)
+        fail(p, "expected an operator symbol after 'operator'");
+    FuncDecl *f = calloc(1, sizeof(FuncDecl));
+    f->name = strdup("operator");
+    f->op_symbol = strdup(sym->text);
+    f->params = parse_params(p);
+    parse_block(p, &f->body, &f->body_count);
+    f->line = line;
+    return f;
+}
+
 static ClassDecl *parse_class(Parser *p) {
     int line = peek(p)->line;
     Token *name = expect(p, T_IDENT, "expected class name");
@@ -698,9 +745,16 @@ static ClassDecl *parse_class(Parser *p) {
             FuncDecl *m = parse_func(p, is_static, is_private);
             if (mcount == mcap) { mcap = mcap ? mcap * 2 : 8; methods = realloc(methods, mcap * sizeof(FuncDecl *)); }
             methods[mcount++] = m;
-        } else if (check(p, T_CONST) || check(p, T_LET)) {
+        } else if (check(p, T_OPERATOR)) {
+            advance(p);
+            FuncDecl *m = parse_operator_decl(p);
+            if (mcount == mcap) { mcap = mcap ? mcap * 2 : 8; methods = realloc(methods, mcap * sizeof(FuncDecl *)); }
+            methods[mcount++] = m;
+        } else if (check(p, T_CONST) || check(p, T_LET) ||
+                   (check(p, T_IDENT) && peekAt(p, 1)->type == T_IDENT)) {
+            /* `const [var|type] name`, `var name`, or keywordless `type name` */
             bool is_const = match(p, T_CONST);
-            if (!is_const) match(p, T_LET);
+            match(p, T_LET);
             char *type_name, *fname;
             parse_typed_name(p, &type_name, &fname);
             Expr *init = NULL;
@@ -766,6 +820,41 @@ Program *parse_program(Token *tokens, int count, const char *filename) {
         if (match(p, T_IMPORT)) {
             d->kind = DECL_IMPORT;
             d->as.import = parse_import(p);
+        } else if (match(p, T_CIMPORT)) {
+            /* FFI: `cimport symbol from "library.so"` */
+            Token *name = expect(p, T_IDENT, "expected C symbol name after cimport");
+            d->kind = DECL_CIMPORT;
+            d->as.cimport.name = strdup(name->text);
+            d->as.cimport.line = name->line;
+            expect(p, T_FROM, "expected 'from' in cimport");
+            Token *lib = expect(p, T_STRING, "expected a library path string in cimport");
+            d->as.cimport.lib = strdup(lib->text);
+            match(p, T_SEMI);
+        } else if (match(p, T_OPERATOR)) {
+            d->kind = DECL_OPERATOR;
+            d->as.func = parse_operator_decl(p);
+        } else if (match(p, T_EVENT)) {
+            /* `event MyEvent = event(payload params)` */
+            Token *name = expect(p, T_IDENT, "expected event name");
+            d->kind = DECL_EVENT;
+            d->as.event.name = strdup(name->text);
+            d->as.event.line = name->line;
+            expect(p, T_ASSIGN, "expected '=' in event declaration");
+            expect(p, T_EVENT, "expected event(...) constructor");
+            d->as.event.params = parse_params(p);
+            match(p, T_SEMI);
+        } else if (match(p, T_ON)) {
+            /* `on MyEvent [as e] { body }` */
+            Token *ev = expect(p, T_IDENT, "expected event name after 'on'");
+            d->kind = DECL_ON;
+            d->as.on.event_name = strdup(ev->text);
+            d->as.on.line = ev->line;
+            d->as.on.var_name = NULL;
+            if (match(p, T_AS)) {
+                Token *v = expect(p, T_IDENT, "expected variable name after 'as'");
+                d->as.on.var_name = strdup(v->text);
+            }
+            parse_block(p, &d->as.on.body, &d->as.on.body_count);
         } else if (check(p, T_CLASS)) {
             advance(p);
             d->kind = DECL_CLASS;
