@@ -54,5 +54,9 @@ typedef struct {
 void lexer_init(Lexer *lx, const char *src);
 /* Tokenizes the whole source into a growable array, terminated by T_EOF. */
 Token *lex_all(const char *src, int *out_count);
+/* Registers any `operator <sym>` declarations found in src without tokenizing
+   it, so custom operators declared in one file lex correctly in another.
+   lex_all runs this on its own input automatically. */
+void lex_prescan_ops(const char *src);
 
 #endif

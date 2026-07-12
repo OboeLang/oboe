@@ -29,16 +29,16 @@ static bool *g_class_emitted = NULL;
 
 static char *g_source_dir = NULL; /* directory of the file being compiled, for resolving imports */
 
-typedef struct { char *local_name; char *module; } ImportBinding;
+/* import bindings are scoped to the importing unit (owner = its prefix), so
+   one file's aliases don't leak into another's name resolution */
+typedef struct { char *local_name; char *module; char *owner; } ImportBinding;
 static ImportBinding *g_import_aliases = NULL; /* alias-or-module-name -> module */
 static int g_import_alias_count = 0;
 static ImportBinding *g_import_directs = NULL; /* bare member name -> module */
 static int g_import_direct_count = 0;
-static char **g_processed_modules = NULL;
-static int g_processed_module_count = 0;
 
 /* top-level `operator <sym> (a, b)` declarations: symbol -> generated C function */
-typedef struct { char *symbol; char *cfunc; FuncDecl *decl; } UserOp;
+typedef struct { char *symbol; char *cfunc; FuncDecl *decl; char *prefix; } UserOp;
 static UserOp *g_user_ops = NULL;
 static int g_user_op_count = 0;
 
@@ -52,7 +52,7 @@ static int g_class_op_count = 0;
 typedef struct { EventDecl *decl; ClassDecl *cls; } EventInfo;
 static EventInfo *g_events = NULL;
 static int g_event_count = 0;
-typedef struct { OnDecl *decl; char *cfunc; } HandlerInfo;
+typedef struct { OnDecl *decl; char *cfunc; char *prefix; } HandlerInfo;
 static HandlerInfo *g_handlers = NULL;
 static int g_handler_count = 0;
 
@@ -191,7 +191,6 @@ static const char *current_class = NULL; /* class name while generating a method
 static char *gen_expr(Expr *e);
 static void gen_stmt_list(Stmt **body, int count, int indent);
 static void gen_func_def(const char *prefix, ClassDecl *owner, FuncDecl *f);
-static void process_import(ImportDecl *imp);
 
 static void ind(int n) { for (int i = 0; i < n; i++) fputc(' ', OUT); }
 
@@ -309,7 +308,8 @@ static char *gen_member_access_ex(Expr *field_expr, bool for_call, bool safe, ch
         }
         /* module-qualified access, e.g. `alias.member` or `module.member` */
         for (int i = 0; i < g_import_alias_count; i++) {
-            if (strcmp(g_import_aliases[i].local_name, obj->as.ident) == 0) {
+            if (strcmp(g_import_aliases[i].local_name, obj->as.ident) == 0 &&
+                strcmp(g_import_aliases[i].owner, g_current_prefix) == 0) {
                 if (for_call) return fmt("%s__%s(", g_import_aliases[i].module, name);
                 return fmt("%s__%s", g_import_aliases[i].module, name);
             }
@@ -543,7 +543,8 @@ static char *gen_expr(Expr *e) {
                 }
                 /* direct `from` import binding */
                 for (int i = 0; i < g_import_direct_count; i++) {
-                    if (strcmp(g_import_directs[i].local_name, callee->as.ident) == 0) {
+                    if (strcmp(g_import_directs[i].local_name, callee->as.ident) == 0 &&
+                        strcmp(g_import_directs[i].owner, g_current_prefix) == 0) {
                         char buf[4096];
                         int off = snprintf(buf, sizeof buf, "%s__%s(", g_import_directs[i].module, callee->as.ident);
                         for (int i2 = 0; i2 < e->as.call.arg_count; i2++) {
@@ -561,7 +562,8 @@ static char *gen_expr(Expr *e) {
                     codegen_error(e->line, fmt("unknown function or class '%s'", callee->as.ident));
                 char buf[4096];
                 char fname[512];
-                if (strcmp(callee->as.ident, "main") == 0) snprintf(fname, sizeof fname, "oboe_user_main");
+                if (kf->prefix[0] == '\0' && strcmp(callee->as.ident, "main") == 0)
+                    snprintf(fname, sizeof fname, "oboe_user_main");
                 else snprintf(fname, sizeof fname, "%s%s", kf->prefix, callee->as.ident);
                 int off = snprintf(buf, sizeof buf, "%s(", fname);
                 for (int i = 0; i < e->as.call.arg_count; i++) {
@@ -824,7 +826,7 @@ static void gen_func_def(const char *prefix, ClassDecl *owner, FuncDecl *f) {
     for (Param *p = f->params; p; p = p->next) if (strcmp(p->name, "this") == 0) has_this = true;
 
     const char *fname_prefix = prefix ? prefix : "";
-    const char *fname = (!is_method && strcmp(f->name, "main") == 0) ? "oboe_user_main" : f->name;
+    const char *fname = (!is_method && !prefix && strcmp(f->name, "main") == 0) ? "oboe_user_main" : f->name;
     fprintf(OUT, "OboeValue %s%s%s(", fname_prefix, is_method ? "__" : "", fname);
     gen_param_list(OUT, (is_method && has_this) ? owner : NULL, f->params, has_this);
     fprintf(OUT, ") {\n");
@@ -853,7 +855,7 @@ static void emit_func_prototype(const char *prefix, ClassDecl *owner, FuncDecl *
     bool has_this = false;
     for (Param *p = f->params; p; p = p->next) if (strcmp(p->name, "this") == 0) has_this = true;
     const char *fname_prefix = prefix ? prefix : "";
-    const char *fname = (!is_method && strcmp(f->name, "main") == 0) ? "oboe_user_main" : f->name;
+    const char *fname = (!is_method && !prefix && strcmp(f->name, "main") == 0) ? "oboe_user_main" : f->name;
     fprintf(OUT, "OboeValue %s%s%s(", fname_prefix, is_method ? "__" : "", fname);
     gen_param_list(OUT, (is_method && has_this) ? owner : NULL, f->params, has_this);
     fprintf(OUT, ");\n");
@@ -1184,7 +1186,8 @@ static void infer_instance_fields(ClassDecl *c) {
     g_scan_method = NULL;
 }
 
-static void add_class(ClassDecl *c) {
+static void add_class(ClassDecl *c, const char *unit_prefix) {
+    c->unit_prefix = strdup(unit_prefix);
     g_classes = realloc(g_classes, (g_class_count + 1) * sizeof(ClassDecl *));
     g_class_emitted = realloc(g_class_emitted, (g_class_count + 1) * sizeof(bool));
     g_class_emitted[g_class_count] = false;
@@ -1204,9 +1207,9 @@ static void add_class(ClassDecl *c) {
     }
 }
 
-static void collect_classes(Decl *decls) {
+static void collect_classes(Decl *decls, const char *unit_prefix) {
     for (Decl *d = decls; d; d = d->next) {
-        if (d->kind == DECL_CLASS) add_class(d->as.klass);
+        if (d->kind == DECL_CLASS) add_class(d->as.klass, unit_prefix);
     }
 }
 
@@ -1223,77 +1226,175 @@ static char *read_whole_file(const char *path) {
     return buf;
 }
 
-static void process_import(ImportDecl *imp) {
-    const char *local_name = imp->alias ? imp->alias : imp->module;
-
-    if (imp->member_count > 0) {
-        for (int i = 0; i < imp->member_count; i++) {
-            g_import_directs = realloc(g_import_directs, (g_import_direct_count + 1) * sizeof(ImportBinding));
-            g_import_directs[g_import_direct_count].local_name = strdup(imp->members[i]);
-            g_import_directs[g_import_direct_count].module = strdup(imp->module);
-            g_import_direct_count++;
-        }
-    } else {
-        g_import_aliases = realloc(g_import_aliases, (g_import_alias_count + 1) * sizeof(ImportBinding));
-        g_import_aliases[g_import_alias_count].local_name = strdup(local_name);
-        g_import_aliases[g_import_alias_count].module = strdup(imp->module);
-        g_import_alias_count++;
-    }
-
-    for (int i = 0; i < g_processed_module_count; i++)
-        if (strcmp(g_processed_modules[i], imp->module) == 0) return;
-    g_processed_modules = realloc(g_processed_modules, (g_processed_module_count + 1) * sizeof(char *));
-    g_processed_modules[g_processed_module_count++] = strdup(imp->module);
-
-    char path1[4096], path2[4096];
-    snprintf(path1, sizeof path1, "%s/%s.oboe", g_source_dir, imp->module);
-    snprintf(path2, sizeof path2, "%s/.oboe/libraries/%s.oboe", g_source_dir, imp->module);
-    char *src = read_whole_file(path1);
-    if (!src) src = read_whole_file(path2);
-    if (!src) {
-        fprintf(stderr, "oboe: cannot find module '%s' (looked for %s and %s)\n", imp->module, path1, path2);
-        exit(1);
-    }
-    int tok_count;
-    Token *toks = lex_all(src, &tok_count);
-    Program *modprog = parse_program(toks, tok_count, imp->module);
-    free(src);
-
-    collect_classes(modprog->decls);
-    for (Decl *d = modprog->decls; d; d = d->next) {
-        if (d->kind == DECL_EVENT || d->kind == DECL_ON || d->kind == DECL_OPERATOR || d->kind == DECL_CIMPORT)
-            codegen_error(0, "events, top-level operators and cimport are not yet supported inside imported modules");
-        if (d->kind == DECL_IMPORT) process_import(&d->as.import);
-    }
-    for (Decl *d = modprog->decls; d; d = d->next) {
-        if (d->kind == DECL_CLASS) infer_instance_fields(d->as.klass);
-    }
-    for (Decl *d = modprog->decls; d; d = d->next) {
-        if (d->kind == DECL_CLASS) {
-            int idx = -1;
-            for (int i = 0; i < g_class_count; i++) if (g_classes[i] == d->as.klass) idx = i;
-            emit_class_struct(d->as.klass, idx);
-        }
-    }
-    char *mod_prefix = fmt("%s__", imp->module);
-    register_funcs(modprog->decls, mod_prefix);
-    for (Decl *d = modprog->decls; d; d = d->next) {
-        if (d->kind == DECL_CLASS) emit_class_predecls(d->as.klass);
-        else if (d->kind == DECL_FUNC) emit_func_prototype(mod_prefix, NULL, d->as.func);
-    }
-    fprintf(OUT, "\n");
-    const char *saved_prefix = g_current_prefix;
-    g_current_prefix = mod_prefix;
-    for (Decl *d = modprog->decls; d; d = d->next) {
-        if (d->kind == DECL_CLASS) gen_class(d->as.klass);
-        else if (d->kind == DECL_FUNC) gen_func_def(mod_prefix, NULL, d->as.func);
-    }
-    g_current_prefix = saved_prefix;
-    free(mod_prefix);
-}
-
 void codegen_set_source_dir(const char *dir) {
     g_source_dir = strdup(dir);
+}
+
+/* ============================= unit loading =============================
+   Compilation happens over a list of units: the main file plus every
+   transitively imported module. All sources are loaded and pre-scanned for
+   `operator <sym>` declarations *before* anything is tokenized, so a custom
+   operator declared in any file lexes correctly in every other file. The
+   import graph used for codegen comes from the parsed ASTs; the textual
+   import scan below exists only to find the files early. */
+
+typedef struct {
+    char *module;     /* NULL for the main file */
+    char *prefix;     /* "" for the main file, "<module>__" otherwise */
+    char *src;
+    Program *prog;
+    bool referenced;  /* actually imported per the ASTs (or the main file) */
+} Unit;
+static Unit *g_units = NULL;
+static int g_unit_count = 0;
+static const char *g_main_filename = "<main>";
+
+static int find_unit(const char *module) {
+    for (int i = 0; i < g_unit_count; i++)
+        if (g_units[i].module && strcmp(g_units[i].module, module) == 0) return i;
+    return -1;
+}
+
+static char *resolve_module_path(const char *module) {
+    char path[4096];
+    snprintf(path, sizeof path, "%s/%s.oboe", g_source_dir, module);
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        snprintf(path, sizeof path, "%s/.oboe/libraries/%s.oboe", g_source_dir, module);
+        f = fopen(path, "rb");
+    }
+    if (!f) return NULL;
+    fclose(f);
+    return strdup(path);
+}
+
+/* copy of src with comments and string bodies blanked, for the textual scan */
+static char *strip_for_scan(const char *src) {
+    char *out = strdup(src);
+    size_t len = strlen(out);
+    for (size_t i = 0; i < len; i++) {
+        if (out[i] == '/' && i + 1 < len && out[i + 1] == '/') {
+            while (i < len && out[i] != '\n') out[i++] = ' ';
+        } else if (out[i] == '"') {
+            i++;
+            while (i < len && out[i] != '"') {
+                if (out[i] == '\\' && i + 1 < len) out[i + 1] = ' ';
+                if (out[i] != '\n') out[i] = ' ';
+                i++;
+            }
+        }
+    }
+    return out;
+}
+
+static bool is_ident_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static void load_unit_textual(const char *module, char *src);
+
+/* extracts module names from `import ...` lines and loads those files too;
+   misses here are harmless (the AST-driven resolve pass loads stragglers) */
+static void scan_imports_textual(const char *src) {
+    char *s = strip_for_scan(src);
+    size_t len = strlen(s);
+    for (size_t i = 0; i + 6 < len; i++) {
+        if (strncmp(s + i, "import", 6) != 0) continue;
+        if (i > 0 && is_ident_char(s[i - 1])) continue;      /* also skips `cimport` */
+        if (is_ident_char(s[i + 6])) continue;
+        /* take the rest of the line */
+        size_t start = i + 6, end = start;
+        while (end < len && s[end] != '\n') end++;
+        char line[512];
+        size_t n = end - start < sizeof(line) - 1 ? end - start : sizeof(line) - 1;
+        memcpy(line, s + start, n);
+        line[n] = '\0';
+        /* `a[, b] from mod` -> word after "from"; `mod [as alias]` -> first word */
+        char *from = strstr(line, " from ");
+        char *word = from ? from + 6 : line;
+        while (*word == ' ' || *word == '\t') word++;
+        char name[256];
+        int k = 0;
+        while (is_ident_char(word[k]) && k < (int)sizeof(name) - 1) { name[k] = word[k]; k++; }
+        name[k] = '\0';
+        if (k == 0 || find_unit(name) >= 0) continue;
+        char *path = resolve_module_path(name);
+        if (!path) continue; /* not a module file; the parse pass will complain if it was real */
+        char *msrc = read_whole_file(path);
+        free(path);
+        if (msrc) load_unit_textual(name, msrc);
+    }
+    free(s);
+}
+
+static void load_unit_textual(const char *module, char *src) {
+    g_units = realloc(g_units, (g_unit_count + 1) * sizeof(Unit));
+    Unit *u = &g_units[g_unit_count++];
+    u->module = module ? strdup(module) : NULL;
+    u->prefix = module ? fmt("%s__", module) : strdup("");
+    u->src = src;
+    u->prog = NULL;
+    u->referenced = false;
+    scan_imports_textual(src);
+}
+
+static void parse_unit(int ui) {
+    Unit *u = &g_units[ui];
+    if (u->prog) return;
+    int tok_count;
+    Token *toks = lex_all(u->src, &tok_count);
+    u->prog = parse_program(toks, tok_count, u->module ? u->module : g_main_filename);
+}
+
+/* finds (or late-loads) a module unit, parsed */
+static int ensure_unit(const char *module) {
+    int ui = find_unit(module);
+    if (ui < 0) {
+        char *path = resolve_module_path(module);
+        if (!path) {
+            fprintf(stderr, "oboe: cannot find module '%s' (looked in %s and %s/.oboe/libraries)\n",
+                    module, g_source_dir, g_source_dir);
+            exit(1);
+        }
+        char *src = read_whole_file(path);
+        free(path);
+        int before = g_unit_count;
+        load_unit_textual(module, src);
+        for (int i = before; i < g_unit_count; i++) lex_prescan_ops(g_units[i].src);
+        ui = find_unit(module);
+    }
+    parse_unit(ui);
+    return ui;
+}
+
+/* walks the parsed import graph: registers this unit's bindings and marks
+   every transitively imported unit as referenced */
+static void resolve_imports(int ui) {
+    for (Decl *d = g_units[ui].prog->decls; d; d = d->next) {
+        if (d->kind != DECL_IMPORT) continue;
+        ImportDecl *imp = &d->as.import;
+        const char *owner = g_units[ui].prefix;
+        if (imp->member_count > 0) {
+            for (int i = 0; i < imp->member_count; i++) {
+                g_import_directs = realloc(g_import_directs, (g_import_direct_count + 1) * sizeof(ImportBinding));
+                g_import_directs[g_import_direct_count].local_name = strdup(imp->members[i]);
+                g_import_directs[g_import_direct_count].module = strdup(imp->module);
+                g_import_directs[g_import_direct_count].owner = strdup(owner);
+                g_import_direct_count++;
+            }
+        } else {
+            g_import_aliases = realloc(g_import_aliases, (g_import_alias_count + 1) * sizeof(ImportBinding));
+            g_import_aliases[g_import_alias_count].local_name = strdup(imp->alias ? imp->alias : imp->module);
+            g_import_aliases[g_import_alias_count].module = strdup(imp->module);
+            g_import_aliases[g_import_alias_count].owner = strdup(owner);
+            g_import_alias_count++;
+        }
+        int dep = ensure_unit(imp->module);
+        if (!g_units[dep].referenced) {
+            g_units[dep].referenced = true;
+            resolve_imports(dep);
+        }
+    }
 }
 
 /* ============================= events / operators / FFI ============================= */
@@ -1314,14 +1415,14 @@ static void register_event_decl(EventDecl *ev) {
         tail = fd;
     }
     c->fields = head.next;
-    add_class(c);
+    add_class(c, "");
     g_events = realloc(g_events, (g_event_count + 1) * sizeof(EventInfo));
     g_events[g_event_count].decl = ev;
     g_events[g_event_count].cls = c;
     g_event_count++;
 }
 
-static void collect_extras(Decl *decls) {
+static void collect_extras(Decl *decls, const char *prefix) {
     for (Decl *d = decls; d; d = d->next) {
         switch (d->kind) {
             case DECL_OPERATOR: {
@@ -1334,6 +1435,7 @@ static void collect_extras(Decl *decls) {
                 g_user_ops[g_user_op_count].symbol = strdup(f->op_symbol);
                 g_user_ops[g_user_op_count].cfunc = fmt("__oboe_userop_%d", g_user_op_count);
                 g_user_ops[g_user_op_count].decl = f;
+                g_user_ops[g_user_op_count].prefix = strdup(prefix);
                 g_user_op_count++;
                 break;
             }
@@ -1346,9 +1448,12 @@ static void collect_extras(Decl *decls) {
                 g_handlers = realloc(g_handlers, (g_handler_count + 1) * sizeof(HandlerInfo));
                 g_handlers[g_handler_count].decl = &d->as.on;
                 g_handlers[g_handler_count].cfunc = fmt("__on_%s_%d", d->as.on.event_name, g_handler_count);
+                g_handlers[g_handler_count].prefix = strdup(prefix);
                 g_handler_count++;
                 break;
             case DECL_CIMPORT:
+                /* two files importing the same symbol share one binding */
+                if (find_ffi(d->as.cimport.name)) break;
                 g_ffi = realloc(g_ffi, (g_ffi_count + 1) * sizeof(FfiBinding));
                 g_ffi[g_ffi_count].name = strdup(d->as.cimport.name);
                 g_ffi[g_ffi_count].lib = strdup(d->as.cimport.lib);
@@ -1407,6 +1512,7 @@ static void emit_extras_defs(void) {
         FuncDecl *f = g_user_ops[i].decl;
         Param *a = f->params, *b = f->params->next;
         fprintf(OUT, "static OboeValue %s(OboeValue %s, OboeValue %s) {\n", g_user_ops[i].cfunc, a->name, b->name);
+        g_current_prefix = g_user_ops[i].prefix;
         push_scope();
         define_var(a->name, (a->type_name && find_class(a->type_name)) ? a->type_name : NULL);
         define_var(b->name, (b->type_name && find_class(b->type_name)) ? b->type_name : NULL);
@@ -1421,6 +1527,7 @@ static void emit_extras_defs(void) {
         OnDecl *h = g_handlers[i].decl;
         fprintf(OUT, "static OboeValue %s(OboeValue __ev) {\n", g_handlers[i].cfunc);
         fprintf(OUT, "    (void)__ev;\n");
+        g_current_prefix = g_handlers[i].prefix;
         push_scope();
         if (h->var_name) {
             fprintf(OUT, "    OboeValue %s = __ev;\n", h->var_name);
@@ -1431,6 +1538,8 @@ static void emit_extras_defs(void) {
         fprintf(OUT, "    return ob_null();\n");
         fprintf(OUT, "}\n\n");
     }
+
+    g_current_prefix = "";
 
     /* fire functions: build the payload object, then invoke every handler */
     for (int i = 0; i < g_event_count; i++) {
@@ -1461,29 +1570,52 @@ static void emit_extras_defs(void) {
         fprintf(OUT, "static void __oboe_fire_kbint(void) { KeyboardInterruptEvent__fire(); }\n\n");
 }
 
-void codegen_program(Program *prog, FILE *out) {
+void codegen_compile(const char *main_path, FILE *out) {
     OUT = out;
-    collect_classes(prog->decls);
-    collect_extras(prog->decls);
-    finalize_events();
-    register_funcs(prog->decls, "");
+    g_main_filename = main_path;
 
-    fprintf(out, "#include \"oboe_runtime.h\"\n#include <stdlib.h>\n#include <stdio.h>\n\n");
-
-    int main_class_count = g_class_count;
-    for (int i = 0; i < main_class_count; i++) infer_instance_fields(g_classes[i]);
-
-    for (Decl *d = prog->decls; d; d = d->next) {
-        if (d->kind == DECL_IMPORT) process_import(&d->as.import);
+    /* phase 1: load all sources (main + transitively imported modules) */
+    char *main_src = read_whole_file(main_path);
+    if (!main_src) {
+        fprintf(stderr, "oboe: cannot read '%s'\n", main_path);
+        exit(1);
     }
+    load_unit_textual(NULL, main_src);
+
+    /* phase 2: register every custom operator symbol before any tokenizing */
+    for (int i = 0; i < g_unit_count; i++) lex_prescan_ops(g_units[i].src);
+
+    /* phase 3: parse everything, then resolve the real import graph */
+    for (int i = 0; i < g_unit_count; i++) parse_unit(i);
+    g_units[0].referenced = true;
+    resolve_imports(0);
+
+    /* phase 4: collect symbols from every referenced unit */
+    for (int i = 0; i < g_unit_count; i++) {
+        if (!g_units[i].referenced) continue;
+        collect_classes(g_units[i].prog->decls, g_units[i].prefix);
+        register_funcs(g_units[i].prog->decls, g_units[i].prefix);
+        collect_extras(g_units[i].prog->decls, g_units[i].prefix);
+    }
+    finalize_events();
+    for (int i = 0; i < g_class_count; i++) infer_instance_fields(g_classes[i]);
+
+    /* phase 5: emit */
+    fprintf(out, "#include \"oboe_runtime.h\"\n#include <stdlib.h>\n#include <stdio.h>\n\n");
 
     for (int i = 0; i < g_class_count; i++) emit_class_struct(g_classes[i], i);
 
-    for (Decl *d = prog->decls; d; d = d->next) {
-        if (d->kind == DECL_CLASS) emit_class_predecls(d->as.klass);
-        else if (d->kind == DECL_FUNC) emit_func_prototype(NULL, NULL, d->as.func);
+    for (int ui = 0; ui < g_unit_count; ui++) {
+        if (!g_units[ui].referenced) continue;
+        const char *pfx = g_units[ui].prefix[0] ? g_units[ui].prefix : NULL;
+        for (Decl *d = g_units[ui].prog->decls; d; d = d->next) {
+            if (d->kind == DECL_CLASS) emit_class_predecls(d->as.klass);
+            else if (d->kind == DECL_FUNC) emit_func_prototype(pfx, NULL, d->as.func);
+        }
     }
     emit_extras_predecls();
+
+    Program *prog = g_units[0].prog; /* the main file */
 
     /* top-level variable declarations become globals so functions can see
        them; they're initialized in __oboe_toplevel before main runs */
@@ -1504,10 +1636,16 @@ void codegen_program(Program *prog, FILE *out) {
         if (d->kind == DECL_FUNC && strcmp(d->as.func->name, "main") == 0) has_main = true;
     }
 
-    for (Decl *d = prog->decls; d; d = d->next) {
-        if (d->kind == DECL_CLASS) gen_class(d->as.klass);
-        else if (d->kind == DECL_FUNC) gen_func_def(NULL, NULL, d->as.func);
+    for (int ui = g_unit_count - 1; ui >= 0; ui--) { /* modules first, main last */
+        if (!g_units[ui].referenced) continue;
+        const char *pfx = g_units[ui].prefix[0] ? g_units[ui].prefix : NULL;
+        g_current_prefix = g_units[ui].prefix;
+        for (Decl *d = g_units[ui].prog->decls; d; d = d->next) {
+            if (d->kind == DECL_CLASS) gen_class(d->as.klass);
+            else if (d->kind == DECL_FUNC) gen_func_def(pfx, NULL, d->as.func);
+        }
     }
+    g_current_prefix = "";
     emit_extras_defs();
 
     /* static field initializers, operator registrations, FFI resolution */
@@ -1521,6 +1659,7 @@ void codegen_program(Program *prog, FILE *out) {
         ClassDecl *c = g_classes[i];
         const char *saved_class = current_class;
         current_class = c->name;
+        g_current_prefix = c->unit_prefix ? c->unit_prefix : "";
         for (FieldDecl *fd = c->fields; fd; fd = fd->next) {
             if (!fd->is_static) continue;
             char *v = fd->init ? gen_expr(fd->init) : strdup("ob_null()");
@@ -1529,6 +1668,7 @@ void codegen_program(Program *prog, FILE *out) {
         }
         current_class = saved_class;
     }
+    g_current_prefix = "";
     fprintf(out, "}\n\n");
 
     /* top-level statements (single-file script mode); declarations were

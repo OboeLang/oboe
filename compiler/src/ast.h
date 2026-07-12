@@ -151,6 +151,7 @@ struct ClassDecl {
     FuncDecl **methods;
     int method_count;
     int line;
+    char *unit_prefix; /* set by codegen: "" for the main file, "<module>__" otherwise */
 };
 
 typedef enum {

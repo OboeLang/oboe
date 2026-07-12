@@ -18,6 +18,8 @@
 #include <stdio.h>
 
 void codegen_set_source_dir(const char *dir);
-void codegen_program(Program *prog, FILE *out);
+/* Loads the main file and every transitively imported module, then generates
+   one C translation unit for the whole program. */
+void codegen_compile(const char *main_path, FILE *out);
 
 #endif

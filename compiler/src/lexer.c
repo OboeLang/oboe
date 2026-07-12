@@ -82,6 +82,10 @@ static void prescan_custom_ops(const char *src, size_t len) {
     }
 }
 
+void lex_prescan_ops(const char *src) {
+    prescan_custom_ops(src, strlen(src));
+}
+
 /* longest registered custom operator matching at src[pos], or NULL */
 static const char *match_custom_op(const char *src, size_t pos, size_t len) {
     const char *best = NULL;

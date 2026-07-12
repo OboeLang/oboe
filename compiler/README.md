@@ -30,7 +30,9 @@ Classes compile to plain C structs, with a class's parent embedded as the struct
 
 `try`/`catch`/`finally` is implemented with `setjmp`/`longjmp`; exceptions are matched by type name string, most-specific catch clause first.
 
-Operator overloading is dynamic: each binary operator call first checks whether the left-hand object's class (or an ancestor) registered a handler, falling back to the builtin behavior otherwise. Class overloads use the spec's `operator + (this, Vector2 other) { ... }` syntax and register at startup. Top-level `operator ||> (int a, int b) { ... }` declarations introduce new operator tokens: symbols are collected in a text pre-scan of each file before lexing, so a custom operator must be declared in the same file that uses it. Custom operators bind tighter than `and`/`or` and looser than comparisons, left-associative.
+Compilation runs over a unit list: the main file plus every transitively imported module. All sources are loaded (via a lightweight textual scan for `import` lines) and pre-scanned for `operator <sym>` declarations before anything is tokenized, then parsed, then the real import graph is resolved from the ASTs and code is generated in one pass. Import aliases and `from` bindings are scoped to the importing file; bare function calls resolve within their own unit.
+
+Operator overloading is dynamic: each binary operator call first checks whether the left-hand object's class (or an ancestor) registered a handler, falling back to the builtin behavior otherwise. Class overloads use the spec's `operator + (this, Vector2 other) { ... }` syntax and register at startup. Top-level `operator ||> (int a, int b) { ... }` declarations introduce new operator tokens; because symbols are registered before lexing, an operator declared in any file (including an imported module) is usable everywhere. Custom operators bind tighter than `and`/`or` and looser than comparisons, left-associative.
 
 The events system compiles each `event E = event(...)` to a struct (payload fields become members) plus an `E__fire` function that constructs the payload object and calls every `on E` handler in declaration order — dispatch is fully static, no runtime handler list. `on KeyboardInterruptEvent` installs a SIGINT handler with the spec's semantics: the first ^C runs the handlers and exits; a second ^C while they run exits immediately.
 
@@ -46,5 +48,5 @@ FFI uses `cimport symbol from "library.so"`. The symbol is resolved with `dlopen
 - `oboe build` always produces a single executable (no separate .so/DLL embedding yet).
 - `project.json` is read with a minimal targeted scan for the fields this toolchain needs, not a general JSON parser.
 - `let` is still accepted as a legacy alias for `var`; the spec spelling (`var x`, `int x`, `const var x`, `const int x`) is preferred.
-- Events, top-level custom operators, and `cimport` must live in the main file, not in imported modules (class operator overloads in modules are fine).
+- Events and operators are global once their file is part of the program; `on` handlers fire in collection order (main file's first). Module top-level statements are not executed.
 - FFI arguments/returns are limited to word-sized values (ints, bools, C strings); no floats, structs, or out-parameters.

@@ -11,8 +11,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
  * GNU General Public License for more details.
  */
-#include "lexer.h"
-#include "parser.h"
 #include "codegen.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,15 +44,6 @@ static char *oboe_home(void) {
 }
 
 static char *transpile_to_c(const char *oboe_path, const char *c_out_path) {
-    char *src = read_whole_file(oboe_path);
-    if (!src) {
-        fprintf(stderr, "oboe: cannot read '%s'\n", oboe_path);
-        exit(1);
-    }
-    int tok_count;
-    Token *toks = lex_all(src, &tok_count);
-    Program *prog = parse_program(toks, tok_count, oboe_path);
-
     char path_copy[4096];
     strncpy(path_copy, oboe_path, sizeof(path_copy) - 1);
     path_copy[sizeof(path_copy) - 1] = '\0';
@@ -63,9 +52,8 @@ static char *transpile_to_c(const char *oboe_path, const char *c_out_path) {
 
     FILE *out = fopen(c_out_path, "w");
     if (!out) { fprintf(stderr, "oboe: cannot write '%s'\n", c_out_path); exit(1); }
-    codegen_program(prog, out);
+    codegen_compile(oboe_path, out);
     fclose(out);
-    free(src);
     return strdup(c_out_path);
 }
 
