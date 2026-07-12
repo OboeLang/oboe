@@ -23,6 +23,8 @@
 - Syntax for choosing a C file to import based on OS
 - File operation methods?
     - Or should this just be in the OS library
+- Add C++ support to `cimport`?
+    - Separate syntax or the same?
 
 # Approved but uncompleted syntax drafts
 
