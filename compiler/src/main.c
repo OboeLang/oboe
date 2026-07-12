@@ -233,7 +233,6 @@ static void cmd_build(const char *file, const char *output, bool verbose) {
         }
         if (!entry) entry = strdup("main.oboe");
         if (!name) name = strdup("program");
-        mkdir("dist", 0755);
         snprintf(out_path, sizeof out_path, "dist/%s", name);
         free(name);
     }
@@ -251,12 +250,18 @@ static void cmd_build(const char *file, const char *output, bool verbose) {
     int fd = mkstemps(c_path, 2);
     if (fd < 0) { perror("mkstemps"); exit(1); }
     close(fd);
+    /* transpile before creating dist/ so a failed build leaves nothing behind */
     transpile_to_c(entry, c_path);
     if (verbose) printf("oboe: transpiled %s\n", entry);
 
+    bool made_dist = !file && !output;
+    if (made_dist) mkdir("dist", 0755);
     int rc = compile_c_to_binary(c_path, out_path, verbose);
     remove(c_path);
-    if (rc != 0) exit(rc);
+    if (rc != 0) {
+        if (made_dist) rmdir("dist"); /* only removes it if empty */
+        exit(rc);
+    }
     printf("Built %s\n", out_path);
     free(entry);
 }

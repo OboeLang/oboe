@@ -61,6 +61,13 @@ typedef struct { char *name; char *lib; } FfiBinding;
 static FfiBinding *g_ffi = NULL;
 static int g_ffi_count = 0;
 
+/* every declared function, so calls to unknown names are Oboe compile errors
+   instead of C errors; prefix is "" for main-file functions, "module__" for
+   module functions (letting a module function call a sibling by bare name) */
+typedef struct { char *name; char *prefix; } KnownFunc;
+static KnownFunc *g_known_funcs = NULL;
+static int g_known_func_count = 0;
+
 static FILE *OUT;
 
 static void codegen_error(int line, const char *msg) {
@@ -125,6 +132,29 @@ static FfiBinding *find_ffi(const char *name) {
     for (int i = 0; i < g_ffi_count; i++)
         if (strcmp(g_ffi[i].name, name) == 0) return &g_ffi[i];
     return NULL;
+}
+
+/* prefix of the compilation unit currently being generated: "" for the main
+   file, "module__" while emitting a module's bodies. Bare calls only resolve
+   to functions of the same unit. */
+static const char *g_current_prefix = "";
+
+static KnownFunc *find_known_func(const char *name) {
+    for (int i = 0; i < g_known_func_count; i++)
+        if (strcmp(g_known_funcs[i].name, name) == 0 &&
+            strcmp(g_known_funcs[i].prefix, g_current_prefix) == 0)
+            return &g_known_funcs[i];
+    return NULL;
+}
+
+static void register_funcs(Decl *decls, const char *prefix) {
+    for (Decl *d = decls; d; d = d->next) {
+        if (d->kind != DECL_FUNC) continue;
+        g_known_funcs = realloc(g_known_funcs, (g_known_func_count + 1) * sizeof(KnownFunc));
+        g_known_funcs[g_known_func_count].name = strdup(d->as.func->name);
+        g_known_funcs[g_known_func_count].prefix = strdup(prefix);
+        g_known_func_count++;
+    }
 }
 
 /* ============================= scopes: variable -> static class type ===== */
@@ -332,7 +362,11 @@ static char *gen_member_access(Expr *field_expr, bool for_call, bool safe) {
 
 static char *gen_assign_target_lvalue(Expr *target) {
     /* returns a C lvalue string for simple (non-index) assignment targets */
-    if (target->kind == EXPR_IDENT) return strdup(target->as.ident);
+    if (target->kind == EXPR_IDENT) {
+        if (!var_in_scope(target->as.ident))
+            codegen_error(target->line, fmt("undefined variable '%s'", target->as.ident));
+        return strdup(target->as.ident);
+    }
     if (target->kind == EXPR_FIELD) return gen_member_access(target, false, false);
     codegen_error(target->line, "invalid assignment target");
     return NULL;
@@ -344,7 +378,10 @@ static char *gen_expr(Expr *e) {
         case EXPR_BOOL: return fmt("ob_bool(%s)", e->as.bool_val ? "true" : "false");
         case EXPR_NULL: return strdup("ob_null()");
         case EXPR_STRING: return gen_string_literal(e);
-        case EXPR_IDENT: return strdup(e->as.ident);
+        case EXPR_IDENT:
+            if (!var_in_scope(e->as.ident))
+                codegen_error(e->line, fmt("undefined variable '%s'", e->as.ident));
+            return strdup(e->as.ident);
         case EXPR_ARRAY: {
             char buf[8192];
             int off = snprintf(buf, sizeof buf, "({ OboeValue __a = ob_array_new();");
@@ -519,8 +556,13 @@ static char *gen_expr(Expr *e) {
                     }
                 }
                 /* plain function call */
+                KnownFunc *kf = find_known_func(callee->as.ident);
+                if (!kf)
+                    codegen_error(e->line, fmt("unknown function or class '%s'", callee->as.ident));
                 char buf[4096];
-                const char *fname = strcmp(callee->as.ident, "main") == 0 ? "oboe_user_main" : callee->as.ident;
+                char fname[512];
+                if (strcmp(callee->as.ident, "main") == 0) snprintf(fname, sizeof fname, "oboe_user_main");
+                else snprintf(fname, sizeof fname, "%s%s", kf->prefix, callee->as.ident);
                 int off = snprintf(buf, sizeof buf, "%s(", fname);
                 for (int i = 0; i < e->as.call.arg_count; i++) {
                     char *a = gen_expr(e->as.call.args[i]);
@@ -1234,15 +1276,19 @@ static void process_import(ImportDecl *imp) {
         }
     }
     char *mod_prefix = fmt("%s__", imp->module);
+    register_funcs(modprog->decls, mod_prefix);
     for (Decl *d = modprog->decls; d; d = d->next) {
         if (d->kind == DECL_CLASS) emit_class_predecls(d->as.klass);
         else if (d->kind == DECL_FUNC) emit_func_prototype(mod_prefix, NULL, d->as.func);
     }
     fprintf(OUT, "\n");
+    const char *saved_prefix = g_current_prefix;
+    g_current_prefix = mod_prefix;
     for (Decl *d = modprog->decls; d; d = d->next) {
         if (d->kind == DECL_CLASS) gen_class(d->as.klass);
         else if (d->kind == DECL_FUNC) gen_func_def(mod_prefix, NULL, d->as.func);
     }
+    g_current_prefix = saved_prefix;
     free(mod_prefix);
 }
 
@@ -1420,6 +1466,7 @@ void codegen_program(Program *prog, FILE *out) {
     collect_classes(prog->decls);
     collect_extras(prog->decls);
     finalize_events();
+    register_funcs(prog->decls, "");
 
     fprintf(out, "#include \"oboe_runtime.h\"\n#include <stdlib.h>\n#include <stdio.h>\n\n");
 

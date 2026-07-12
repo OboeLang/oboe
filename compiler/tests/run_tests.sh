@@ -64,6 +64,27 @@ for src in tests/*.oboe; do
     fi
 done
 
+# --- CLI behavior tests ---
+
+# a failing `oboe build` must not leave a dist/ directory behind
+tmp="$(mktemp -d)"
+cat > "$tmp/main.oboe" <<'EOF'
+func main(array args) {
+    print(no_such_variable)
+}
+EOF
+printf '{\n    "project": { "name": "broken", "entry": "main.oboe" }\n}\n' > "$tmp/project.json"
+( cd "$tmp" && "$OLDPWD/$OBOE" build ) >/dev/null 2>&1
+rc=$?
+if [ $rc -ne 0 ] && [ ! -d "$tmp/dist" ]; then
+    echo "PASS build_no_dist_on_error"
+    pass=$((pass+1))
+else
+    echo "FAIL build_no_dist_on_error (exit $rc, dist exists: $([ -d "$tmp/dist" ] && echo yes || echo no))"
+    fail=$((fail+1))
+fi
+rm -rf "$tmp"
+
 echo
 echo "$pass passed, $fail failed"
 [ $fail -eq 0 ]
