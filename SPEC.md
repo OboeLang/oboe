@@ -335,14 +335,6 @@ func main(array args) {
 
 Arguments and return values are word-sized: ints, bools, and nulls pass by value, strings pass as C string pointers, and the return value comes back as an int. Calls take at most 8 arguments. Floats, structs, and out-parameters are not yet supported.
 
----
-
 ## Open questions
 
-- Inheritance: syntax for declaring a parent, constructor chaining, and override rules.
-- Rust-style `?` error-propagation operator: whether it fits Oboe's error-handling model.
-- Further domain-specific operators
-- Functional-pattern constructs (LINQ-style query syntax is of interest, not yet designed).
 - How object-oriented Oboe is by default.
-- Lambda functions or whatever they're called in JS? (the () => {} thing)
-- If/Else shorthand?
