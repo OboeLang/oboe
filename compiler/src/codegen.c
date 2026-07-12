@@ -191,6 +191,17 @@ static const char *infer_class(Expr *e) {
             }
             return NULL;
         }
+        case EXPR_BINARY: {
+            /* an overloaded operator conventionally returns an instance of the
+               left operand's class (e.g. Vector2 + Vector2 -> Vector2) */
+            const char *lc = infer_class(e->as.binary.l);
+            if (!lc) return NULL;
+            for (ClassDecl *c = find_class(lc); c; c = c->parent_name ? find_class(c->parent_name) : NULL)
+                for (int i = 0; i < g_class_op_count; i++)
+                    if (g_class_ops[i].cls == c && strcmp(g_class_ops[i].symbol, e->as.binary.op) == 0)
+                        return lc;
+            return NULL;
+        }
         default: return NULL;
     }
 }
@@ -1426,6 +1437,19 @@ void codegen_program(Program *prog, FILE *out) {
         else if (d->kind == DECL_FUNC) emit_func_prototype(NULL, NULL, d->as.func);
     }
     emit_extras_predecls();
+
+    /* top-level variable declarations become globals so functions can see
+       them; they're initialized in __oboe_toplevel before main runs */
+    push_scope();
+    for (Decl *d = prog->decls; d; d = d->next) {
+        if (d->kind != DECL_STMT || d->as.stmt->kind != STMT_LET) continue;
+        Stmt *s = d->as.stmt;
+        const char *class_type = NULL;
+        if (s->as.let.type_name && find_class(s->as.let.type_name)) class_type = s->as.let.type_name;
+        else if (s->as.let.init) class_type = infer_class(s->as.let.init);
+        define_var(s->as.let.name, class_type);
+        fprintf(out, "static OboeValue %s;\n", s->as.let.name);
+    }
     fprintf(out, "\n");
 
     bool has_main = false;
@@ -1433,7 +1457,6 @@ void codegen_program(Program *prog, FILE *out) {
         if (d->kind == DECL_FUNC && strcmp(d->as.func->name, "main") == 0) has_main = true;
     }
 
-    push_scope();
     for (Decl *d = prog->decls; d; d = d->next) {
         if (d->kind == DECL_CLASS) gen_class(d->as.klass);
         else if (d->kind == DECL_FUNC) gen_func_def(NULL, NULL, d->as.func);
@@ -1461,10 +1484,19 @@ void codegen_program(Program *prog, FILE *out) {
     }
     fprintf(out, "}\n\n");
 
-    /* top-level statements (single-file script mode) */
+    /* top-level statements (single-file script mode); declarations were
+       already emitted as globals, so here they are plain assignments */
     fprintf(out, "static void __oboe_toplevel(void) {\n");
     for (Decl *d = prog->decls; d; d = d->next) {
-        if (d->kind == DECL_STMT) gen_stmt(d->as.stmt, 4);
+        if (d->kind != DECL_STMT) continue;
+        Stmt *s = d->as.stmt;
+        if (s->kind == STMT_LET) {
+            char *init = s->as.let.init ? gen_expr(s->as.let.init) : strdup("ob_null()");
+            fprintf(out, "    %s = %s;\n", s->as.let.name, init);
+            free(init);
+        } else {
+            gen_stmt(s, 4);
+        }
     }
     fprintf(out, "}\n\n");
     pop_scope();

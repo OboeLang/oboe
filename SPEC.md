@@ -319,8 +319,21 @@ This example overrides the + operation, specifically between a Vector2 and anoth
 
 # FFI
 
-> [!NOTE]
-> TODO: Write FFI syntax.
+C functions are imported from shared libraries with `cimport`:
+
+```
+cimport strlen from "libc.so.6"
+cimport abs from "libc.so.6"
+
+func main(array args) {
+    print(strlen("hello")) // prints 5
+    print(abs(-42))        // prints 42
+}
+```
+
+`cimport <symbol> from "<library>"` resolves `<symbol>` in `<library>` at program startup and makes it callable like a normal function. The string operand distinguishes it from a module member import (`import member from module`).
+
+Arguments and return values are word-sized: ints, bools, and nulls pass by value, strings pass as C string pointers, and the return value comes back as an int. Calls take at most 8 arguments. Floats, structs, and out-parameters are not yet supported.
 
 ---
 
