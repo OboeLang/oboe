@@ -1,3 +1,0 @@
-let string name = "Jade"
-
-let string hello = "Hello, ${name}!"
