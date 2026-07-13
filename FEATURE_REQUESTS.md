@@ -25,6 +25,7 @@
     - Or should this just be in the OS library
 - Add C++ support to `cimport`?
     - Separate syntax or the same?
+- Local/global variables?
 
 # Approved but uncompleted syntax drafts
 
