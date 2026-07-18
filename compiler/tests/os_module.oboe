@@ -1,0 +1,6 @@
+// _osmod.linux.oboe must be preferred over _osmod.oboe on a linux host
+import _osmod
+
+func main(array args) {
+    print(_osmod.which_os())
+}

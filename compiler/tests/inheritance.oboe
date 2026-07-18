@@ -1,0 +1,49 @@
+class Animal {
+    func init(this, string name) {
+        this.name = name
+        this.legs = 4
+    }
+
+    func describe(this) {
+        print("${this.name} has ${str(this.legs)} legs")
+    }
+
+    func speak(this) {
+        print("...")
+    }
+}
+
+class Dog extends Animal {
+    func init(this, string name) {
+        super(name)
+        this.tricks = 0
+    }
+
+    func speak(this) {
+        print("${this.name} says woof")
+    }
+
+    func speak_politely(this) {
+        super.speak()
+        this.speak()
+    }
+}
+
+// no init of its own: inherits Animal's constructor
+class Cat extends Animal {
+    func speak(this) {
+        print("${this.name} says meow")
+    }
+}
+
+func main(array args) {
+    var d = Dog("Rex")
+    d.describe()       // inherited method
+    d.speak()          // overridden method
+    d.speak_politely() // super.method() then own
+
+    var c = Cat("Whiskers")
+    c.describe()
+    c.speak()
+    print(c is Animal ? "cat is an animal" : "cat is not an animal")
+}

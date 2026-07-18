@@ -24,7 +24,18 @@ oboe build # Self-explanatory. Builds the program into an executable, in the dis
     -v --verbose # Self-explanatory.
     -o --output # Manually describes the output file. Creates nonexistent folders when specified.
                 # e.g. -o my_folder/output.exe will create my_folder.
+    -t --target # Cross-compilation target: linux, windows or macos (nt/darwin also accepted).
+                # Defaults to the host OS. Windows outputs get .exe appended automatically.
+                # windows needs mingw-w64 installed; macos needs osxcross.
+    --cc <compiler> # Overrides the C compiler used, for targets/toolchains not covered above.
+    --desktop # Generates a .desktop launcher next to the output (Linux targets only).
+    --meta-name / --meta-version / --meta-description / --meta-icon
+                # Program metadata. On Windows targets this is embedded as version info
+                # (via windres); it also fills in the .desktop file. Defaults come from
+                # project.json when building a project.
 ```
+
+Build settings may also live in project.json under a `"build"` object (`"target"`, `"output"` and `"desktop"`) with CLI flags taking precedence.
 
 - Oboe is a compiled language. The reference implementation transpiles to C and compiles with `gcc`.
 
@@ -52,6 +63,13 @@ const int x = 1  // typed constant
 - Type annotations are optional and replace `var`.
 - Types are inferred unless explicitly specified.
 
+### Scoping
+
+- Variables are block-scoped: a variable declared inside `{ }` ends at the closing brace and does not leak into the enclosing block.
+- Each `for` iteration gets a fresh binding of the loop variable.
+- A variable declared at the top level of a file is scoped to that file (module). Other files reach it through the module: `mymodule.counter`, or `import counter from mymodule`. There is no separate `global` keyword, module-level state is the global story.
+- Top-level statements in an imported module run once at program startup, before `main` (modules first, then the main file's own top level).
+
 ## Primitive types
 
 - `int`s are 32-bit
@@ -72,8 +90,7 @@ int func add(int x, int y) {
 - Declared with the `func` keyword.
 - Return type is written before `func`, though it is optional.
 - Parameters are `type name` pairs.
-- `array args` is the convention for a program's `main` entry point:
-  `func main(array args) { ... }`.
+- `array args` is the convention for a program's `main` entry point: `func main(array args) { ... }`.
 - Free functions are allowed; functions do not have to belong to a class.
 
 ## Strings and interpolation
@@ -108,8 +125,25 @@ john.greet()
 
 ### Inheritance
 
-- Single inheritance only: a class has at most one parent.
+```
+class Dog extends Animal {
+    func init(this, string name) {
+        super(name)      // chains to Animal's constructor
+        this.tricks = 0
+    }
+
+    func speak(this) {   // overrides Animal.speak by shadowing it
+        super.speak()    // the parent's version is still reachable
+        print("woof")
+    }
+}
+```
+
+- Single inheritance only: a class has at most one parent, declared with `extends`.
 - Method dispatch is resolved at compile time, not via runtime/virtual dispatch.
+- A child method with the same name as a parent method shadows it; there is no `override` keyword. `super.method()` calls the parent's version.
+- `super(args...)` inside `init` chains to the nearest ancestor constructor.
+- A class that declares no `init` of its own inherits its ancestor's constructors (`Cat("Whiskers")` works if `Animal` has a one-arg `init`).
 
 ### Access control
 
@@ -138,12 +172,12 @@ switch x {
 }
 ```
 
-- `for ... in range(a, b)` iterates a numeric range (upper bound exclusive,
-  per `range(1, n + 1)` covering `1..n`).
+- `for ... in range(a, b)` iterates a numeric range (upper bound exclusive, per `range(1, n + 1)` covering `1..n`).
 - `if` / `else if` / `else` with parenthesized conditions.
 - `while` with parenthesized condition.
 - `switch`/`case` exists, with each `case` given its own `{ }` block body.
 - Type checking uses the `is` keyword: `if (100 is int) { ... }`.
+- Ternary/if-else shorthand: `cond ? a : b` (right-associative, binds looser than `??`): `var label = x % 2 == 0 ? "even" : "odd"`.
 
 ## Error handling
 
@@ -188,6 +222,8 @@ l.method()
 - `import <name> as <alias>` renames the imported module.
 - `import <member> from <name>` imports a specific member.
 - `import <member>, <member> from <name>` imports specific members.
+- Members include a module's top-level variables, not just its functions.
+- OS-specific module files: when compiling for a given target OS, a file named `foo.<os>.oboe` (e.g. `foo.windows.oboe`) is preferred over `foo.oboe` for `import foo`. Useful for per-OS `cimport`s with a shared generic fallback. OS names match the build targets: `linux`, `windows`, `macos`.
 
 ## Standard library philosophy
 
@@ -196,6 +232,15 @@ l.method()
 
 - `write()` - Print without newline.
 - `input()` - Pauses execution and waits for user input, returns that input. Same as Python.
+
+### Built-in stdlib modules
+
+Importing `math`, `random` or `os` works with no file on disk, they're built into the language runtime. (A file of the same name next to your code still wins, so nothing is reserved.)
+
+- `math.abs(n)`, `math.min(a, b)`, `math.max(a, b)`, `math.pow(base, exp)`, `math.sqrt(n)` (integer math, matching the 32-bit-int world: `pow` is integer exponentiation, `sqrt` is the floor square root.)
+- `random.seed(n)`, `random.randint(lo, hi)` (inclusive on both ends, like Python), `random.choice(array)` (a deterministic PRNG: the same seed gives the same sequence on every platform.)
+- `os.run(cmd)` runs a command through the shell and returns its exit code; `os.spawn(cmd)` starts it without waiting and returns the pid.
+- `os.read_file(path)` (throws `os.FileNotFoundError`), `os.write_file(path, content)`, `os.append_file(path, content)`, `os.exists(path)`, `os.remove(path)`, `os.getenv(name)` (string, or `null` when unset).
 
 ## Project structure
 

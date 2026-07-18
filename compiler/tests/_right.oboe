@@ -1,0 +1,5 @@
+import _shared_state
+
+func add_right() {
+    return _shared_state.add(10)
+}

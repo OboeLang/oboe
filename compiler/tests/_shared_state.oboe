@@ -1,0 +1,8 @@
+// imported by both _left and _right; its top level must run exactly once
+print("shared module initialized")
+var total = 0
+
+func add(int n) {
+    total = total + n
+    return total
+}

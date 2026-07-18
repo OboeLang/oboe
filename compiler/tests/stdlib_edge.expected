@@ -1,0 +1,23 @@
+0
+1
+0
+-27
+0
+1
+1
+4
+-2
+sqrt rejects negatives: math.sqrt: negative argument
+pow rejects negative exponents
+5
+sequences repeat under one seed
+true
+randint rejects inverted bounds
+0
+1
+true
+false
+unset
+true
+true
+second write replaces

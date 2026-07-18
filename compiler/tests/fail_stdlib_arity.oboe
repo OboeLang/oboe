@@ -1,0 +1,5 @@
+import math
+
+func main(array args) {
+    print(math.abs(1, 2))
+}

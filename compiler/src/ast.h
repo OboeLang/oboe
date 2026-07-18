@@ -38,7 +38,8 @@ struct Type {
 typedef enum {
     EXPR_INT, EXPR_BOOL, EXPR_NULL, EXPR_STRING, EXPR_IDENT,
     EXPR_ARRAY, EXPR_DICT, EXPR_BINARY, EXPR_UNARY, EXPR_CALL,
-    EXPR_FIELD, EXPR_SAFE_FIELD, EXPR_INDEX, EXPR_IS, EXPR_ASSIGN
+    EXPR_FIELD, EXPR_SAFE_FIELD, EXPR_INDEX, EXPR_IS, EXPR_ASSIGN,
+    EXPR_TERNARY
 } ExprKind;
 
 struct StringPart {
@@ -65,6 +66,7 @@ struct Expr {
         struct { Expr *arr; Expr *idx; } index;
         struct { Expr *value; char *type_name; } is_check;
         struct { Expr *target; Expr *value; } assign;
+        struct { Expr *cond; Expr *then_e; Expr *else_e; } ternary;
     } as;
 };
 

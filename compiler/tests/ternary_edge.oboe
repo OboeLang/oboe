@@ -1,0 +1,33 @@
+func side(string msg) {
+    print("evaluated ${msg}")
+    return msg
+}
+
+func main(array args) {
+    // only the taken branch is evaluated
+    var r = true ? side("then") : side("else")
+    print(r)
+    var r2 = false ? side("then2") : side("else2")
+    print(r2)
+
+    // right-associative chains
+    int score = 85
+    print(score >= 90 ? "A" : score >= 80 ? "B" : score >= 70 ? "C" : "F")
+
+    // binds looser than ?? and comparison, works in call args and indexes
+    var maybe = null
+    print(maybe ?? 1 == 1 ? "coalesce first" : "nope")
+    var arr = ["zero", "one"]
+    print(arr[1 < 2 ? 1 : 0])
+    print(str(3 > 2 ? 10 : 20))
+
+    // works with logical keywords
+    var t = true
+    var f = false
+    print(t and !f ? "both" : "not both")
+
+    // side effects in (parenthesized) branches
+    var count = 0
+    t ? (count = count + 5) : (count = count + 9)
+    print(count)
+}

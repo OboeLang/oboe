@@ -1,0 +1,16 @@
+42
+3
+9
+1024
+12
+12
+rng is deterministic
+randint stays in bounds
+only
+line one
+line two
+true
+false
+3
+caught missing file: /definitely/not/a/real/path
+true

@@ -1,0 +1,50 @@
+import math
+import random
+import os
+import randint from random
+
+func main(array args) {
+    print(math.abs(0 - 42))
+    print(math.min(3, 9))
+    print(math.max(3, 9))
+    print(math.pow(2, 10))
+    print(math.sqrt(144))
+    print(math.sqrt(150)) // floor square root
+
+    // deterministic across platforms: same seed, same sequence
+    random.seed(42)
+    var a = random.randint(1, 100)
+    random.seed(42)
+    var b = randint(1, 100)
+    print(a == b ? "rng is deterministic" : "rng mismatch")
+    var lo_ok = true
+    for (i in range(0, 50)) {
+        var r = random.randint(5, 6)
+        if (r < 5 or r > 6) {
+            lo_ok = false
+        }
+    }
+    print(lo_ok ? "randint stays in bounds" : "randint out of bounds")
+    random.seed(7)
+    print(random.choice(["only"]))
+
+    // os: files and processes
+    var path = "/tmp/oboe_stdlib_test.txt"
+    os.write_file(path, "line one\n")
+    os.append_file(path, "line two")
+    print(os.read_file(path))
+    print(os.exists(path))
+    os.remove(path)
+    print(os.exists(path))
+
+    print(os.run("exit 3"))
+
+    try {
+        os.read_file("/definitely/not/a/real/path")
+    } catch (os.FileNotFoundError e) {
+        print("caught missing file: ${e}")
+    }
+
+    var home_set = os.getenv("HOME") != null
+    print(home_set is bool)
+}

@@ -158,6 +158,28 @@ void ob_install_sigint(void (*fire)(void));
 void *ob_ffi_sym(const char *lib, const char *sym);
 OboeValue ob_ffi_call(void *fn, int nargs, ...);
 
+/* built-in stdlib modules (import math / random / os). Integer-only math per
+   the 32-bit-int spec: pow is integer exponentiation, sqrt is the floor
+   square root. random is a deterministic xorshift PRNG so a given seed
+   produces the same sequence on every platform. os.read_file throws
+   os.FileNotFoundError; write/append failures throw os.FileError. */
+OboeValue ob_std_math_abs(OboeValue a);
+OboeValue ob_std_math_min(OboeValue a, OboeValue b);
+OboeValue ob_std_math_max(OboeValue a, OboeValue b);
+OboeValue ob_std_math_pow(OboeValue a, OboeValue b);
+OboeValue ob_std_math_sqrt(OboeValue a);
+OboeValue ob_std_random_seed(OboeValue a);
+OboeValue ob_std_random_randint(OboeValue a, OboeValue b); /* inclusive bounds */
+OboeValue ob_std_random_choice(OboeValue arr);
+OboeValue ob_std_os_run(OboeValue cmd);   /* runs via the shell; returns the exit code */
+OboeValue ob_std_os_spawn(OboeValue cmd); /* starts without waiting; returns the pid */
+OboeValue ob_std_os_read_file(OboeValue path);
+OboeValue ob_std_os_write_file(OboeValue path, OboeValue content);
+OboeValue ob_std_os_append_file(OboeValue path, OboeValue content);
+OboeValue ob_std_os_exists(OboeValue path);
+OboeValue ob_std_os_remove(OboeValue path);
+OboeValue ob_std_os_getenv(OboeValue name); /* string, or null when unset */
+
 /* range() and array-args entry point */
 OboeValue ob_range(int64_t a, int64_t b);
 OboeValue ob_args_from_argv(int argc, char **argv);

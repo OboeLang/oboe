@@ -1,0 +1,11 @@
+// diamond imports: main -> _left -> _shared_state, main -> _right -> _shared_state
+import _left
+import _right
+import _shared_state
+
+func main(array args) {
+    print(_left.add_left())    // 1
+    print(_right.add_right())  // 11: same module state, not two copies
+    print(_left.add_left())    // 12
+    print(_shared_state.total) // visible directly too
+}

@@ -1,0 +1,5 @@
+import math
+
+func main(array args) {
+    print(math.cbrt(27))
+}

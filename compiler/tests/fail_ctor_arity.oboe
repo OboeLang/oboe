@@ -1,0 +1,14 @@
+class Point {
+    func init(this, int x, int y) {
+        this.x = x
+        this.y = y
+    }
+}
+
+class Point3 extends Point {
+    // no init: inherits Point's two-arg constructor
+}
+
+func main(array args) {
+    var p = Point3(1, 2, 3)
+}

@@ -18,6 +18,8 @@ bin/oboe init [dir]                     # scaffold a project here, or in a new/e
 bin/oboe run path/to/file.oboe
 bin/oboe run                            # runs the project's entry file (project.json)
 bin/oboe build [file] [-o out] [-v]     # project -> dist/<name>; file -> ./<file-stem>
+    [-t linux|windows|macos] [--cc compiler]   # cross-compile (mingw-w64 / osxcross)
+    [--desktop] [--meta-name N] [--meta-version V] [--meta-description D] [--meta-icon I]
 bin/oboe tidy [-v]                      # no-op outside a project directory
 bin/oboe get <pkg> / oboe install <pkg> # stubs; no package repository exists yet
 ```
@@ -26,7 +28,7 @@ bin/oboe get <pkg> / oboe install <pkg> # stubs; no package repository exists ye
 
 Every Oboe value is represented at runtime as a single dynamic, tagged `OboeValue` (see `runtime/oboe_runtime.h`), rather than mapped to native C types per declared type. This sidesteps needing a full static type checker in this first pass, and gives heterogeneous arrays/dicts, `??`/`?.`, and `is` type-checks for free. Type annotations in Oboe source are otherwise unenforced at compile time in this version, except for one place: resolving which class's fields/methods a `.member` access refers to, which requires the compiler to know an expression's clas* statically. A lightweight local pass tracks class types only (not primitive types) through `let`, parameters, and field declarations; a `.method()`/`.field` access on an expression whose class can't be inferred is a compile error.
 
-Classes compile to plain C structs, with a class's parent embedded as the struct's first member (standard-layout pointer-cast trick), so inherited methods/fields are reachable via a pointer cast rather than a vtable, as the spec specifies non-virtual dispatch. Instance fields aren't declared up front; the compiler infers a class's field set by scanning all of its methods for `this.field = ...` assignments. `static`/`const` fields still use an explicit declaration (`static int count = 0`), since they aren't tied to any particular instance.
+Classes compile to plain C structs, with a class's parent embedded as the struct's first member (standard-layout pointer-cast trick), so inherited methods/fields are reachable via a pointer cast rather than a vtable, as the spec specifies non-virtual dispatch. `super(...)` and `super.method()` compile to direct calls on the nearest ancestor that defines the constructor/method, and a class with no `init` gets thin wrappers around its ancestor's constructors. Instance fields aren't declared up front; the compiler infers a class's field set by scanning all of its methods for `this.field = ...` assignments. `static`/`const` fields still use an explicit declaration (`static int count = 0`), since they aren't tied to any particular instance.
 
 `try`/`catch`/`finally` is implemented with `setjmp`/`longjmp`; exceptions are matched by type name string, most-specific catch clause first.
 
@@ -43,10 +45,10 @@ FFI uses `cimport symbol from "library.so"`. The symbol is resolved with `dlopen
 - No static type checking beyond class-type tracking described above. Primitive type annotations (`int`, `string`, ...) are accepted but not enforced; a mismatched type surfaces only as a runtime error.
 - Generally, we make a best-effort to provide compile errors, but officially, the entirety of invalid Oboe is UB.
 - Constructor overload resolution is by argument count only, not by type.
-- `import` resolves a module by looking for `<module>.oboe` next to the importing file, or under `.oboe/libraries/<module>.oboe`, and inlines it into the same translation unit with name-prefixing. There's no real package
-  repository yet, so `oboe get`/`oboe install` are stubs.
-- `oboe build` always produces a single executable (no separate .so/DLL embedding yet).
+- `import` resolves a module by looking for `<module>.<target-os>.oboe` then `<module>.oboe` next to the importing file, then the same pair under `.oboe/libraries/`, and inlines it into the same translation unit with name-prefixing. `math`, `random` and `os` fall back to runtime built-ins when no file shadows them. There's no real package repository yet, so `oboe get`/`oboe install` are stubs.
+- `oboe build` always produces a single executable (no separate .so/DLL embedding yet). Cross-compiling relies on an installed mingw-w64 (`-t windows`) or osxcross (`-t macos`) toolchain; Windows version metadata is embedded only when `x86_64-w64-mingw32-windres` is available.
 - `project.json` is read with a minimal targeted scan for the fields this toolchain needs, not a general JSON parser.
 - `let` is still accepted as a legacy alias for `var`; the spec spelling (`var x`, `int x`, `const var x`, `const int x`) is preferred.
-- Events and operators are global once their file is part of the program; `on` handlers fire in collection order (main file's first). Module top-level statements are not executed.
+- Events and operators are global once their file is part of the program; `on` handlers fire in collection order (main file's first).
+- Module top-level statements run once at startup in load order (deepest import first); that order is a good approximation of dependency order but isn't a true topological sort for diamond-shaped import graphs.
 - FFI arguments/returns are limited to word-sized values (ints, bools, C strings); no floats, structs, or out-parameters.

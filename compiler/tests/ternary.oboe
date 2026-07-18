@@ -1,0 +1,11 @@
+func main(array args) {
+    int x = 7
+    print(x > 5 ? "big" : "small")
+    print(x < 5 ? "yes" : x == 7 ? "seven" : "other")
+    var label = (x % 2 == 0) ? "even" : "odd"
+    print(label)
+    // ternary nests with ?? and interpolation
+    var name = null
+    print("${name ?? "anon"} is ${x > 0 ? "positive" : "negative"}")
+    print(true ? 1 + 1 : 100)
+}

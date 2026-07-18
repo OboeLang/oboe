@@ -17,8 +17,15 @@
 #include <string.h>
 #include <stdarg.h>
 #include <signal.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <process.h>
+#else
 #include <unistd.h>
+#include <sys/wait.h>
 #include <dlfcn.h>
+#endif
 
 OboeExceptionFrame *ob_exc_stack = NULL;
 OboeValue ob_current_exception;
@@ -240,11 +247,18 @@ void ob_write(OboeValue v) {
 }
 
 OboeValue ob_input(void) {
-    char *line = NULL;
-    size_t cap = 0;
-    ssize_t n = getline(&line, &cap, stdin);
-    if (n < 0) { free(line); return ob_null(); }
-    if (n > 0 && line[n - 1] == '\n') line[n - 1] = '\0';
+    /* growable fgets loop rather than getline(), which mingw lacks */
+    size_t cap = 128, n = 0;
+    char *line = malloc(cap);
+    for (;;) {
+        if (!fgets(line + n, cap - n, stdin)) {
+            if (n == 0) { free(line); return ob_null(); }
+            break;
+        }
+        n += strlen(line + n);
+        if (n > 0 && line[n - 1] == '\n') { line[n - 1] = '\0'; break; }
+        if (n + 1 >= cap) { cap *= 2; line = realloc(line, cap); }
+    }
     return ob_string_take(line);
 }
 
@@ -321,6 +335,9 @@ static volatile sig_atomic_t ob_in_sigint = 0;
 
 static void ob_sigint_handler(int sig) {
     (void)sig;
+#ifdef _WIN32
+    signal(SIGINT, ob_sigint_handler); /* the CRT resets the handler on delivery */
+#endif
     if (ob_in_sigint) _exit(130);
     ob_in_sigint = 1;
     if (ob_sigint_fire) ob_sigint_fire();
@@ -330,12 +347,16 @@ static void ob_sigint_handler(int sig) {
 
 void ob_install_sigint(void (*fire)(void)) {
     ob_sigint_fire = fire;
+#ifdef _WIN32
+    signal(SIGINT, ob_sigint_handler);
+#else
     struct sigaction sa = {0};
     sa.sa_handler = ob_sigint_handler;
     sigemptyset(&sa.sa_mask);
     /* SA_NODEFER so a second SIGINT is delivered while the handlers run */
     sa.sa_flags = SA_NODEFER;
     sigaction(SIGINT, &sa, NULL);
+#endif
 }
 
 /* ---- FFI ---- */
@@ -349,18 +370,30 @@ void *ob_ffi_sym(const char *lib, const char *sym) {
         if (strcmp(ob_ffi_libs[i].name, lib) == 0) { handle = ob_ffi_libs[i].handle; break; }
     }
     if (!handle) {
+#ifdef _WIN32
+        handle = (void *)LoadLibraryA(lib);
+        if (!handle) {
+            fprintf(stderr, "oboe: cannot load library '%s'\n", lib);
+            exit(1);
+        }
+#else
         handle = dlopen(lib, RTLD_NOW | RTLD_GLOBAL);
         if (!handle) {
             fprintf(stderr, "oboe: cannot load library '%s': %s\n", lib, dlerror());
             exit(1);
         }
+#endif
         if (ob_ffi_lib_count < OB_MAX_FFI_LIBS) {
             ob_ffi_libs[ob_ffi_lib_count].name = strdup(lib);
             ob_ffi_libs[ob_ffi_lib_count].handle = handle;
             ob_ffi_lib_count++;
         }
     }
+#ifdef _WIN32
+    void *fn = (void *)GetProcAddress((HMODULE)handle, sym);
+#else
     void *fn = dlsym(handle, sym);
+#endif
     if (!fn) {
         fprintf(stderr, "oboe: cannot find symbol '%s' in '%s'\n", sym, lib);
         exit(1);
@@ -576,4 +609,184 @@ void ob_throw(const char *type_name, OboeValue payload) {
 bool ob_exception_matches(const char *type_name) {
     if (strcmp(type_name, "Exception") == 0) return true;
     return ob_current_exception_type && strcmp(ob_current_exception_type, type_name) == 0;
+}
+
+/* ---- built-in stdlib modules: math ---- */
+
+static int64_t ob_want_int(OboeValue v, const char *what) {
+    if (v.tag != OB_INT) {
+        fprintf(stderr, "oboe: %s expects an int\n", what);
+        exit(1);
+    }
+    return v.as.i;
+}
+
+OboeValue ob_std_math_abs(OboeValue a) {
+    int64_t v = ob_want_int(a, "math.abs");
+    return ob_int(v < 0 ? -v : v);
+}
+
+OboeValue ob_std_math_min(OboeValue a, OboeValue b) {
+    int64_t x = ob_want_int(a, "math.min"), y = ob_want_int(b, "math.min");
+    return ob_int(x < y ? x : y);
+}
+
+OboeValue ob_std_math_max(OboeValue a, OboeValue b) {
+    int64_t x = ob_want_int(a, "math.max"), y = ob_want_int(b, "math.max");
+    return ob_int(x > y ? x : y);
+}
+
+OboeValue ob_std_math_pow(OboeValue a, OboeValue b) {
+    int64_t base = ob_want_int(a, "math.pow"), exp = ob_want_int(b, "math.pow");
+    if (exp < 0) ob_throw("ValueError", ob_string("math.pow: negative exponent"));
+    int64_t r = 1;
+    while (exp > 0) {
+        if (exp & 1) r *= base;
+        base *= base;
+        exp >>= 1;
+    }
+    return ob_int(r);
+}
+
+OboeValue ob_std_math_sqrt(OboeValue a) {
+    int64_t n = ob_want_int(a, "math.sqrt");
+    if (n < 0) ob_throw("ValueError", ob_string("math.sqrt: negative argument"));
+    int64_t r = 0;
+    while ((r + 1) * (r + 1) <= n) r++;
+    return ob_int(r);
+}
+
+/* ---- built-in stdlib modules: random (xorshift64*, platform-independent) ---- */
+
+static uint64_t ob_rng_state = 0x9E3779B97F4A7C15ULL;
+
+static uint64_t ob_rng_next(void) {
+    uint64_t x = ob_rng_state;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    ob_rng_state = x;
+    return x * 0x2545F4914F6CDD1DULL;
+}
+
+OboeValue ob_std_random_seed(OboeValue a) {
+    int64_t s = ob_want_int(a, "random.seed");
+    ob_rng_state = (uint64_t)s ? (uint64_t)s : 0x9E3779B97F4A7C15ULL;
+    return ob_null();
+}
+
+OboeValue ob_std_random_randint(OboeValue a, OboeValue b) {
+    int64_t lo = ob_want_int(a, "random.randint"), hi = ob_want_int(b, "random.randint");
+    if (hi < lo) ob_throw("ValueError", ob_string("random.randint: upper bound below lower bound"));
+    uint64_t span = (uint64_t)(hi - lo) + 1;
+    return ob_int(lo + (int64_t)(ob_rng_next() % span));
+}
+
+OboeValue ob_std_random_choice(OboeValue arr) {
+    if (arr.tag != OB_ARRAY || arr.as.arr->count == 0) {
+        fprintf(stderr, "oboe: random.choice expects a non-empty array\n");
+        exit(1);
+    }
+    return arr.as.arr->items[ob_rng_next() % arr.as.arr->count];
+}
+
+/* ---- built-in stdlib modules: os ---- */
+
+OboeValue ob_std_os_run(OboeValue cmd) {
+    char *c = ob_to_cstr(cmd);
+    int status = system(c);
+    free(c);
+#ifdef _WIN32
+    return ob_int(status);
+#else
+    return ob_int(WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+#endif
+}
+
+OboeValue ob_std_os_spawn(OboeValue cmd) {
+    char *c = ob_to_cstr(cmd);
+#ifdef _WIN32
+    char *full = malloc(strlen(c) + 16);
+    sprintf(full, "cmd /c %s", c);
+    STARTUPINFOA si = {0};
+    PROCESS_INFORMATION pi = {0};
+    si.cb = sizeof si;
+    if (!CreateProcessA(NULL, full, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        free(full); free(c);
+        ob_throw("os.ProcessError", ob_string("cannot spawn process"));
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    free(full); free(c);
+    return ob_int(pi.dwProcessId);
+#else
+    pid_t pid = fork();
+    if (pid < 0) { free(c); ob_throw("os.ProcessError", ob_string("cannot spawn process")); }
+    if (pid == 0) {
+        execl("/bin/sh", "sh", "-c", c, (char *)NULL);
+        _exit(127);
+    }
+    free(c);
+    return ob_int(pid);
+#endif
+}
+
+OboeValue ob_std_os_read_file(OboeValue path) {
+    char *p = ob_to_cstr(path);
+    FILE *f = fopen(p, "rb");
+    if (!f) {
+        OboeValue msg = ob_string(p);
+        free(p);
+        ob_throw("os.FileNotFoundError", msg);
+    }
+    free(p);
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = malloc(sz + 1);
+    size_t n = fread(buf, 1, sz, f);
+    buf[n] = '\0';
+    fclose(f);
+    return ob_string_take(buf);
+}
+
+static OboeValue ob_os_write(OboeValue path, OboeValue content, const char *mode) {
+    char *p = ob_to_cstr(path);
+    FILE *f = fopen(p, mode);
+    if (!f) {
+        OboeValue msg = ob_string(p);
+        free(p);
+        ob_throw("os.FileError", msg);
+    }
+    free(p);
+    char *c = ob_to_cstr(content);
+    fputs(c, f);
+    free(c);
+    fclose(f);
+    return ob_null();
+}
+
+OboeValue ob_std_os_write_file(OboeValue path, OboeValue content) { return ob_os_write(path, content, "wb"); }
+OboeValue ob_std_os_append_file(OboeValue path, OboeValue content) { return ob_os_write(path, content, "ab"); }
+
+OboeValue ob_std_os_exists(OboeValue path) {
+    char *p = ob_to_cstr(path);
+    struct stat st;
+    bool ok = stat(p, &st) == 0;
+    free(p);
+    return ob_bool(ok);
+}
+
+OboeValue ob_std_os_remove(OboeValue path) {
+    char *p = ob_to_cstr(path);
+    bool ok = remove(p) == 0;
+    free(p);
+    return ob_bool(ok);
+}
+
+OboeValue ob_std_os_getenv(OboeValue name) {
+    char *n = ob_to_cstr(name);
+    const char *v = getenv(n);
+    free(n);
+    return v ? ob_string(v) : ob_null();
 }

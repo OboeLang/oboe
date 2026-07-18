@@ -1,0 +1,3 @@
+func which_os() {
+    return "generic"
+}

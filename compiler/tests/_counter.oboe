@@ -1,0 +1,12 @@
+// module-level state: top-level statements run once at startup
+var count = 0
+const var greeting = "hello from _counter"
+
+func bump() {
+    count = count + 1
+    return count
+}
+
+func current() {
+    return count
+}

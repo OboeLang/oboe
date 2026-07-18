@@ -1,0 +1,13 @@
+import _counter
+import greeting from _counter
+
+func main(array args) {
+    print(_counter.current())
+    _counter.bump()
+    _counter.bump()
+    print(_counter.current())
+    print(_counter.count)     // module variable via module.name
+    _counter.count = 10       // assignable from outside too
+    print(_counter.bump())
+    print(greeting)           // `import x from mod` binds module variables
+}

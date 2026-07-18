@@ -1,0 +1,55 @@
+// three-level chain: A -> B (no init) -> C
+class A {
+    func init(this, int n) {
+        this.n = n
+        this.tag = "A"
+    }
+
+    func describe(this) {
+        print("n=${this.n} tag=${this.tag}")
+    }
+
+    func kind(this) {
+        return "A"
+    }
+}
+
+class B extends A {
+    // no init: inherits A's
+    func kind(this) {
+        return "B"
+    }
+}
+
+class C extends B {
+    func init(this, int n) {
+        super(n)          // B has no init, so this chains to A's
+        this.tag = "C"    // writes the slot inherited from A
+        this.extra = true // and adds a field of its own
+    }
+
+    func kind(this) {
+        return super.kind() + "+C" // resolves to B's kind
+    }
+
+    func base_kind(this) {
+        return this.kind()
+    }
+}
+
+func main(array args) {
+    var b = B(5)   // inherited one-arg constructor
+    b.describe()
+    print(b.kind())
+
+    var c = C(9)
+    c.describe()
+    print(c.kind())
+    print(c.base_kind())
+    print(c.extra)
+
+    // the whole chain is visible to `is`
+    print(c is A)
+    print(c is B)
+    print(b is A)
+}

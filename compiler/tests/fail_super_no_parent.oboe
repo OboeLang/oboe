@@ -1,0 +1,9 @@
+class Orphan {
+    func init(this) {
+        super()
+    }
+}
+
+func main(array args) {
+    var o = Orphan()
+}

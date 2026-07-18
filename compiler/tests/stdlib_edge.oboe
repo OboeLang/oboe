@@ -1,0 +1,66 @@
+import math
+import random
+import os
+import math as m
+
+func main(array args) {
+    // math edges
+    print(math.abs(0))
+    print(math.pow(2, 0))
+    print(math.pow(0, 5))
+    print(math.pow(0 - 3, 3))
+    print(math.sqrt(0))
+    print(math.sqrt(1))
+    print(math.sqrt(2))
+    print(math.min(4, 4))
+    print(m.max(0 - 9, 0 - 2)) // via alias
+    try {
+        math.sqrt(0 - 1)
+    } catch (ValueError e) {
+        print("sqrt rejects negatives: ${e}")
+    }
+    try {
+        math.pow(2, 0 - 1)
+    } catch (ValueError e) {
+        print("pow rejects negative exponents")
+    }
+
+    // random edges
+    print(random.randint(5, 5)) // single-value span
+    random.seed(1)
+    var first = [random.randint(0, 9), random.randint(0, 9), random.randint(0, 9)]
+    random.seed(1)
+    var second = [random.randint(0, 9), random.randint(0, 9), random.randint(0, 9)]
+    var same = true
+    for (i in range(0, 3)) {
+        if (first[i] != second[i]) {
+            same = false
+        }
+    }
+    print(same ? "sequences repeat under one seed" : "mismatch")
+    random.seed(3)
+    var pick = random.choice([10, 20, 30])
+    print(pick == 10 or pick == 20 or pick == 30)
+    try {
+        random.randint(10, 1)
+    } catch (ValueError e) {
+        print("randint rejects inverted bounds")
+    }
+
+    // os edges
+    print(os.run("true"))
+    print(os.run("false"))
+    print(os.exists("/"))
+    print(os.remove("/tmp/oboe_never_created_me")) // false, not an error
+    print(os.getenv("OBOE_DEFINITELY_UNSET_VAR_123") ?? "unset")
+    print(os.spawn("true") > 0)
+
+    // empty file round-trip
+    var p = "/tmp/oboe_stdlib_edge.txt"
+    os.write_file(p, "")
+    print(os.read_file(p) == "")
+    os.write_file(p, "overwritten")
+    os.write_file(p, "second write replaces")
+    print(os.read_file(p))
+    os.remove(p)
+}

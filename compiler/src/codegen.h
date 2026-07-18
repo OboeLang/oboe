@@ -18,6 +18,9 @@
 #include <stdio.h>
 
 void codegen_set_source_dir(const char *dir);
+/* "linux", "windows" or "macos"; affects `foo.<os>.oboe` module resolution.
+   Defaults to the host OS. */
+void codegen_set_target_os(const char *os);
 /* Loads the main file and every transitively imported module, then generates
    one C translation unit for the whole program. */
 void codegen_compile(const char *main_path, FILE *out);

@@ -402,8 +402,25 @@ static Expr *parse_nullish(Parser *p) {
     return e;
 }
 
-static Expr *parse_assignment(Parser *p) {
+/* `cond ? a : b`, right-associative, binds looser than ?? */
+static Expr *parse_ternary(Parser *p) {
     Expr *e = parse_nullish(p);
+    if (match(p, T_QUESTION)) {
+        int line = peek(p)->line;
+        Expr *then_e = parse_ternary(p);
+        expect(p, T_COLON, "expected ':' in ternary expression");
+        Expr *else_e = parse_ternary(p);
+        Expr *t = new_expr(EXPR_TERNARY, line);
+        t->as.ternary.cond = e;
+        t->as.ternary.then_e = then_e;
+        t->as.ternary.else_e = else_e;
+        return t;
+    }
+    return e;
+}
+
+static Expr *parse_assignment(Parser *p) {
+    Expr *e = parse_ternary(p);
     if (match(p, T_ASSIGN)) {
         int line = peek(p)->line;
         Expr *value = parse_assignment(p);
