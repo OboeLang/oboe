@@ -7,6 +7,16 @@
         "author": "author", // Optional
         "license": "license" // Optional
     },
+    "build": { // Optional, everything in here is also optional. See SPEC.md for details.
+        "output": "bin/main",
+        "target": "linux",
+        "compiler": "gcc",
+        "desktop": true,
+        "meta-name": "My Project",
+        "meta-description": "description goes here",
+        "meta-version": "1.0.0",
+        "meta-icon": "myicon.ico"
+    },
     "dependencies": { // This is where libraries are checked when running oboe tidy
         "oboe": ">=1.0.0", // Added on init. Uses the version of oboe that is running init
         "some_library": ">=1.0.0"
