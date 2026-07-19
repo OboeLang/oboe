@@ -9,6 +9,8 @@
     - This allows for running `oboe build` (all defined settings one after the other/the default settings if none are defined) or `oboe build windows` (specifically build the "windows" target as defined in project.json) to quickly build for multiple targets with unique settings for each of them
     - Don't know how necessary this is
 - In project.json, separate "meta-xxxx" tags into a "meta" object
+- Allow importing from folders, using either the folder's `main.oboe`, or an entry file as specified by a project JSON in the folder
+    - Use project name for importing, and folder name if project.json is not present
     
 # Perhaps sometime far in the future
 
