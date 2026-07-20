@@ -21,6 +21,10 @@
     - `reverse`
     - and any others...
 - Optional variables/variable defaults: `func hello(str name = "Jade")`
+    - Also, make it so you can set variables by name
+    - Like, if a function has several optional variables: `func code(int one=1, int two=2, int three=3, int four=4)`
+    - And you only needed to set `one` and `three`, you could do this: `code(6, three=5)` (setting `one` by position/index and `three` by name)
+- Give an Oboe error when a required variable is missing
 
 # Perhaps sometime far in the future
 
