@@ -25,6 +25,7 @@
     - Like, if a function has several optional variables: `func code(int one=1, int two=2, int three=3, int four=4)`
     - And you only needed to set `one` and `three`, you could do this: `code(6, three=5)` (setting `one` by position/index and `three` by name)
 - Give an Oboe error when a required variable is missing
+- Add `oboe remove` to un`get` packages.
 
 # Perhaps sometime far in the future
 
