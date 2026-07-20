@@ -577,17 +577,28 @@ static char *gen_expr(Expr *e) {
             Expr *callee = e->as.call.callee;
             /* builtins */
             if (callee->kind == EXPR_IDENT && !var_in_scope(callee->as.ident)) {
-                if (strcmp(callee->as.ident, "print") == 0 && e->as.call.arg_count == 1) {
-                    char *a = gen_expr(e->as.call.args[0]);
-                    char *r = fmt("(ob_print(%s), ob_null())", a);
-                    free(a);
-                    return r;
-                }
-                if (strcmp(callee->as.ident, "write") == 0 && e->as.call.arg_count == 1) {
-                    char *a = gen_expr(e->as.call.args[0]);
-                    char *r = fmt("(ob_write(%s), ob_null())", a);
-                    free(a);
-                    return r;
+                /* print/write take any number of arguments: zero prints an
+                   empty line, several are joined with spaces (like Python) */
+                if (strcmp(callee->as.ident, "print") == 0 || strcmp(callee->as.ident, "write") == 0) {
+                    const char *fn = callee->as.ident[0] == 'p' ? "ob_print" : "ob_write";
+                    int argc = e->as.call.arg_count;
+                    if (argc == 0) return fmt("(%s(ob_string(\"\")), ob_null())", fn);
+                    if (argc == 1) {
+                        char *a = gen_expr(e->as.call.args[0]);
+                        char *r = fmt("(%s(%s), ob_null())", fn, a);
+                        free(a);
+                        return r;
+                    }
+                    char buf[8192];
+                    int off = snprintf(buf, sizeof buf, "(%s(ob_interpolate(%d", fn, argc * 2 - 1);
+                    for (int i = 0; i < argc; i++) {
+                        char *a = gen_expr(e->as.call.args[i]);
+                        off += snprintf(buf + off, sizeof(buf) - off, "%s, %s",
+                                        i ? ", ob_string(\" \")" : "", a);
+                        free(a);
+                    }
+                    snprintf(buf + off, sizeof(buf) - off, ")), ob_null())");
+                    return strdup(buf);
                 }
                 if (strcmp(callee->as.ident, "input") == 0 && e->as.call.arg_count == 0) {
                     return strdup("ob_input()");
@@ -703,8 +714,16 @@ static char *gen_expr(Expr *e) {
                 }
                 /* plain function call */
                 KnownFunc *kf = find_known_func(callee->as.ident);
-                if (!kf)
+                if (!kf) {
+                    /* a builtin name that fell through means the arity was wrong */
+                    if (strcmp(callee->as.ident, "input") == 0)
+                        codegen_error(e->line, "input() takes no arguments");
+                    if (strcmp(callee->as.ident, "str") == 0)
+                        codegen_error(e->line, "str() takes exactly 1 argument");
+                    if (strcmp(callee->as.ident, "range") == 0)
+                        codegen_error(e->line, "range() takes exactly 2 arguments");
                     codegen_error(e->line, fmt("unknown function or class '%s'", callee->as.ident));
+                }
                 char buf[4096];
                 char fname[512];
                 if (kf->prefix[0] == '\0' && strcmp(callee->as.ident, "main") == 0)

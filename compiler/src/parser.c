@@ -627,6 +627,15 @@ static Stmt *parse_try(Parser *p) {
 static Stmt *parse_throw(Parser *p) {
     int line = peek(p)->line;
     Token *type_name = expect(p, T_IDENT, "expected exception type after throw");
+    /* dotted exception types (`throw os.FileNotFoundError(...)`), same as catch */
+    char full_type[256];
+    strcpy(full_type, type_name->text);
+    while (check(p, T_DOT) && peekAt(p, 1)->type == T_IDENT) {
+        advance(p);
+        Token *more = advance(p);
+        strcat(full_type, ".");
+        strcat(full_type, more->text);
+    }
     Expr *value = NULL;
     if (match(p, T_LPAREN)) {
         if (!check(p, T_RPAREN)) value = parse_expression(p);
@@ -634,7 +643,7 @@ static Stmt *parse_throw(Parser *p) {
     }
     match(p, T_SEMI);
     Stmt *s = new_stmt(STMT_THROW, line);
-    s->as.throw_stmt.type_name = strdup(type_name->text);
+    s->as.throw_stmt.type_name = strdup(full_type);
     s->as.throw_stmt.value = value;
     return s;
 }

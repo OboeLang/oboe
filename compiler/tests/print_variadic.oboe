@@ -1,0 +1,11 @@
+func main(array args) {
+    print()
+    print("one")
+    print("joined", "with", "spaces")
+    print("mixed:", 42, true, null, [1, 2], {"k": 3})
+    write("no", "newline")
+    write("")
+    print()
+    var name = "Jade"
+    print("interpolation ${name}", "and", "args")
+}

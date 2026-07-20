@@ -1,0 +1,17 @@
+func fail_op() {
+    throw os.FileNotFoundError("missing: config.txt")
+}
+
+func main(array args) {
+    try {
+        fail_op()
+    } catch (os.FileNotFoundError e) {
+        print("caught:", e)
+        // rethrowing a dotted type from inside a catch works too
+        try {
+            throw os.FileNotFoundError("rethrown ${e}")
+        } catch (os.FileNotFoundError e2) {
+            print(e2)
+        }
+    }
+}

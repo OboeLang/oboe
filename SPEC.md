@@ -230,6 +230,7 @@ l.method()
 - Prefer short access paths (e.g. `print`) over long chains; built-ins are not namespaced.
 - `print` is a built-in, not a stdlib function.
 
+- `print` and `write` take any number of arguments: none prints an empty line, several are joined with spaces (like Python): `print("x =", x)`.
 - `write()` - Print without newline.
 - `input()` - Pauses execution and waits for user input, returns that input. Same as Python.
 
