@@ -12,7 +12,9 @@
 - Add `pairs` and `ipairs` from Lua
     - `for (k, v in pairs(some_iterable))` for key/value pairs
     - `for (i, v in ipairs(any_iterable))` for index/value pairs
-    
+- OS library function that returns the root directory of the project/script
+- OS library function that returns the current filename of the running script?
+
 # Perhaps sometime far in the future
 
 - Add C++ support to `cimport`?
