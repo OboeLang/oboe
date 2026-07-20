@@ -14,6 +14,12 @@
     - `for (i, v in ipairs(any_iterable))` for index/value pairs
 - OS library function that returns the root directory of the project/script
 - OS library function that returns the current filename of the running script?
+- String maniuplation functions
+    - `split`
+    - `lower`
+    - `upper`
+    - `reverse`
+    - and any others...
 
 # Perhaps sometime far in the future
 
