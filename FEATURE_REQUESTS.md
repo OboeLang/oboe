@@ -20,6 +20,7 @@
     - `upper`
     - `reverse`
     - and any others...
+- Optional variables/variable defaults: `func hello(str name = "Jade")`
 
 # Perhaps sometime far in the future
 
