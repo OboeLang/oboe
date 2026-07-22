@@ -26,8 +26,8 @@ operator ||> (int a, int b) {
 
 class Vector2 {
     func init(this, int x, int y) {
-        let this.x = x
-        let this.y = y
+        var this.x = x
+        var this.y = y
     }
 
     operator + (this, Vector2 other) {
