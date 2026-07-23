@@ -26,6 +26,7 @@
     - And you only needed to set `one` and `three`, you could do this: `code(6, three=5)` (setting `one` by position/index and `three` by name)
 - Give an Oboe error when a required variable is missing
 - Add `oboe remove` to un`get` packages.
+- Show what file an error is from.
 
 # Perhaps sometime far in the future
 
