@@ -27,6 +27,15 @@
 - Give an Oboe error when a required variable is missing
 - Add `oboe remove` to un`get` packages.
 - Show what file an error is from.
+- Add `float`s
+- Add bitwise operators
+- Add other `int`s and `float`s
+    - int8
+    - int16
+    - int32 (as an optional synonym to `int`)
+    - int64
+    - Unsigned versions
+    - Unsure about what floats to add 
 
 # Perhaps sometime far in the future
 
