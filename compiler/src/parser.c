@@ -438,10 +438,12 @@ static Expr *parse_expression(Parser *p) { return parse_assignment(p); }
 
 /* Consumes an optional type name followed by an identifier: `[type] name`.
    Used for let/const/params/fields. Because both type and name are bare
-   identifiers, a type is present only when two identifiers appear back to back. */
+   identifiers, a type is present only when two identifiers appear back to back
+   *on the same line* — otherwise an uninitialized `var x` would swallow the
+   leading identifier of the next statement as its name. */
 static void parse_typed_name(Parser *p, char **out_type, char **out_name) {
     Token *first = expect(p, T_IDENT, "expected name");
-    if (check(p, T_IDENT)) {
+    if (check(p, T_IDENT) && peek(p)->line == first->line) {
         Token *second = advance(p);
         *out_type = strdup(first->text);
         *out_name = strdup(second->text);

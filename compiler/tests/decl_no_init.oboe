@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// `var x` with no initializer used to read the next statement's leading
+// identifier as its name, since `type name` is two bare identifiers.
+func add(
+    int a,
+    int b
+) {
+    return a + b
+}
+
+func main(array args) {
+    var v
+    print("declaration does not eat this line")
+    print(v)
+    print(v == null)
+
+    v = 5
+    print(v)
+
+    var unset
+    var typed_later
+    typed_later = "assigned later"
+    print(unset)
+    print(typed_later)
+
+    // a type and name on one line is still a typed declaration
+    int n = 7
+    const var c = "const"
+    print(add(n, 1))
+    print(c)
+}

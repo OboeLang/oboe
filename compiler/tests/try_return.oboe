@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// A `return` out of a try body has to pop the exception frame it pushed:
+// leaving it on the stack pointed at a dead C frame, so the next throw
+// longjmp'd into freed memory and crashed.
+func early() {
+    try {
+        return "early return from try"
+    } catch (Exception e) {
+        return "not reached"
+    }
+}
+
+func nested() {
+    try {
+        try {
+            return "return from inner try"
+        } catch (Exception e) {
+            return "not reached"
+        }
+    } catch (Exception e) {
+        return "not reached"
+    }
+}
+
+func from_catch() {
+    try {
+        throw ValueError("handled")
+    } catch (ValueError e) {
+        return "return from catch: ${e}"
+    }
+}
+
+func thrower() {
+    throw ValueError("thrown while computing return value")
+}
+
+// a throw inside the returned expression still belongs to the try around it
+func caught_in_return_expr() {
+    try {
+        return thrower()
+    } catch (ValueError e) {
+        return "caught from return expression: ${e}"
+    }
+}
+
+func main(array args) {
+    print(early())
+    print(nested())
+    print(from_catch())
+    print(caught_in_return_expr())
+    // stale frames from the returns above would corrupt this throw
+    try {
+        throw ValueError("boom")
+    } catch (ValueError e) {
+        print("still catching: ${e}")
+    }
+    print("done")
+}

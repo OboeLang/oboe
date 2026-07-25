@@ -1,0 +1,6 @@
+early return from try
+return from inner try
+return from catch: handled
+caught from return expression: thrown while computing return value
+still catching: boom
+done

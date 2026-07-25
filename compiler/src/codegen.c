@@ -68,6 +68,12 @@ typedef struct { char *name; char *prefix; } KnownFunc;
 static KnownFunc *g_known_funcs = NULL;
 static int g_known_func_count = 0;
 
+/* how many `try` frames are lexically open at the statement being generated.
+   A `return` out of a try body would otherwise leave the pushed frames on
+   ob_exc_stack after their C stack slots die, so the next throw longjmps into
+   freed memory; returns unwind back to the outermost open frame's `prev`. */
+static int g_try_depth = 0;
+
 static void codegen_error(int line, const char *msg);
 static char *fmt(const char *format, ...);
 
@@ -827,7 +833,18 @@ static void gen_stmt(Stmt *s, int indent) {
         }
         case STMT_RETURN: {
             ind(indent);
-            if (s->as.ret.value) {
+            /* returning from inside a try must drop every frame this function
+               pushed; the value is computed first so a throw in the returned
+               expression is still caught by the try it sits in */
+            if (g_try_depth > 0) {
+                if (s->as.ret.value) {
+                    char *v = gen_expr(s->as.ret.value);
+                    fprintf(OUT, "{ OboeValue __ret = %s; ob_exc_stack = __frame_0.prev; return __ret; }\n", v);
+                    free(v);
+                } else {
+                    fprintf(OUT, "{ ob_exc_stack = __frame_0.prev; return ob_null(); }\n");
+                }
+            } else if (s->as.ret.value) {
                 char *v = gen_expr(s->as.ret.value);
                 fprintf(OUT, "return %s;\n", v);
                 free(v);
@@ -925,17 +942,24 @@ static void gen_stmt(Stmt *s, int indent) {
         case STMT_TRY: {
             /* An unmatched exception must still run `finally` before propagating,
                so the rethrow is deferred via a flag until after the finally body. */
+            /* frames are suffixed with their nesting depth so a nested try
+               doesn't shadow an enclosing one, and so `return` can name the
+               outermost frame to unwind to (see g_try_depth) */
+            int depth = g_try_depth;
             ind(indent);
-            fprintf(OUT, "{ OboeExceptionFrame __frame; __frame.prev = ob_exc_stack; ob_exc_stack = &__frame;\n");
+            fprintf(OUT, "{ OboeExceptionFrame __frame_%d; __frame_%d.prev = ob_exc_stack; ob_exc_stack = &__frame_%d;\n",
+                    depth, depth, depth);
             ind(indent);
-            fprintf(OUT, "bool __rethrow = false;\n");
+            fprintf(OUT, "bool __rethrow_%d = false;\n", depth);
             ind(indent);
-            fprintf(OUT, "if (setjmp(__frame.buf) == 0) {\n");
+            fprintf(OUT, "if (setjmp(__frame_%d.buf) == 0) {\n", depth);
             push_scope();
+            g_try_depth++;
             gen_stmt_list(s->as.try_stmt.body, s->as.try_stmt.body_count, indent + 4);
+            g_try_depth--;
             pop_scope();
             ind(indent + 4);
-            fprintf(OUT, "ob_exc_stack = __frame.prev;\n");
+            fprintf(OUT, "ob_exc_stack = __frame_%d.prev;\n", depth);
             ind(indent);
             fprintf(OUT, "} else {\n");
             bool first = true;
@@ -947,23 +971,27 @@ static void gen_stmt(Stmt *s, int indent) {
                 fprintf(OUT, "OboeValue %s = ob_current_exception;\n", c->var_name);
                 push_scope();
                 define_var(c->var_name, NULL);
+                g_try_depth++;
                 gen_stmt_list(c->body, c->body_count, indent + 8);
+                g_try_depth--;
                 pop_scope();
                 ind(indent + 4);
                 fprintf(OUT, "}\n");
             }
             ind(indent + 4);
-            if (s->as.try_stmt.catches) fprintf(OUT, "else { __rethrow = true; }\n");
-            else fprintf(OUT, "__rethrow = true;\n");
+            if (s->as.try_stmt.catches) fprintf(OUT, "else { __rethrow_%d = true; }\n", depth);
+            else fprintf(OUT, "__rethrow_%d = true;\n", depth);
             ind(indent);
             fprintf(OUT, "}\n");
             if (s->as.try_stmt.finally_count > 0) {
                 push_scope();
+                g_try_depth++;
                 gen_stmt_list(s->as.try_stmt.finally_body, s->as.try_stmt.finally_count, indent);
+                g_try_depth--;
                 pop_scope();
             }
             ind(indent);
-            fprintf(OUT, "if (__rethrow) ob_throw(ob_current_exception_type, ob_current_exception);\n");
+            fprintf(OUT, "if (__rethrow_%d) ob_throw(ob_current_exception_type, ob_current_exception);\n", depth);
             ind(indent);
             fprintf(OUT, "}\n");
             break;
