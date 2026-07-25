@@ -598,7 +598,14 @@ void ob_throw(const char *type_name, OboeValue payload) {
     ob_current_exception_type = strdup(type_name);
     ob_current_exception = payload;
     if (!ob_exc_stack) {
-        fprintf(stderr, "oboe: uncaught exception %s\n", type_name);
+        /* report the payload too, so `throw ValueError("why")` isn't silently dropped */
+        if (payload.tag == OB_NULL) {
+            fprintf(stderr, "oboe: uncaught exception %s\n", type_name);
+        } else {
+            char *msg = ob_to_cstr(payload);
+            fprintf(stderr, "oboe: uncaught exception %s: %s\n", type_name, msg);
+            free(msg);
+        }
         exit(1);
     }
     OboeExceptionFrame *f = ob_exc_stack;
