@@ -34,6 +34,17 @@ static char *read_whole_file(const char *path) {
     return buf;
 }
 
+/* The project config file: `project.jsonc` is the current name (it always
+   supported `//` comments despite older docs saying `.json`), `project.json`
+   is kept as a fallback so projects written before the rename still work.
+   Returns NULL when neither exists. */
+static const char *find_project_json(void) {
+    struct stat st;
+    if (stat("project.jsonc", &st) == 0) return "project.jsonc";
+    if (stat("project.json", &st) == 0) return "project.json";
+    return NULL;
+}
+
 /* directory containing this executable, used to find runtime/oboe_runtime.{h,c} */
 static char *oboe_home(void) {
     char buf[4096];
@@ -158,7 +169,7 @@ static void cmd_init(const char *dir) {
     getcwd(cwd, sizeof cwd);
     char *base = strdup(basename(cwd));
 
-    FILE *pj = fopen("project.json", "w");
+    FILE *pj = fopen("project.jsonc", "w");
     fprintf(pj,
         "{\n"
         "    \"project\": {\n"
@@ -177,9 +188,10 @@ static void cmd_init(const char *dir) {
 }
 
 static void cmd_run_project(void) {
-    char *json = read_whole_file("project.json");
+    const char *path = find_project_json();
+    char *json = path ? read_whole_file(path) : NULL;
     if (!json) {
-        fprintf(stderr, "oboe: no project.json found (run 'oboe init' first, or pass a file to 'oboe run')\n");
+        fprintf(stderr, "oboe: no project.jsonc found (run 'oboe init' first, or pass a file to 'oboe run')\n");
         exit(1);
     }
     char *entry = json_extract_string_field(json, "entry");
@@ -469,7 +481,8 @@ static void cmd_build(BuildOpts *o) {
         if (dot && strcmp(dot, ".oboe") == 0) *dot = '\0';
         snprintf(out_path, sizeof out_path, "%s", b);
     } else {
-        char *json = read_whole_file("project.json");
+        const char *path = find_project_json();
+        char *json = path ? read_whole_file(path) : NULL;
         char *name = NULL;
         if (json) {
             entry = json_extract_string_field(json, "entry");
@@ -559,7 +572,8 @@ static void cmd_build(BuildOpts *o) {
    builds once with the plain `build` settings, as it always has. */
 static char **declared_targets(int *out_count) {
     *out_count = 0;
-    char *json = read_whole_file("project.json");
+    const char *path = find_project_json();
+    char *json = path ? read_whole_file(path) : NULL;
     if (!json) return NULL;
     char *targets = json_extract_object(json, "build.targets");
     free(json);
@@ -598,10 +612,9 @@ static void cmd_build_all(const BuildOpts *base) {
 }
 
 static void cmd_tidy(bool verbose) {
-    struct stat st;
-    if (stat("project.json", &st) != 0) {
+    if (!find_project_json()) {
         /* not a project directory: tidy does nothing */
-        if (verbose) printf("oboe: no project.json here; nothing to tidy\n");
+        if (verbose) printf("oboe: no project.jsonc here; nothing to tidy\n");
         return;
     }
     mkdir(".oboe", 0755);
@@ -622,7 +635,8 @@ static void remove_tree(const char *path) {
    file is hand-written and keeping its formatting and comments matters. A
    trailing comma left dangling on the previous entry is cleaned up. */
 static bool remove_dependency_line(const char *pkg) {
-    char *json = read_whole_file("project.json");
+    const char *path = find_project_json();
+    char *json = path ? read_whole_file(path) : NULL;
     if (!json) return false;
     char needle[256];
     snprintf(needle, sizeof needle, "\"%s\"", pkg);
@@ -665,8 +679,8 @@ static bool remove_dependency_line(const char *pkg) {
     }
 
     if (removed) {
-        FILE *f = fopen("project.json", "w");
-        if (!f) { fprintf(stderr, "oboe: cannot write project.json\n"); free(json); free(out); return false; }
+        FILE *f = fopen(path, "w");
+        if (!f) { fprintf(stderr, "oboe: cannot write %s\n", path); free(json); free(out); return false; }
         fputs(out, f);
         fclose(f);
     }
@@ -684,8 +698,8 @@ static void cmd_remove(const char *name) {
         exit(1);
     }
     struct stat st;
-    if (stat("project.json", &st) != 0) {
-        fprintf(stderr, "oboe: no project.json here; 'remove' only works inside a project\n");
+    if (!find_project_json()) {
+        fprintf(stderr, "oboe: no project.jsonc here; 'remove' only works inside a project\n");
         exit(1);
     }
 
@@ -705,7 +719,7 @@ static void cmd_remove(const char *name) {
     }
 
     if (remove_dependency_line(name)) {
-        printf("Removed \"%s\" from project.json dependencies.\n", name);
+        printf("Removed \"%s\" from project.jsonc dependencies.\n", name);
         any = true;
     }
     if (!any) printf("oboe: nothing to remove for '%s'.\n", name);

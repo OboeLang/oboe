@@ -80,6 +80,7 @@ static int g_try_depth = 0;
 static void codegen_error(int line, const char *msg);
 static char *fmt(const char *format, ...);
 static bool file_exists(const char *path);
+static char *find_project_json_in(const char *folder, char *out, size_t out_sz);
 
 /* built-in standard-library modules (import math / random / os): resolved to
    runtime-implemented functions when no module file of that name exists */
@@ -159,8 +160,7 @@ static void emit_script_path_builtins(const char *main_path) {
     snprintf(root, sizeof root, "%s", dir);
     char probe[4200]; /* sized above `root` so appending the filename can't truncate */
     for (;;) {
-        snprintf(probe, sizeof probe, "%s/project.json", root);
-        if (file_exists(probe)) break;
+        if (find_project_json_in(root, probe, sizeof probe)) break;
         char up[4096];
         snprintf(up, sizeof up, "%s", root);
         char *parent = dirname(up);
@@ -1956,12 +1956,21 @@ static bool file_exists(const char *path) {
     return true;
 }
 
-/* Entry file of a module folder: the `entry` from its project.json when it has
-   one, otherwise main.oboe. Returns NULL when the folder holds neither. */
+/* project.jsonc is the current name; project.json is kept as a fallback for
+   projects written before the rename. Writes the found path into `out` and
+   returns it, or NULL when `folder` holds neither. */
+static char *find_project_json_in(const char *folder, char *out, size_t out_sz) {
+    snprintf(out, out_sz, "%s/project.jsonc", folder);
+    if (file_exists(out)) return out;
+    snprintf(out, out_sz, "%s/project.json", folder);
+    return file_exists(out) ? out : NULL;
+}
+
+/* Entry file of a module folder: the `entry` from its project.jsonc/.json when
+   it has one, otherwise main.oboe. Returns NULL when the folder holds neither. */
 static char *folder_entry_path(const char *folder) {
     char pj[4096];
-    snprintf(pj, sizeof pj, "%s/project.json", folder);
-    char *json = pj_read_file(pj);
+    char *json = find_project_json_in(folder, pj, sizeof pj) ? pj_read_file(pj) : NULL;
     char path[4096];
     if (json) {
         char *entry = json_extract_string_field(json, "entry");
@@ -1977,11 +1986,10 @@ static char *folder_entry_path(const char *folder) {
     return file_exists(path) ? strdup(path) : NULL;
 }
 
-/* `name` of the project.json in `folder`, or NULL when it has none */
+/* `name` of the project.jsonc/.json in `folder`, or NULL when it has none */
 static char *folder_project_name(const char *folder) {
     char pj[4096];
-    snprintf(pj, sizeof pj, "%s/project.json", folder);
-    char *json = pj_read_file(pj);
+    char *json = find_project_json_in(folder, pj, sizeof pj) ? pj_read_file(pj) : NULL;
     if (!json) return NULL;
     char *name = json_extract_string_field(json, "name");
     free(json);

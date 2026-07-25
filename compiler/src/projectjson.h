@@ -16,8 +16,8 @@
 
 #include <stdbool.h>
 
-/* A minimal targeted scan of project.json rather than a general JSON parser:
-   the file's shape is fixed for this toolchain (see project.example.json), and
+/* A minimal targeted scan of project.jsonc rather than a general JSON parser:
+   the file's shape is fixed for this toolchain (see project.example.jsonc), and
    the only things ever read out of it are a handful of named scalars plus the
    `build.targets` object's keys. Comments (`//`) and nesting are tolerated only
    as far as those lookups need. */

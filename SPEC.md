@@ -12,21 +12,21 @@ oboe init # Initializes a project structure in the current directory.
 oboe get <package name> # Installs a library package to the current project, similar to PyPI or NPM.
 oboe install <package name> # Installs a program made in Oboe on the repository, like CLI tools.
 oboe remove <package name> # Un-`get`s a package: deletes its files from .oboe/libraries and
-                           # drops it from project.json's dependencies.
+                           # drops it from project.jsonc's dependencies.
 oboe tidy # Cleans up build/temp files and installs needed packages.
           # Should not do anything if not in a project directory.
     -v --verbose # Self-explanatory.
 
 # Running and Building
 oboe run helloworld.oboe # Runs a singular Oboe file as-is. Only useful for certain cases, really.
-oboe run # Runs a program from main.oboe, or something else as defined by project.json
+oboe run # Runs a program from main.oboe, or something else as defined by project.jsonc
 oboe build # Self-explanatory. Builds the program into an executable, in the dist folder.
            # Embeds all required libraries into various DLLs/.so files.
     oboe build <file> # Builds a specific script to an executable of the same name in the current folder.
     -v --verbose # Self-explanatory.
     -o --output # Manually describes the output file. Creates nonexistent folders when specified.
                 # e.g. -o my_folder/output.exe will create my_folder.
-    -t --target # Names either a build config declared in project.json's `build.targets`,
+    -t --target # Names either a build config declared in project.jsonc's `build.targets`,
                 # or an OS directly: linux, windows, macos, freebsd, openbsd or netbsd
                 # (nt/darwin/osx also accepted). Defaults to the host OS. Windows outputs
                 # get .exe appended automatically. windows needs mingw-w64 installed;
@@ -37,11 +37,11 @@ oboe build # Self-explanatory. Builds the program into an executable, in the dis
     --meta-name / --meta-version / --meta-description / --meta-icon
                 # Program metadata. On Windows targets this is embedded as version info
                 # (via windres); on macOS it fills in the .app bundle's Info.plist, and on
-                # Linux the .desktop file. Defaults come from project.json when building
+                # Linux the .desktop file. Defaults come from project.jsonc when building
                 # a project.
 ```
 
-### Build settings in project.json
+### Build settings in project.jsonc
 
 Build settings may also live under a `"build"` object, with CLI flags always taking
 precedence. Program metadata goes in a nested `"meta"` object (the older flat
@@ -311,7 +311,7 @@ l.method()
 - `import <member>, <member> from <name>` imports specific members.
 - Members include a module's top-level variables, not just its functions.
 - OS-specific module files: when compiling for a given target OS, a file named `foo.<os>.oboe` (e.g. `foo.windows.oboe`) is preferred over `foo.oboe` for `import foo`. Useful for per-OS `cimport`s with a shared generic fallback. OS names match the build targets: `linux`, `windows`, `macos`, `freebsd`, `openbsd`, `netbsd`.
-- A module may be a folder rather than a single file. A folder containing a project.json is imported under that project's `name`, entering through its `entry` file; a folder without one is imported under its own directory name, entering through its `main.oboe`. A folder module resolves its own imports relative to itself, so a library can import its siblings by bare name.
+- A module may be a folder rather than a single file. A folder containing a project.jsonc is imported under that project's `name`, entering through its `entry` file; a folder without one is imported under its own directory name, entering through its `main.oboe`. A folder module resolves its own imports relative to itself, so a library can import its siblings by bare name.
 - Resolution order for `import foo`, first in the importing file's own directory and then in `.oboe/libraries`: `foo.<target-os>.oboe`, `foo.oboe`, then a module folder.
 
 ## Standard library philosophy
@@ -331,7 +331,7 @@ Importing `math`, `random` or `os` works with no file on disk, they're built int
 - `random.seed(n)`, `random.randint(lo, hi)` (inclusive on both ends, like Python), `random.choice(array)` (a deterministic PRNG: the same seed gives the same sequence on every platform.)
 - `os.run(cmd)` runs a command through the shell and returns its exit code; `os.spawn(cmd)` starts it without waiting and returns the pid.
 - `os.read_file(path)` (throws `os.FileNotFoundError`), `os.write_file(path, content)`, `os.append_file(path, content)`, `os.exists(path)`, `os.remove(path)`, `os.getenv(name)` (string, or `null` when unset).
-- `os.script_file()` is the absolute path of the running script and `os.script_dir()` its directory; `os.project_root()` is the nearest ancestor directory containing a project.json, falling back to `os.script_dir()`. All three are resolved at compile time.
+- `os.script_file()` is the absolute path of the running script and `os.script_dir()` its directory; `os.project_root()` is the nearest ancestor directory containing a project.jsonc, falling back to `os.script_dir()`. All three are resolved at compile time.
 
 ### Methods on primitives
 
@@ -360,7 +360,7 @@ my_project/
 ├── main.oboe
 ├── .oboe
 │   └── libraries
-└── project.json    # See project.example.json for the format.
+└── project.jsonc   # See project.example.jsonc for the format.
 ```
 
 ## Object model

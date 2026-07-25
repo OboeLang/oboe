@@ -41,7 +41,7 @@ static const char *skip_ws(const char *p) {
    `key`/`key_len` name the key and `value` points at its first character. */
 typedef void (*KeyVisitor)(const char *key, size_t key_len, const char *value, void *ctx);
 
-static void walk_object(const char *obj, KeyVisitor visit, void *ctx) {
+static void walk_object_impl(const char *obj, KeyVisitor visit, void *ctx, bool any_depth) {
     const char *start = skip_ws(obj);
     /* accept a whole document as readily as an object body: without skipping a
        leading brace, a document's own top-level keys would sit at depth 1 and
@@ -56,7 +56,7 @@ static void walk_object(const char *obj, KeyVisitor visit, void *ctx) {
             if (*p == '\\') { escaped = true; continue; }
             if (*p != '"') continue;
             in_string = false;
-            if (depth == 0 && key_start) {
+            if ((any_depth || depth == 0) && key_start) {
                 const char *after = skip_ws(p + 1);
                 if (*after == ':') visit(key_start, (size_t)(p - key_start), skip_ws(after + 1), ctx);
             }
@@ -68,6 +68,10 @@ static void walk_object(const char *obj, KeyVisitor visit, void *ctx) {
         else if (*p == '}' || *p == ']') depth--;
         else if (*p == '/' && p[1] == '/') { while (p[1] && p[1] != '\n') p++; }
     }
+}
+
+static void walk_object(const char *obj, KeyVisitor visit, void *ctx) {
+    walk_object_impl(obj, visit, ctx, false);
 }
 
 typedef struct { const char *want; const char *found; } FindCtx;
@@ -139,25 +143,21 @@ char *json_extract_object(const char *json, const char *path) {
 
 /* The loose lookup: matches the field anywhere in the document, at any depth.
    Kept for `project.name` / `project.entry`, which callers want to find without
-   knowing whether they were nested. */
+   knowing whether they were nested. Walks strings/comments like walk_object
+   does, so a key inside a `//` comment or a string value is never matched. */
+static const char *find_value_any_depth(const char *json, const char *field) {
+    FindCtx ctx = { field, NULL };
+    walk_object_impl(json, find_visitor, &ctx, true);
+    return ctx.found;
+}
+
 char *json_extract_string_field(const char *json, const char *field) {
-    char needle[256];
-    snprintf(needle, sizeof needle, "\"%s\"", field);
-    const char *p = strstr(json, needle);
-    if (!p) return NULL;
-    p = strchr(p + strlen(needle), ':');
-    if (!p) return NULL;
-    return read_string_value(skip_ws(p + 1));
+    return read_string_value(find_value_any_depth(json, field));
 }
 
 bool json_extract_bool_field(const char *json, const char *field) {
-    char needle[256];
-    snprintf(needle, sizeof needle, "\"%s\"", field);
-    const char *p = strstr(json, needle);
-    if (!p) return false;
-    p = strchr(p + strlen(needle), ':');
-    if (!p) return false;
-    return strncmp(skip_ws(p + 1), "true", 4) == 0;
+    const char *p = find_value_any_depth(json, field);
+    return p && strncmp(p, "true", 4) == 0;
 }
 
 typedef struct { char **keys; int count, cap; } KeysCtx;
