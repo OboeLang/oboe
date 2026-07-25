@@ -20,6 +20,9 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <libgen.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include "projectjson.h"
 
 /* ============================= symbol tables ============================= */
 
@@ -64,7 +67,7 @@ static int g_ffi_count = 0;
 /* every declared function, so calls to unknown names are Oboe compile errors
    instead of C errors; prefix is "" for main-file functions, "module__" for
    module functions (letting a module function call a sibling by bare name) */
-typedef struct { char *name; char *prefix; } KnownFunc;
+typedef struct { char *name; char *prefix; FuncDecl *decl; } KnownFunc;
 static KnownFunc *g_known_funcs = NULL;
 static int g_known_func_count = 0;
 
@@ -76,19 +79,23 @@ static int g_try_depth = 0;
 
 static void codegen_error(int line, const char *msg);
 static char *fmt(const char *format, ...);
+static bool file_exists(const char *path);
 
 /* built-in standard-library modules (import math / random / os): resolved to
    runtime-implemented functions when no module file of that name exists */
 typedef struct { const char *name; int arity; } StdMember;
 static const StdMember k_std_math[] = {
-    {"abs", 1}, {"min", 2}, {"max", 2}, {"pow", 2}, {"sqrt", 1}, {NULL, 0}
+    {"abs", 1}, {"min", 2}, {"max", 2}, {"pow", 2}, {"sqrt", 1},
+    {"floor", 1}, {"ceil", 1}, {"round", 1}, {NULL, 0}
 };
 static const StdMember k_std_random[] = {
     {"seed", 1}, {"randint", 2}, {"choice", 1}, {NULL, 0}
 };
 static const StdMember k_std_os[] = {
     {"run", 1}, {"spawn", 1}, {"read_file", 1}, {"write_file", 2},
-    {"append_file", 2}, {"exists", 1}, {"remove", 1}, {"getenv", 1}, {NULL, 0}
+    {"append_file", 2}, {"exists", 1}, {"remove", 1}, {"getenv", 1},
+    /* resolved at compile time — see emit_script_path_builtins */
+    {"script_file", 0}, {"script_dir", 0}, {"project_root", 0}, {NULL, 0}
 };
 
 static const StdMember *std_module_members(const char *module) {
@@ -111,9 +118,63 @@ static const StdMember *std_member_lookup(const char *module, const char *member
 
 static FILE *OUT;
 
+/* File whose declarations are currently being scanned or emitted, so a codegen
+   error can name it the way the parser already names its own. Set per unit at
+   every phase that can report an error. */
+static const char *g_current_file = NULL;
+
 static void codegen_error(int line, const char *msg) {
-    fprintf(stderr, "oboe: codegen error at line %d: %s\n", line, msg);
+    fprintf(stderr, "%s:%d: error: %s\n", g_current_file ? g_current_file : "<input>", line, msg);
     exit(1);
+}
+
+/* escapes a path for embedding in a C string literal */
+static char *escape_c_string(const char *s) {
+    size_t n = strlen(s);
+    char *out = malloc(n * 2 + 1);
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '\\' || s[i] == '"') out[o++] = '\\';
+        out[o++] = s[i];
+    }
+    out[o] = '\0';
+    return out;
+}
+
+/* os.script_file(), os.script_dir() and os.project_root() answer questions the
+   compiler already knows, so they are emitted as constant-returning functions
+   named exactly as the ordinary stdlib call path expects (`ob_std_os_<name>`)
+   rather than being resolved in the runtime, which has no idea where its
+   program's source lived. project_root is the nearest ancestor directory of the
+   script holding a project.json, falling back to the script's own directory. */
+static void emit_script_path_builtins(const char *main_path) {
+    char abs[4096];
+    if (!realpath(main_path, abs)) snprintf(abs, sizeof abs, "%s", main_path);
+
+    char dirbuf[4096];
+    snprintf(dirbuf, sizeof dirbuf, "%s", abs);
+    char *dir = dirname(dirbuf);
+
+    char root[4096];
+    snprintf(root, sizeof root, "%s", dir);
+    char probe[4200]; /* sized above `root` so appending the filename can't truncate */
+    for (;;) {
+        snprintf(probe, sizeof probe, "%s/project.json", root);
+        if (file_exists(probe)) break;
+        char up[4096];
+        snprintf(up, sizeof up, "%s", root);
+        char *parent = dirname(up);
+        if (strcmp(parent, root) == 0) { snprintf(root, sizeof root, "%s", dir); break; }
+        snprintf(root, sizeof root, "%s", parent);
+    }
+
+    char *e_file = escape_c_string(abs);
+    char *e_dir = escape_c_string(dir);
+    char *e_root = escape_c_string(root);
+    fprintf(OUT, "static OboeValue ob_std_os_script_file(void) { return ob_string(\"%s\"); }\n", e_file);
+    fprintf(OUT, "static OboeValue ob_std_os_script_dir(void) { return ob_string(\"%s\"); }\n", e_dir);
+    fprintf(OUT, "static OboeValue ob_std_os_project_root(void) { return ob_string(\"%s\"); }\n\n", e_root);
+    free(e_file); free(e_dir); free(e_root);
 }
 
 static ClassDecl *find_class(const char *name) {
@@ -161,18 +222,36 @@ static ClassDecl *find_init_owner(ClassDecl *c) {
     return NULL;
 }
 
-/* index of the init overload on `c` taking `argc` non-this params, or -1 */
+/* The init overload on `c` callable with `argc` arguments, or -1. An exact
+   parameter-count match wins; otherwise the first overload whose defaults let
+   it accept `argc` arguments does. Selection is still by count alone, never by
+   argument type. */
 static int find_init_index(ClassDecl *c, int argc) {
+    int idx = 0, fallback = -1;
+    for (int i = 0; i < c->method_count; i++) {
+        if (strcmp(c->methods[i]->name, "init") != 0) continue;
+        int total = 0, required = 0;
+        for (Param *p = c->methods[i]->params; p; p = p->next) {
+            if (strcmp(p->name, "this") == 0) continue;
+            total++;
+            if (!p->default_value) required++;
+        }
+        if (total == argc) return idx;
+        if (fallback < 0 && argc >= required && argc <= total) fallback = idx;
+        idx++;
+    }
+    return fallback;
+}
+
+/* the FuncDecl behind the index find_init_index returned */
+static FuncDecl *find_init_decl(ClassDecl *c, int index) {
     int idx = 0;
     for (int i = 0; i < c->method_count; i++) {
         if (strcmp(c->methods[i]->name, "init") != 0) continue;
-        int pc = 0;
-        for (Param *p = c->methods[i]->params; p; p = p->next)
-            if (strcmp(p->name, "this") != 0) pc++;
-        if (pc == argc) return idx;
+        if (idx == index) return c->methods[i];
         idx++;
     }
-    return -1;
+    return NULL;
 }
 
 static UserOp *find_user_op(const char *sym) {
@@ -204,12 +283,16 @@ static FfiBinding *find_ffi(const char *name) {
    to functions of the same unit. */
 static const char *g_current_prefix = "";
 
-static KnownFunc *find_known_func(const char *name) {
+static KnownFunc *find_known_func_in(const char *name, const char *prefix) {
     for (int i = 0; i < g_known_func_count; i++)
         if (strcmp(g_known_funcs[i].name, name) == 0 &&
-            strcmp(g_known_funcs[i].prefix, g_current_prefix) == 0)
+            strcmp(g_known_funcs[i].prefix, prefix) == 0)
             return &g_known_funcs[i];
     return NULL;
+}
+
+static KnownFunc *find_known_func(const char *name) {
+    return find_known_func_in(name, g_current_prefix);
 }
 
 static void register_funcs(Decl *decls, const char *prefix) {
@@ -218,13 +301,18 @@ static void register_funcs(Decl *decls, const char *prefix) {
         g_known_funcs = realloc(g_known_funcs, (g_known_func_count + 1) * sizeof(KnownFunc));
         g_known_funcs[g_known_func_count].name = strdup(d->as.func->name);
         g_known_funcs[g_known_func_count].prefix = strdup(prefix);
+        g_known_funcs[g_known_func_count].decl = d->as.func;
         g_known_func_count++;
     }
 }
 
 /* ============================= scopes: variable -> static class type ===== */
 
-typedef struct EnvEntry { char *name; char *class_name; char *c_name; struct EnvEntry *next; } EnvEntry;
+/* prim_type is the declared primitive type name, kept so that assigning to an
+   already-declared `int8 x` re-applies the same coercion the declaration did */
+typedef struct EnvEntry {
+    char *name; char *class_name; char *c_name; char *prim_type; struct EnvEntry *next;
+} EnvEntry;
 typedef struct Scope { EnvEntry *entries; struct Scope *parent; } Scope;
 static Scope *g_scope = NULL;
 
@@ -232,16 +320,27 @@ static void push_scope(void) { Scope *s = calloc(1, sizeof(Scope)); s->parent = 
 static void pop_scope(void) { g_scope = g_scope->parent; }
 /* c_name is the generated C identifier when it differs from the Oboe name
    (module-level variables are prefixed globals); NULL means they match */
-static void define_var_c(const char *name, const char *class_name, const char *c_name) {
+static void define_var_full(const char *name, const char *class_name, const char *c_name,
+                            const char *prim_type) {
     EnvEntry *e = calloc(1, sizeof(EnvEntry));
     e->name = strdup(name);
     e->class_name = class_name ? strdup(class_name) : NULL;
     e->c_name = c_name ? strdup(c_name) : NULL;
+    e->prim_type = prim_type ? strdup(prim_type) : NULL;
     e->next = g_scope->entries;
     g_scope->entries = e;
 }
+static void define_var_c(const char *name, const char *class_name, const char *c_name) {
+    define_var_full(name, class_name, c_name, NULL);
+}
 static void define_var(const char *name, const char *class_name) {
-    define_var_c(name, class_name, NULL);
+    define_var_full(name, class_name, NULL, NULL);
+}
+static const char *lookup_var_prim(const char *name) {
+    for (Scope *s = g_scope; s; s = s->parent)
+        for (EnvEntry *e = s->entries; e; e = e->next)
+            if (strcmp(e->name, name) == 0) return e->prim_type;
+    return NULL;
 }
 static const char *lookup_var_cname(const char *name) {
     for (Scope *s = g_scope; s; s = s->parent)
@@ -356,12 +455,119 @@ static char *gen_string_literal(Expr *e) {
     return strdup(buf);
 }
 
-static const char *builtin_type_check(const char *type_name) {
-    if (strcmp(type_name, "int") == 0) return "ob_is_int";
-    if (strcmp(type_name, "bool") == 0) return "ob_is_bool";
-    if (strcmp(type_name, "string") == 0) return "ob_is_string";
-    if (strcmp(type_name, "array") == 0) return "ob_is_array";
-    if (strcmp(type_name, "dict") == 0) return "ob_is_dict";
+/* ---- numeric type annotations ----
+   These are the one place a declared type is enforced: storing into a variable,
+   parameter or field annotated with one of them coerces the value (wrapping
+   sized ints, rounding float32). Every other annotation stays decorative.
+
+   `int` is the unsized default — 64-bit signed storage that doesn't wrap on its
+   own — while int8/int16/int32/int64 and the unsigned spellings are genuinely
+   that wide. `float` and `float64` are the same 64-bit type; `float32` differs
+   only in rounding its stores through single precision. */
+typedef struct { const char *name; int width; bool is_unsigned; bool is_float; } NumericType;
+
+static const NumericType k_numeric_types[] = {
+    {"int",     0,  false, false},
+    {"int8",    8,  false, false},
+    {"int16",   16, false, false},
+    {"int32",   32, false, false},
+    {"int64",   64, false, false},
+    {"uint",    64, true,  false},
+    {"uint8",   8,  true,  false},
+    {"uint16",  16, true,  false},
+    {"uint32",  32, true,  false},
+    {"uint64",  64, true,  false},
+    {"float",   64, false, true},
+    {"float32", 32, false, true},
+    {"float64", 64, false, true},
+    {NULL, 0, false, false}
+};
+
+static const NumericType *numeric_type(const char *name) {
+    if (!name) return NULL;
+    for (const NumericType *t = k_numeric_types; t->name; t++)
+        if (strcmp(t->name, name) == 0) return t;
+    return NULL;
+}
+
+/* wraps `code` in the coercion for `type_name`, or returns it untouched when
+   the type isn't a numeric one (or is the unsized `int`, which never wraps) */
+static char *apply_numeric_coercion(const char *type_name, char *code) {
+    const NumericType *t = numeric_type(type_name);
+    if (!t) return code;
+    char *out;
+    if (t->is_float) out = fmt("ob_coerce_float(%s, %d)", code, t->width);
+    else if (t->width == 0) out = code; /* plain `int`: nothing to enforce */
+    else out = fmt("ob_coerce_int(%s, %d, %s)", code, t->width, t->is_unsigned ? "true" : "false");
+    if (out != code) free(code);
+    return out;
+}
+
+/* full boolean C expression for `value is <type_name>`, or NULL when the name
+   isn't a builtin type (in which case it's a class name) */
+static char *gen_builtin_type_check(const char *type_name, const char *value) {
+    if (strcmp(type_name, "bool") == 0) return fmt("ob_is_bool(%s)", value);
+    if (strcmp(type_name, "string") == 0) return fmt("ob_is_string(%s)", value);
+    if (strcmp(type_name, "array") == 0) return fmt("ob_is_array(%s)", value);
+    if (strcmp(type_name, "dict") == 0) return fmt("ob_is_dict(%s)", value);
+    if (strcmp(type_name, "null") == 0) return fmt("ob_is_null(%s)", value);
+    const NumericType *t = numeric_type(type_name);
+    if (!t) return NULL;
+    if (t->is_float) return fmt("ob_is_float(%s)", value);
+    if (t->width == 0) return fmt("ob_is_int(%s)", value);
+    /* a sized int check asks whether the value fits the range, not how it was
+       declared, so `200 is int8` is false */
+    return fmt("ob_is_int_width(%s, %d, %s)", value, t->width, t->is_unsigned ? "true" : "false");
+}
+
+/* ---- methods on primitives ----
+   The spec says primitives have methods, but the compiler only tracks class
+   types, never primitive ones — so a method whose receiver's class can't be
+   inferred is looked up here and compiled to a runtime call that takes the
+   receiver as its first argument and tag-checks it. A name shared by several
+   receiver types (`len`, `contains`, ...) therefore maps to a single
+   polymorphic runtime function. A user class's own method always wins: this
+   table is only consulted once class resolution has come up empty. */
+typedef struct { const char *name; int arity; const char *cfunc; } BuiltinMethod;
+
+static const BuiltinMethod k_builtin_methods[] = {
+    /* any receiver */
+    {"str",         0, "ob_m_str"},
+    /* shared across receiver types */
+    {"len",         0, "ob_m_len"},
+    {"contains",    1, "ob_m_contains"},
+    {"index_of",    1, "ob_m_index_of"},
+    {"reverse",     0, "ob_m_reverse"},
+    {"slice",       2, "ob_m_slice"},
+    /* strings */
+    {"upper",       0, "ob_str_upper"},
+    {"lower",       0, "ob_str_lower"},
+    {"trim",        0, "ob_str_trim"},
+    {"split",       1, "ob_str_split"},
+    {"starts_with", 1, "ob_str_starts_with"},
+    {"ends_with",   1, "ob_str_ends_with"},
+    {"replace",     2, "ob_str_replace"},
+    {"substr",      2, "ob_str_substr"},
+    {"repeat",      1, "ob_str_repeat"},
+    {"to_int",      0, "ob_str_to_int"},
+    {"to_float",    0, "ob_str_to_float"},
+    /* arrays */
+    {"push",        1, "ob_arr_push"},
+    {"pop",         0, "ob_arr_pop"},
+    {"insert",      2, "ob_arr_insert"},
+    {"remove_at",   1, "ob_arr_remove_at"},
+    {"join",        1, "ob_arr_join"},
+    /* dicts */
+    {"keys",        0, "ob_dict_keys"},
+    {"values",      0, "ob_dict_values"},
+    {"has",         1, "ob_dict_has_m"},
+    {"remove",      1, "ob_dict_remove"},
+    {NULL, 0, NULL}
+};
+
+static const BuiltinMethod *find_builtin_method(const char *name) {
+    for (const BuiltinMethod *m = k_builtin_methods; m->name; m++)
+        if (strcmp(m->name, name) == 0) return m;
     return NULL;
 }
 
@@ -370,9 +576,14 @@ static const char *builtin_type_check(const char *type_name) {
    with args (needed to know whether to look up a field or a method); when so,
    the callee is returned still open (ending in an unclosed '(') and, for
    instance methods, *out_first_arg receives the receiver pointer expression
-   that the caller must splice in as the method's first argument. */
-static char *gen_member_access_ex(Expr *field_expr, bool for_call, bool safe, char **out_first_arg) {
+   that the caller must splice in as the method's first argument. *out_decl
+   receives the resolved declaration so the caller can bind defaults and named
+   arguments against it; it stays NULL for calls with no Oboe-level declaration
+   (built-in stdlib members and primitive methods). */
+static char *gen_member_access_ex(Expr *field_expr, bool for_call, bool safe, char **out_first_arg,
+                                  FuncDecl **out_decl, int argc) {
     if (out_first_arg) *out_first_arg = NULL;
+    if (out_decl) *out_decl = NULL;
     Expr *obj = field_expr->as.field.obj;
     const char *name = field_expr->as.field.name;
 
@@ -380,7 +591,13 @@ static char *gen_member_access_ex(Expr *field_expr, bool for_call, bool safe, ch
     if (obj->kind == EXPR_IDENT && !var_in_scope(obj->as.ident)) {
         ClassDecl *sc = find_class(obj->as.ident);
         if (sc) {
-            if (for_call) return fmt("%s__%s(", sc->name, name);
+            if (for_call) {
+                FuncDecl *sm = NULL;
+                for (int i = 0; i < sc->method_count; i++)
+                    if (strcmp(sc->methods[i]->name, name) == 0) sm = sc->methods[i];
+                if (out_decl) *out_decl = sm;
+                return fmt("%s__%s(", sc->name, name);
+            }
             return fmt("%s__%s", sc->name, name);
         }
         /* module-qualified access, e.g. `alias.member` or `module.member` */
@@ -394,7 +611,13 @@ static char *gen_member_access_ex(Expr *field_expr, bool for_call, bool safe, ch
                         codegen_error(field_expr->line, "this standard-library member is a function; call it");
                     return fmt("ob_std_%s_%s(", mod, name);
                 }
-                if (for_call) return fmt("%s__%s(", mod, name);
+                if (for_call) {
+                    char *mod_prefix = fmt("%s__", mod);
+                    KnownFunc *mkf = find_known_func_in(name, mod_prefix);
+                    free(mod_prefix);
+                    if (out_decl && mkf) *out_decl = mkf->decl;
+                    return fmt("%s__%s(", mod, name);
+                }
                 return fmt("%s__%s", mod, name);
             }
         }
@@ -413,6 +636,7 @@ static char *gen_member_access_ex(Expr *field_expr, bool for_call, bool safe, ch
             if (m->is_private && strcmp(current_class, owner->name) != 0)
                 codegen_error(field_expr->line, "method is private");
             if (out_first_arg) *out_first_arg = fmt("((%s*)(this))", owner->name);
+            if (out_decl) *out_decl = m;
             return fmt("%s__%s(", owner->name, name);
         }
         FieldDecl *fd;
@@ -425,6 +649,18 @@ static char *gen_member_access_ex(Expr *field_expr, bool for_call, bool safe, ch
     const char *base_class = infer_class(obj);
     char *obj_code = is_this ? NULL : gen_expr(obj);
 
+    if (!base_class && for_call && !is_this) {
+        /* not a known class: a method on a primitive, dispatched at runtime */
+        const BuiltinMethod *bm = find_builtin_method(name);
+        if (bm) {
+            if (argc >= 0 && argc != bm->arity)
+                codegen_error(field_expr->line,
+                              fmt("'%s' takes %d argument(s), got %d", name, bm->arity, argc));
+            if (out_first_arg) *out_first_arg = obj_code;
+            else free(obj_code);
+            return fmt("%s(", bm->cfunc);
+        }
+    }
     if (!base_class) {
         codegen_error(field_expr->line, "cannot resolve the static type of this expression for member access (compile-time dispatch requires a known class)");
     }
@@ -440,6 +676,7 @@ static char *gen_member_access_ex(Expr *field_expr, bool for_call, bool safe, ch
         char *result = fmt("%s__%s(", owner->name, name);
         if (obj_code) free(obj_code);
         if (out_first_arg) *out_first_arg = ptr_expr; else free(ptr_expr);
+        if (out_decl) *out_decl = m;
         return result;
     }
 
@@ -462,7 +699,21 @@ static char *gen_member_access_ex(Expr *field_expr, bool for_call, bool safe, ch
 }
 
 static char *gen_member_access(Expr *field_expr, bool for_call, bool safe) {
-    return gen_member_access_ex(field_expr, for_call, safe, NULL);
+    return gen_member_access_ex(field_expr, for_call, safe, NULL, NULL, -1);
+}
+
+/* the declared primitive type of an assignment target, for re-coercion; NULL
+   when the target has no numeric annotation */
+static const char *assign_target_prim_type(Expr *target) {
+    if (target->kind == EXPR_IDENT) return lookup_var_prim(target->as.ident);
+    if (target->kind == EXPR_FIELD) {
+        const char *base_class = infer_class(target->as.field.obj);
+        ClassDecl *bc = find_class(base_class);
+        if (!bc) return NULL;
+        FieldDecl *fd;
+        if (find_field_owner(bc, target->as.field.name, &fd)) return fd->type_name;
+    }
+    return NULL;
 }
 
 static char *gen_assign_target_lvalue(Expr *target) {
@@ -477,9 +728,85 @@ static char *gen_assign_target_lvalue(Expr *target) {
     return NULL;
 }
 
+/* ---- argument binding ----
+   The generated C is positional, but every call site already knows which
+   declaration it targets, so defaults and `name = value` arguments are resolved
+   here rather than by emitting per-function thunks. Returns the arguments in
+   parameter order, with each omitted optional parameter's default expression
+   spliced in. `this` parameters are skipped: the receiver is supplied by the
+   method-call path, not by the argument list. */
+static int param_count_of(FuncDecl *f, int *out_required) {
+    int total = 0, required = 0;
+    for (Param *p = f->params; p; p = p->next) {
+        if (strcmp(p->name, "this") == 0) continue;
+        total++;
+        if (!p->default_value) required++;
+    }
+    if (out_required) *out_required = required;
+    return total;
+}
+
+static Expr **bind_call_args(FuncDecl *f, const char *fname, Expr *call, int *out_count) {
+    Expr **args = call->as.call.args;
+    char **names = call->as.call.arg_names;
+    int argc = call->as.call.arg_count;
+    int line = call->line;
+
+    int total = param_count_of(f, NULL);
+    Param **params = calloc(total ? total : 1, sizeof(Param *));
+    int np = 0;
+    for (Param *p = f->params; p; p = p->next)
+        if (strcmp(p->name, "this") != 0) params[np++] = p;
+
+    Expr **bound = calloc(total ? total : 1, sizeof(Expr *));
+    int pos = 0;
+    bool seen_named = false;
+    for (int i = 0; i < argc; i++) {
+        const char *name = names ? names[i] : NULL;
+        if (!name) {
+            if (seen_named)
+                codegen_error(line, fmt("positional argument after a named argument in call to '%s'", fname));
+            if (pos >= total)
+                codegen_error(line, fmt("too many arguments to '%s' (expected at most %d, got %d)",
+                                        fname, total, argc));
+            bound[pos++] = args[i];
+            continue;
+        }
+        seen_named = true;
+        int idx = -1;
+        for (int j = 0; j < total; j++) if (strcmp(params[j]->name, name) == 0) { idx = j; break; }
+        if (idx < 0)
+            codegen_error(line, fmt("unknown parameter name '%s' in call to '%s'", name, fname));
+        if (bound[idx])
+            codegen_error(line, fmt("argument '%s' given twice in call to '%s'", name, fname));
+        bound[idx] = args[i];
+    }
+    for (int j = 0; j < total; j++) {
+        if (bound[j]) continue;
+        if (!params[j]->default_value)
+            codegen_error(line, fmt("missing required argument '%s' in call to '%s'", params[j]->name, fname));
+        bound[j] = params[j]->default_value;
+    }
+    free(params);
+    *out_count = total;
+    return bound;
+}
+
+/* a bound argument, coerced to the parameter's declared numeric type */
+static char *gen_bound_arg(FuncDecl *f, int idx, Expr *arg) {
+    int seen = 0;
+    for (Param *p = f->params; p; p = p->next) {
+        if (strcmp(p->name, "this") == 0) continue;
+        if (seen++ != idx) continue;
+        return apply_numeric_coercion(p->type_name, gen_expr(arg));
+    }
+    return gen_expr(arg);
+}
+
 static char *gen_expr(Expr *e) {
     switch (e->kind) {
         case EXPR_INT: return fmt("ob_int(%lldLL)", e->as.int_val);
+        case EXPR_FLOAT: return fmt("ob_float(%.17g)", e->as.float_val);
         case EXPR_BOOL: return fmt("ob_bool(%s)", e->as.bool_val ? "true" : "false");
         case EXPR_NULL: return strdup("ob_null()");
         case EXPR_STRING: return gen_string_literal(e);
@@ -541,6 +868,11 @@ static char *gen_expr(Expr *e) {
                     strcmp(op, "<=") == 0 ? "ob_lte" :
                     strcmp(op, ">") == 0 ? "ob_gt" :
                     strcmp(op, ">=") == 0 ? "ob_gte" :
+                    strcmp(op, "&") == 0 ? "ob_band" :
+                    strcmp(op, "|") == 0 ? "ob_bor" :
+                    strcmp(op, "^") == 0 ? "ob_bxor" :
+                    strcmp(op, "<<") == 0 ? "ob_shl" :
+                    strcmp(op, ">>") == 0 ? "ob_shr" :
                     strcmp(op, "x") == 0 ? "ob_repeat" : NULL;
                 if (!fallback) {
                     /* user-declared operator: dispatch through the overload
@@ -557,15 +889,17 @@ static char *gen_expr(Expr *e) {
         }
         case EXPR_UNARY: {
             char *v = gen_expr(e->as.unary.operand);
-            char *result = strcmp(e->as.unary.op, "!") == 0 ? fmt("ob_not(%s)", v) : fmt("ob_neg(%s)", v);
+            const char *fn = strcmp(e->as.unary.op, "!") == 0 ? "ob_not" :
+                             strcmp(e->as.unary.op, "~") == 0 ? "ob_bnot" : "ob_neg";
+            char *result = fmt("%s(%s)", fn, v);
             free(v);
             return result;
         }
         case EXPR_IS: {
             char *v = gen_expr(e->as.is_check.value);
-            const char *builtin = builtin_type_check(e->as.is_check.type_name);
+            char *check = gen_builtin_type_check(e->as.is_check.type_name, v);
             char *result;
-            if (builtin) result = fmt("ob_bool(%s(%s))", builtin, v);
+            if (check) { result = fmt("ob_bool(%s)", check); free(check); }
             else result = fmt("ob_bool(ob_is_object_of(%s, &%s__classinfo))", v, e->as.is_check.type_name);
             free(v);
             return result;
@@ -637,13 +971,17 @@ static char *gen_expr(Expr *e) {
                     }
                     int chosen = find_init_index(owner, argc);
                     if (chosen < 0) codegen_error(e->line, "no ancestor constructor matches this argument count");
+                    FuncDecl *ctor = find_init_decl(owner, chosen);
                     char buf[4096];
                     int off = snprintf(buf, sizeof buf, "({ %s__init_%d((%s*)this", owner->name, chosen, owner->name);
-                    for (int i = 0; i < argc; i++) {
-                        char *a = gen_expr(e->as.call.args[i]);
+                    int bound_count;
+                    Expr **bound = bind_call_args(ctor, "super", e, &bound_count);
+                    for (int i = 0; i < bound_count; i++) {
+                        char *a = gen_bound_arg(ctor, i, bound[i]);
                         off += snprintf(buf + off, sizeof(buf) - off, ", %s", a);
                         free(a);
                     }
+                    free(bound);
                     off += snprintf(buf + off, sizeof(buf) - off, "); ob_null(); })");
                     return strdup(buf);
                 }
@@ -655,9 +993,11 @@ static char *gen_expr(Expr *e) {
                     for (int i = 0; i < c->method_count; i++) if (strcmp(c->methods[i]->name, "init") == 0) init_count++;
                     char buf[4096];
                     int off;
+                    FuncDecl *ctor = NULL;
                     if (init_count > 0) {
                         int chosen = find_init_index(c, argc);
                         if (chosen < 0) codegen_error(e->line, "no matching constructor overload for this argument count");
+                        ctor = find_init_decl(c, chosen);
                         off = snprintf(buf, sizeof buf, "%s__new_%d(", c->name, chosen);
                     } else {
                         /* no init here: inherit the nearest ancestor's constructors */
@@ -665,6 +1005,7 @@ static char *gen_expr(Expr *e) {
                         if (owner) {
                             int chosen = find_init_index(owner, argc);
                             if (chosen < 0) codegen_error(e->line, "no matching constructor overload for this argument count");
+                            ctor = find_init_decl(owner, chosen);
                             off = snprintf(buf, sizeof buf, "%s__new_inh_%d(", c->name, chosen);
                         } else if (argc == 0) {
                             off = snprintf(buf, sizeof buf, "%s__new_default(", c->name);
@@ -673,10 +1014,15 @@ static char *gen_expr(Expr *e) {
                             off = 0;
                         }
                     }
-                    for (int i = 0; i < argc; i++) {
-                        char *a = gen_expr(e->as.call.args[i]);
-                        off += snprintf(buf + off, sizeof(buf) - off, "%s%s", i ? ", " : "", a);
-                        free(a);
+                    if (ctor) {
+                        int bound_count;
+                        Expr **bound = bind_call_args(ctor, c->name, e, &bound_count);
+                        for (int i = 0; i < bound_count; i++) {
+                            char *a = gen_bound_arg(ctor, i, bound[i]);
+                            off += snprintf(buf + off, sizeof(buf) - off, "%s%s", i ? ", " : "", a);
+                            free(a);
+                        }
+                        free(bound);
                     }
                     off += snprintf(buf + off, sizeof(buf) - off, ")");
                     return strdup(buf);
@@ -707,14 +1053,32 @@ static char *gen_expr(Expr *e) {
                                 codegen_error(e->line, fmt("'%s' takes %d argument(s)", sm->name, sm->arity));
                             off = snprintf(buf, sizeof buf, "ob_std_%s_%s(",
                                            g_import_directs[i].module, callee->as.ident);
-                        } else
-                            off = snprintf(buf, sizeof buf, "%s__%s(", g_import_directs[i].module, callee->as.ident);
-                        for (int i2 = 0; i2 < e->as.call.arg_count; i2++) {
-                            char *a = gen_expr(e->as.call.args[i2]);
+                            for (int i2 = 0; i2 < e->as.call.arg_count; i2++) {
+                                char *a = gen_expr(e->as.call.args[i2]);
+                                off += snprintf(buf + off, sizeof(buf) - off, "%s%s", i2 ? ", " : "", a);
+                                free(a);
+                            }
+                            off += snprintf(buf + off, sizeof(buf) - off, ")");
+                            return strdup(buf);
+                        }
+                        /* a module's own function: bind against its declaration
+                           so defaults and named arguments work across imports */
+                        char *mod_prefix = fmt("%s__", g_import_directs[i].module);
+                        KnownFunc *mkf = find_known_func_in(callee->as.ident, mod_prefix);
+                        free(mod_prefix);
+                        if (!mkf)
+                            codegen_error(e->line, fmt("'%s' has no function '%s'",
+                                                       g_import_directs[i].module, callee->as.ident));
+                        off = snprintf(buf, sizeof buf, "%s__%s(", g_import_directs[i].module, callee->as.ident);
+                        int bound_count;
+                        Expr **bound = bind_call_args(mkf->decl, callee->as.ident, e, &bound_count);
+                        for (int i2 = 0; i2 < bound_count; i2++) {
+                            char *a = gen_bound_arg(mkf->decl, i2, bound[i2]);
                             off += snprintf(buf + off, sizeof(buf) - off, "%s%s", i2 ? ", " : "", a);
                             free(a);
                         }
                         off += snprintf(buf + off, sizeof(buf) - off, ")");
+                        free(bound);
                         return strdup(buf);
                     }
                 }
@@ -735,13 +1099,16 @@ static char *gen_expr(Expr *e) {
                 if (kf->prefix[0] == '\0' && strcmp(callee->as.ident, "main") == 0)
                     snprintf(fname, sizeof fname, "oboe_user_main");
                 else snprintf(fname, sizeof fname, "%s%s", kf->prefix, callee->as.ident);
+                int bound_count;
+                Expr **bound = bind_call_args(kf->decl, callee->as.ident, e, &bound_count);
                 int off = snprintf(buf, sizeof buf, "%s(", fname);
-                for (int i = 0; i < e->as.call.arg_count; i++) {
-                    char *a = gen_expr(e->as.call.args[i]);
+                for (int i = 0; i < bound_count; i++) {
+                    char *a = gen_bound_arg(kf->decl, i, bound[i]);
                     off += snprintf(buf + off, sizeof(buf) - off, "%s%s", i ? ", " : "", a);
                     free(a);
                 }
                 off += snprintf(buf + off, sizeof(buf) - off, ")");
+                free(bound);
                 return strdup(buf);
             }
             if (callee->kind == EXPR_FIELD) {
@@ -761,18 +1128,31 @@ static char *gen_expr(Expr *e) {
                     }
                 }
                 char *first_arg = NULL;
-                char *callee_code = gen_member_access_ex(callee, true, false, &first_arg);
+                FuncDecl *target = NULL;
+                char *callee_code = gen_member_access_ex(callee, true, false, &first_arg, &target,
+                                                        e->as.call.arg_count);
                 char args_buf[4096];
                 args_buf[0] = '\0';
                 int aoff = 0;
                 bool first = true;
                 if (first_arg) { aoff += snprintf(args_buf, sizeof args_buf, "%s", first_arg); first = false; free(first_arg); }
-                for (int i = 0; i < e->as.call.arg_count; i++) {
-                    char *a = gen_expr(e->as.call.args[i]);
+                /* target is NULL for calls with no Oboe declaration to bind
+                   against (stdlib members, primitive methods); those keep their
+                   arguments exactly as written */
+                int emit_count = e->as.call.arg_count;
+                Expr **emit_args = e->as.call.args;
+                Expr **bound = NULL;
+                if (target) {
+                    bound = bind_call_args(target, callee->as.field.name, e, &emit_count);
+                    emit_args = bound;
+                }
+                for (int i = 0; i < emit_count; i++) {
+                    char *a = target ? gen_bound_arg(target, i, emit_args[i]) : gen_expr(emit_args[i]);
                     aoff += snprintf(args_buf + aoff, sizeof(args_buf) - aoff, "%s%s", first ? "" : ", ", a);
                     first = false;
                     free(a);
                 }
+                free(bound);
                 char final_buf[8192];
                 snprintf(final_buf, sizeof final_buf, "%s%s)", callee_code, args_buf);
                 free(callee_code);
@@ -800,6 +1180,9 @@ static char *gen_expr(Expr *e) {
             }
             char *lvalue = gen_assign_target_lvalue(e->as.assign.target);
             char *val = gen_expr(e->as.assign.value);
+            /* re-apply the target's declared numeric type, so `int8 x` keeps
+               wrapping on every later assignment, not just its declaration */
+            val = apply_numeric_coercion(assign_target_prim_type(e->as.assign.target), val);
             char *r = fmt("(%s = %s)", lvalue, val);
             free(lvalue); free(val);
             return r;
@@ -817,8 +1200,9 @@ static void gen_stmt(Stmt *s, int indent) {
             const char *class_type = NULL;
             if (s->as.let.type_name && find_class(s->as.let.type_name)) class_type = s->as.let.type_name;
             else if (s->as.let.init) class_type = infer_class(s->as.let.init);
-            define_var(s->as.let.name, class_type);
+            define_var_full(s->as.let.name, class_type, NULL, s->as.let.type_name);
             char *init = s->as.let.init ? gen_expr(s->as.let.init) : strdup("ob_null()");
+            if (s->as.let.init) init = apply_numeric_coercion(s->as.let.type_name, init);
             ind(indent);
             fprintf(OUT, "%sOboeValue %s = %s;\n", s->as.let.is_const ? "const " : "", s->as.let.name, init);
             free(init);
@@ -888,7 +1272,7 @@ static void gen_stmt(Stmt *s, int indent) {
         }
         case STMT_FOR: {
             push_scope();
-            if (s->as.for_stmt.is_range) {
+            if (s->as.for_stmt.kind == FOR_RANGE) {
                 char *a = gen_expr(s->as.for_stmt.range_a);
                 char *b = gen_expr(s->as.for_stmt.range_b);
                 ind(indent);
@@ -901,15 +1285,32 @@ static void gen_stmt(Stmt *s, int indent) {
                 ind(indent);
                 fprintf(OUT, "}\n");
             } else {
+                /* One loop shape for arrays, dicts and strings: ob_iter_* does
+                   the tag dispatch, so `for (c in "abc")` and
+                   `for (k, v in pairs(d))` are the same emission with different
+                   bindings. ipairs keys are always the index, which is what
+                   ob_iter_key already returns for arrays and strings. */
                 char *iter = gen_expr(s->as.for_stmt.iterable);
                 ind(indent);
-                fprintf(OUT, "{ OboeValue __arr = %s; int64_t __n = ob_array_len(__arr);\n", iter);
+                fprintf(OUT, "{ OboeValue __it = %s; int64_t __n = ob_iter_len(__it);\n", iter);
                 free(iter);
                 ind(indent);
                 fprintf(OUT, "for (int64_t __i = 0; __i < __n; __i++) {\n");
-                ind(indent + 4);
-                fprintf(OUT, "OboeValue %s = ob_array_get(__arr, __i);\n", s->as.for_stmt.var_name);
-                define_var(s->as.for_stmt.var_name, NULL);
+                if (s->as.for_stmt.var2_name) {
+                    ind(indent + 4);
+                    if (s->as.for_stmt.kind == FOR_IPAIRS)
+                        fprintf(OUT, "OboeValue %s = ob_int(__i);\n", s->as.for_stmt.var_name);
+                    else
+                        fprintf(OUT, "OboeValue %s = ob_iter_key(__it, __i);\n", s->as.for_stmt.var_name);
+                    ind(indent + 4);
+                    fprintf(OUT, "OboeValue %s = ob_iter_value(__it, __i);\n", s->as.for_stmt.var2_name);
+                    define_var(s->as.for_stmt.var_name, NULL);
+                    define_var(s->as.for_stmt.var2_name, NULL);
+                } else {
+                    ind(indent + 4);
+                    fprintf(OUT, "OboeValue %s = ob_iter_value(__it, __i);\n", s->as.for_stmt.var_name);
+                    define_var(s->as.for_stmt.var_name, NULL);
+                }
                 gen_stmt_list(s->as.for_stmt.body, s->as.for_stmt.body_count, indent + 4);
                 ind(indent);
                 fprintf(OUT, "} }\n");
@@ -1036,6 +1437,20 @@ static void gen_param_list(FILE *f, ClassDecl *owner, Param *params, bool skip_t
     }
 }
 
+/* Binds a function's parameters in the current scope and, for any carrying a
+   numeric type annotation, emits the coercion at entry — so a declared `int8 n`
+   parameter is already wrapped by the time the body runs. */
+static void bind_params(Param *params, bool skip_this) {
+    for (Param *p = params; p; p = p->next) {
+        if (skip_this && strcmp(p->name, "this") == 0) continue;
+        const char *pc = (p->type_name && find_class(p->type_name)) ? p->type_name : NULL;
+        define_var_full(p->name, pc, NULL, p->type_name);
+        char *coerced = apply_numeric_coercion(p->type_name, strdup(p->name));
+        if (strcmp(coerced, p->name) != 0) fprintf(OUT, "    %s = %s;\n", p->name, coerced);
+        free(coerced);
+    }
+}
+
 static void gen_func_def(const char *prefix, ClassDecl *owner, FuncDecl *f) {
     bool is_method = owner != NULL;
     bool has_this = false;
@@ -1049,11 +1464,7 @@ static void gen_func_def(const char *prefix, ClassDecl *owner, FuncDecl *f) {
 
     push_scope();
     if (is_method && has_this) define_var("this", owner->name);
-    for (Param *p = f->params; p; p = p->next) {
-        if (strcmp(p->name, "this") == 0) continue;
-        const char *pc = (p->type_name && find_class(p->type_name)) ? p->type_name : NULL;
-        define_var(p->name, pc);
-    }
+    bind_params(f->params, true);
     const char *saved_class = current_class;
     current_class = is_method ? owner->name : NULL;
     gen_stmt_list(f->body, f->body_count, 4);
@@ -1228,11 +1639,7 @@ static void gen_class(ClassDecl *c) {
         fprintf(OUT, ") {\n");
         push_scope();
         define_var("this", c->name);
-        for (Param *p = m->params; p; p = p->next) {
-            if (strcmp(p->name, "this") == 0) continue;
-            const char *pc = (p->type_name && find_class(p->type_name)) ? p->type_name : NULL;
-            define_var(p->name, pc);
-        }
+        bind_params(m->params, true);
         const char *saved_class = current_class;
         current_class = c->name;
         gen_stmt_list(m->body, m->body_count, 4);
@@ -1303,10 +1710,7 @@ static void gen_class(ClassDecl *c) {
             }
             fprintf(OUT, ") {\n");
             push_scope();
-            for (Param *p = m->params; p; p = p->next) {
-                const char *pc = (p->type_name && find_class(p->type_name)) ? p->type_name : NULL;
-                define_var(p->name, pc);
-            }
+            bind_params(m->params, false);
             const char *saved_class = current_class;
             current_class = c->name;
             gen_stmt_list(m->body, m->body_count, 4);
@@ -1515,6 +1919,8 @@ void codegen_set_source_dir(const char *dir) {
 typedef struct {
     char *module;     /* NULL for the main file */
     char *prefix;     /* "" for the main file, "<module>__" otherwise */
+    char *path;       /* the file this unit came from, for diagnostics */
+    char *dir;        /* directory its own imports resolve against */
     char *src;
     Program *prog;
     bool referenced;  /* actually imported per the ASTs (or the main file) */
@@ -1543,18 +1949,94 @@ static const char *g_target_os = "linux";
 
 void codegen_set_target_os(const char *os) { g_target_os = os; }
 
-static char *resolve_module_path(const char *module) {
-    const char *dirs[] = { "%s/%s%s.oboe", "%s/.oboe/libraries/%s%s.oboe" };
+static bool file_exists(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
+
+/* Entry file of a module folder: the `entry` from its project.json when it has
+   one, otherwise main.oboe. Returns NULL when the folder holds neither. */
+static char *folder_entry_path(const char *folder) {
+    char pj[4096];
+    snprintf(pj, sizeof pj, "%s/project.json", folder);
+    char *json = pj_read_file(pj);
+    char path[4096];
+    if (json) {
+        char *entry = json_extract_string_field(json, "entry");
+        free(json);
+        if (entry) {
+            snprintf(path, sizeof path, "%s/%s", folder, entry);
+            free(entry);
+            if (file_exists(path)) return strdup(path);
+            return NULL;
+        }
+    }
+    snprintf(path, sizeof path, "%s/main.oboe", folder);
+    return file_exists(path) ? strdup(path) : NULL;
+}
+
+/* `name` of the project.json in `folder`, or NULL when it has none */
+static char *folder_project_name(const char *folder) {
+    char pj[4096];
+    snprintf(pj, sizeof pj, "%s/project.json", folder);
+    char *json = pj_read_file(pj);
+    if (!json) return NULL;
+    char *name = json_extract_string_field(json, "name");
+    free(json);
+    return name;
+}
+
+/* A folder is importable as its project.json's `name`, or — when it has no
+   project.json — as its own folder name. The project-name pass runs first so a
+   library directory can be named anything on disk. */
+static char *resolve_folder_module(const char *dir, const char *module) {
+    DIR *d = opendir(dir);
+    if (d) {
+        struct dirent *ent;
+        while ((ent = readdir(d))) {
+            if (ent->d_name[0] == '.') continue;
+            char sub[4096];
+            snprintf(sub, sizeof sub, "%s/%s", dir, ent->d_name);
+            struct stat st;
+            if (stat(sub, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+            char *pname = folder_project_name(sub);
+            if (!pname) continue;
+            bool match = strcmp(pname, module) == 0;
+            free(pname);
+            if (!match) continue;
+            char *entry = folder_entry_path(sub);
+            closedir(d);
+            return entry;
+        }
+        closedir(d);
+    }
+    char sub[4096];
+    snprintf(sub, sizeof sub, "%s/%s", dir, module);
+    struct stat st;
+    if (stat(sub, &st) == 0 && S_ISDIR(st.st_mode)) return folder_entry_path(sub);
+    return NULL;
+}
+
+/* Resolution order for `import foo`, in the importing file's directory and then
+   in .oboe/libraries: `foo.<target-os>.oboe`, `foo.oboe`, then a module folder. */
+static char *resolve_module_path(const char *dir, const char *module) {
+    const char *patterns[] = { "%s/%s.oboe", "%s/.oboe/libraries/%s.oboe" };
+    const char *roots[] = { "%s", "%s/.oboe/libraries" };
     char suffixed[512];
     snprintf(suffixed, sizeof suffixed, "%s.%s", module, g_target_os);
     for (int d = 0; d < 2; d++) {
         const char *names[] = { suffixed, module };
         for (int n = 0; n < 2; n++) {
             char path[4096];
-            snprintf(path, sizeof path, dirs[d], g_source_dir, names[n], "");
-            FILE *f = fopen(path, "rb");
-            if (f) { fclose(f); return strdup(path); }
+            snprintf(path, sizeof path, patterns[d], dir, names[n]);
+            if (file_exists(path)) return strdup(path);
         }
+        char root[4096];
+        snprintf(root, sizeof root, roots[d], dir);
+        char *folder = resolve_folder_module(root, module);
+        if (folder) return folder;
     }
     return NULL;
 }
@@ -1582,11 +2064,11 @@ static bool is_ident_char(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
 }
 
-static void load_unit_textual(const char *module, char *src);
+static void load_unit_textual(const char *module, char *src, const char *path, const char *dir);
 
 /* extracts module names from `import ...` lines and loads those files too;
    misses here are harmless (the AST-driven resolve pass loads stragglers) */
-static void scan_imports_textual(const char *src) {
+static void scan_imports_textual(const char *src, const char *dir) {
     char *s = strip_for_scan(src);
     size_t len = strlen(s);
     for (size_t i = 0; i + 6 < len; i++) {
@@ -1609,25 +2091,41 @@ static void scan_imports_textual(const char *src) {
         while (is_ident_char(word[k]) && k < (int)sizeof(name) - 1) { name[k] = word[k]; k++; }
         name[k] = '\0';
         if (k == 0 || find_unit(name) >= 0) continue;
-        char *path = resolve_module_path(name);
+        char *path = resolve_module_path(dir, name);
         if (!path) continue; /* not a module file; the parse pass will complain if it was real */
         char *msrc = read_whole_file(path);
+        if (msrc) {
+            /* a module resolves its own imports relative to itself, so a
+               library folder can import its siblings by bare name */
+            char dirbuf[4096];
+            snprintf(dirbuf, sizeof dirbuf, "%s", path);
+            load_unit_textual(name, msrc, path, dirname(dirbuf));
+        }
         free(path);
-        if (msrc) load_unit_textual(name, msrc);
     }
     free(s);
 }
 
-static void load_unit_textual(const char *module, char *src) {
+static void load_unit_textual(const char *module, char *src, const char *path, const char *dir) {
     g_units = realloc(g_units, (g_unit_count + 1) * sizeof(Unit));
     Unit *u = &g_units[g_unit_count++];
     u->module = module ? strdup(module) : NULL;
     u->prefix = module ? fmt("%s__", module) : strdup("");
+    u->path = strdup(path);
+    u->dir = strdup(dir);
     u->src = src;
     u->prog = NULL;
     u->referenced = false;
     u->builtin = false;
-    scan_imports_textual(src);
+    scan_imports_textual(src, u->dir);
+}
+
+/* the source file a generated symbol's unit came from, for diagnostics raised
+   outside the per-unit emission loop (static initializers, operators, handlers) */
+static const char *unit_file_for_prefix(const char *prefix) {
+    for (int i = 0; i < g_unit_count; i++)
+        if (strcmp(g_units[i].prefix, prefix) == 0) return g_units[i].path;
+    return NULL;
 }
 
 static bool module_is_builtin(const char *module) {
@@ -1640,20 +2138,22 @@ static void parse_unit(int ui) {
     if (u->prog) return;
     int tok_count;
     Token *toks = lex_all(u->src, &tok_count);
-    u->prog = parse_program(toks, tok_count, u->module ? u->module : g_main_filename);
+    u->prog = parse_program(toks, tok_count, u->path);
 }
 
 /* finds (or late-loads) a module unit, parsed */
-static int ensure_unit(const char *module) {
+static int ensure_unit(const char *module, const char *from_dir) {
     int ui = find_unit(module);
     if (ui < 0) {
-        char *path = resolve_module_path(module);
+        char *path = resolve_module_path(from_dir, module);
         if (!path && std_module_members(module)) {
             /* no file shadows it: the built-in stdlib module */
             g_units = realloc(g_units, (g_unit_count + 1) * sizeof(Unit));
             Unit *u = &g_units[g_unit_count++];
             u->module = strdup(module);
             u->prefix = fmt("%s__", module);
+            u->path = fmt("<builtin %s>", module);
+            u->dir = strdup(from_dir);
             u->src = strdup("");
             u->prog = NULL;
             u->referenced = false;
@@ -1664,13 +2164,15 @@ static int ensure_unit(const char *module) {
         }
         if (!path) {
             fprintf(stderr, "oboe: cannot find module '%s' (looked in %s and %s/.oboe/libraries)\n",
-                    module, g_source_dir, g_source_dir);
+                    module, from_dir, from_dir);
             exit(1);
         }
         char *src = read_whole_file(path);
-        free(path);
         int before = g_unit_count;
-        load_unit_textual(module, src);
+        char dirbuf[4096];
+        snprintf(dirbuf, sizeof dirbuf, "%s", path);
+        load_unit_textual(module, src, path, dirname(dirbuf));
+        free(path);
         for (int i = before; i < g_unit_count; i++) lex_prescan_ops(g_units[i].src);
         ui = find_unit(module);
     }
@@ -1700,7 +2202,7 @@ static void resolve_imports(int ui) {
             g_import_aliases[g_import_alias_count].owner = strdup(owner);
             g_import_alias_count++;
         }
-        int dep = ensure_unit(imp->module);
+        int dep = ensure_unit(imp->module, g_units[ui].dir);
         if (!g_units[dep].referenced) {
             g_units[dep].referenced = true;
             resolve_imports(dep);
@@ -1821,6 +2323,7 @@ static void emit_extras_defs(void) {
     /* top-level custom operators */
     for (int i = 0; i < g_user_op_count; i++) {
         FuncDecl *f = g_user_ops[i].decl;
+        g_current_file = unit_file_for_prefix(g_user_ops[i].prefix);
         Param *a = f->params, *b = f->params->next;
         fprintf(OUT, "static OboeValue %s(OboeValue %s, OboeValue %s) {\n", g_user_ops[i].cfunc, a->name, b->name);
         g_current_prefix = g_user_ops[i].prefix;
@@ -1836,6 +2339,7 @@ static void emit_extras_defs(void) {
     /* event handlers, in declaration order */
     for (int i = 0; i < g_handler_count; i++) {
         OnDecl *h = g_handlers[i].decl;
+        g_current_file = unit_file_for_prefix(g_handlers[i].prefix);
         fprintf(OUT, "static OboeValue %s(OboeValue __ev) {\n", g_handlers[i].cfunc);
         fprintf(OUT, "    (void)__ev;\n");
         g_current_prefix = g_handlers[i].prefix;
@@ -1891,7 +2395,7 @@ void codegen_compile(const char *main_path, FILE *out) {
         fprintf(stderr, "oboe: cannot read '%s'\n", main_path);
         exit(1);
     }
-    load_unit_textual(NULL, main_src);
+    load_unit_textual(NULL, main_src, main_path, g_source_dir ? g_source_dir : ".");
 
     /* phase 2: register every custom operator symbol before any tokenizing */
     for (int i = 0; i < g_unit_count; i++) lex_prescan_ops(g_units[i].src);
@@ -1904,6 +2408,7 @@ void codegen_compile(const char *main_path, FILE *out) {
     /* phase 4: collect symbols from every referenced unit */
     for (int i = 0; i < g_unit_count; i++) {
         if (!g_units[i].referenced) continue;
+        g_current_file = g_units[i].path;
         collect_classes(g_units[i].prog->decls, g_units[i].prefix);
         register_funcs(g_units[i].prog->decls, g_units[i].prefix);
         collect_extras(g_units[i].prog->decls, g_units[i].prefix);
@@ -1913,6 +2418,7 @@ void codegen_compile(const char *main_path, FILE *out) {
 
     /* phase 5: emit */
     fprintf(out, "#include \"oboe_runtime.h\"\n#include <stdlib.h>\n#include <stdio.h>\n\n");
+    emit_script_path_builtins(main_path);
 
     for (int i = 0; i < g_class_count; i++) emit_class_struct(g_classes[i], i);
 
@@ -1949,6 +2455,7 @@ void codegen_compile(const char *main_path, FILE *out) {
         if (!g_units[ui].referenced) continue;
         const char *pfx = g_units[ui].prefix[0] ? g_units[ui].prefix : NULL;
         g_current_prefix = g_units[ui].prefix;
+        g_current_file = g_units[ui].path;
 
         /* the unit's own top-level variables resolve by bare name inside it */
         push_scope();
@@ -1999,6 +2506,7 @@ void codegen_compile(const char *main_path, FILE *out) {
         const char *saved_class = current_class;
         current_class = c->name;
         g_current_prefix = c->unit_prefix ? c->unit_prefix : "";
+        g_current_file = unit_file_for_prefix(g_current_prefix);
         for (FieldDecl *fd = c->fields; fd; fd = fd->next) {
             if (!fd->is_static) continue;
             char *v = fd->init ? gen_expr(fd->init) : strdup("ob_null()");

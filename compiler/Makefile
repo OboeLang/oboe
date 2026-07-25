@@ -14,8 +14,11 @@
 CC = gcc
 CFLAGS = -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Wall -Wextra -Wno-unused-parameter -g -Iruntime -Isrc
 
-SRC = src/lexer.c src/parser.c src/codegen.c src/main.c
+SRC = src/lexer.c src/parser.c src/codegen.c src/projectjson.c src/main.c
 OBJ = $(SRC:.c=.o)
+# every object depends on every header: the set is small, and without this a
+# change to ast.h or the runtime header silently leaves stale objects linked in
+HDR = src/ast.h src/lexer.h src/parser.h src/codegen.h src/projectjson.h runtime/oboe_runtime.h
 
 BIN = bin/oboe
 
@@ -27,7 +30,7 @@ bin:
 $(BIN): bin $(OBJ)
 	$(CC) $(CFLAGS) $(OBJ) -o $(BIN)
 
-%.o: %.c
+%.o: %.c $(HDR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 test: $(BIN)

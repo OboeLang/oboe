@@ -17,7 +17,7 @@
 #include <stddef.h>
 
 typedef enum {
-    T_EOF, T_IDENT, T_INT, T_STRING,
+    T_EOF, T_IDENT, T_INT, T_FLOAT, T_STRING,
     /* keywords */
     T_LET, T_CONST, T_FUNC, T_RETURN, T_CLASS, T_STATIC, T_PRIVATE,
     T_IF, T_ELSE, T_WHILE, T_FOR, T_IN, T_SWITCH, T_CASE,
@@ -32,6 +32,7 @@ typedef enum {
     T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PERCENT,
     T_ASSIGN, T_EQ, T_NEQ, T_LT, T_LTE, T_GT, T_GTE,
     T_NOT, T_ANDAND, T_OROR,
+    T_AMP, T_PIPE, T_CARET, T_TILDE, T_SHL, T_SHR,
     T_QQ, T_QDOT, T_QUESTION,
     T_ARROW,
     T_CUSTOMOP /* a user-declared operator symbol, e.g. `||>`; text holds the symbol */
@@ -41,6 +42,7 @@ typedef struct {
     TokenType type;
     char *text;   /* owned, NUL-terminated lexeme (for idents/strings holds decoded value for T_STRING parts handled separately) */
     long long ival;
+    double dval;  /* T_FLOAT */
     int line;
 } Token;
 

@@ -22,6 +22,7 @@
 typedef enum {
     OB_NULL,
     OB_INT,
+    OB_FLOAT,
     OB_BOOL,
     OB_STRING,
     OB_ARRAY,
@@ -44,10 +45,20 @@ struct OboeObject {
     const OboeClassInfo *cls;
 };
 
+/* `width` and `is_unsigned` describe an OB_INT's declared integer type; they sit
+   outside the union so every existing `ob_int()` call keeps meaning "plain int".
+   width 0 is the default `int` (64-bit signed storage, no wrapping on its own);
+   8/16/32/64 are the sized types, whose stores wrap and whose arithmetic
+   promotes to the wider (and, on a tie, unsigned) operand. Floats carry
+   width 32 when they were stored into a `float32`, purely so the value can be
+   re-rounded on later assignments; arithmetic is always done in double. */
 struct OboeValue {
     OboeTag tag;
+    uint8_t width;
+    bool is_unsigned;
     union {
         int64_t i;
+        double f;
         bool b;
         char *s;
         OboeArray *arr;
@@ -75,6 +86,8 @@ struct OboeDict {
 
 /* constructors */
 OboeValue ob_int(int64_t v);
+OboeValue ob_int_sized(int64_t v, int width, bool is_unsigned);
+OboeValue ob_float(double v);
 OboeValue ob_bool(bool v);
 OboeValue ob_string(const char *v);
 OboeValue ob_string_take(char *v); /* takes ownership of malloc'd buffer */
@@ -127,8 +140,28 @@ OboeValue ob_repeat(OboeValue a, OboeValue b); /* the `x` repetition operator */
 OboeValue ob_coalesce(OboeValue a, OboeValue b); /* ?? */
 bool ob_truthy(OboeValue v);
 
+/* bitwise operators. Integer-only: a float operand is a type error. The result
+   takes the promoted width of the operands, like the arithmetic operators. */
+OboeValue ob_band(OboeValue a, OboeValue b);
+OboeValue ob_bor(OboeValue a, OboeValue b);
+OboeValue ob_bxor(OboeValue a, OboeValue b);
+OboeValue ob_shl(OboeValue a, OboeValue b);
+OboeValue ob_shr(OboeValue a, OboeValue b);
+OboeValue ob_bnot(OboeValue a);
+
+/* Coercion at typed stores: `int8 x = <expr>` wraps the value to 8 bits, and
+   `float32 f = <expr>` rounds it through single precision. Applied by codegen
+   wherever a variable, parameter or field with a numeric type annotation is
+   assigned, which is the only place declared types are enforced. */
+OboeValue ob_coerce_int(OboeValue v, int width, bool is_unsigned);
+OboeValue ob_coerce_float(OboeValue v, int width);
+
 /* type checks (`is` keyword) */
 bool ob_is_int(OboeValue v);
+bool ob_is_float(OboeValue v);
+/* `x is int8` asks whether the value fits that type's range, not how it was
+   declared, so `200 is int8` is false while `127 is int8` is true. */
+bool ob_is_int_width(OboeValue v, int width, bool is_unsigned);
 bool ob_is_bool(OboeValue v);
 bool ob_is_string(OboeValue v);
 bool ob_is_array(OboeValue v);
@@ -158,16 +191,20 @@ void ob_install_sigint(void (*fire)(void));
 void *ob_ffi_sym(const char *lib, const char *sym);
 OboeValue ob_ffi_call(void *fn, int nargs, ...);
 
-/* built-in stdlib modules (import math / random / os). Integer-only math per
-   the 32-bit-int spec: pow is integer exponentiation, sqrt is the floor
-   square root. random is a deterministic xorshift PRNG so a given seed
-   produces the same sequence on every platform. os.read_file throws
-   os.FileNotFoundError; write/append failures throw os.FileError. */
+/* built-in stdlib modules (import math / random / os). math keeps its integer
+   behavior for integer arguments — pow is integer exponentiation and sqrt is
+   the floor square root — and switches to floating-point when any argument is
+   a float. random is a deterministic xorshift PRNG so a given seed produces the
+   same sequence on every platform. os.read_file throws os.FileNotFoundError;
+   write/append failures throw os.FileError. */
 OboeValue ob_std_math_abs(OboeValue a);
 OboeValue ob_std_math_min(OboeValue a, OboeValue b);
 OboeValue ob_std_math_max(OboeValue a, OboeValue b);
 OboeValue ob_std_math_pow(OboeValue a, OboeValue b);
 OboeValue ob_std_math_sqrt(OboeValue a);
+OboeValue ob_std_math_floor(OboeValue a); /* returns an int */
+OboeValue ob_std_math_ceil(OboeValue a);
+OboeValue ob_std_math_round(OboeValue a); /* half away from zero */
 OboeValue ob_std_random_seed(OboeValue a);
 OboeValue ob_std_random_randint(OboeValue a, OboeValue b); /* inclusive bounds */
 OboeValue ob_std_random_choice(OboeValue arr);
@@ -183,6 +220,53 @@ OboeValue ob_std_os_getenv(OboeValue name); /* string, or null when unset */
 /* range() and array-args entry point */
 OboeValue ob_range(int64_t a, int64_t b);
 OboeValue ob_args_from_argv(int argc, char **argv);
+
+/* ---- iteration ----
+   One runtime dispatch point behind every `for` form, so codegen emits the same
+   loop shape whatever it is iterating. Arrays yield their elements, strings
+   yield one-character strings, and dicts yield their values keyed by name.
+   ob_iter_key is the index for arrays and strings, and the key for dicts, which
+   is what makes `pairs` a superset of `ipairs` on the sequence types. */
+int64_t ob_iter_len(OboeValue v);
+OboeValue ob_iter_key(OboeValue v, int64_t i);
+OboeValue ob_iter_value(OboeValue v, int64_t i);
+
+/* ---- methods on primitives ----
+   `"a,b".split(",")`, `[1,2].len()` and friends. Each takes its receiver as the
+   first argument and throws a TypeError when the receiver's tag doesn't match,
+   since the compiler cannot know a primitive's type statically. */
+/* Methods whose name is shared across receiver types dispatch on the tag at
+   runtime, because the compiler never knows a primitive's type statically:
+   `x.len()` compiles identically whether x is a string, array or dict. */
+OboeValue ob_m_len(OboeValue v);
+OboeValue ob_m_contains(OboeValue v, OboeValue needle);
+OboeValue ob_m_index_of(OboeValue v, OboeValue needle); /* -1 when absent */
+OboeValue ob_m_reverse(OboeValue v);
+OboeValue ob_m_slice(OboeValue v, OboeValue start, OboeValue end); /* half-open, clamped */
+OboeValue ob_m_str(OboeValue v);
+
+OboeValue ob_str_upper(OboeValue s);
+OboeValue ob_str_lower(OboeValue s);
+OboeValue ob_str_trim(OboeValue s);
+OboeValue ob_str_split(OboeValue s, OboeValue sep);
+OboeValue ob_str_starts_with(OboeValue s, OboeValue prefix);
+OboeValue ob_str_ends_with(OboeValue s, OboeValue suffix);
+OboeValue ob_str_replace(OboeValue s, OboeValue from, OboeValue to); /* all occurrences */
+OboeValue ob_str_substr(OboeValue s, OboeValue start, OboeValue len);
+OboeValue ob_str_repeat(OboeValue s, OboeValue n);
+OboeValue ob_str_to_int(OboeValue s);   /* throws ValueError when unparsable */
+OboeValue ob_str_to_float(OboeValue s);
+
+OboeValue ob_arr_push(OboeValue a, OboeValue v);
+OboeValue ob_arr_pop(OboeValue a);
+OboeValue ob_arr_insert(OboeValue a, OboeValue idx, OboeValue v);
+OboeValue ob_arr_remove_at(OboeValue a, OboeValue idx);
+OboeValue ob_arr_join(OboeValue a, OboeValue sep);
+
+OboeValue ob_dict_keys(OboeValue d);
+OboeValue ob_dict_values(OboeValue d);
+OboeValue ob_dict_has_m(OboeValue d, OboeValue key);
+OboeValue ob_dict_remove(OboeValue d, OboeValue key);
 
 /* exceptions: try/catch/finally is implemented with setjmp/longjmp.
    Matching is by exception type name (string), most-specific-first,

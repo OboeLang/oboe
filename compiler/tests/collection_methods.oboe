@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+func main(array args) {
+    var a = [3, 1, 2]
+    print(a.len())
+    a.push(4)
+    print(a)
+    print(a.pop(), a)
+    print(a.contains(2), a.contains(9))
+    print(a.index_of(1), a.index_of(9))
+    print(a.join("-"))
+    print(a.reverse(), a)
+    print(a.slice(1, 3))
+    a.insert(0, 99)
+    print(a)
+    print(a.remove_at(0), a)
+
+    var d = {"b": 2, "a": 1}
+    print(d.len())
+    print(d.keys())
+    print(d.values())
+    print(d.has("a"), d.has("z"))
+    print(d.contains("a"))
+    print(d.remove("a"), d)
+
+    // len() is shared across receiver types
+    print("abc".len(), [1, 2].len(), {"k": 1}.len())
+}

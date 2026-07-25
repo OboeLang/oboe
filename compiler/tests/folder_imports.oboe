@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+// _folderlib/ declares itself as the project "shapes", so that is the name it
+// is imported under; _plainfolder/ has no project.json and goes by its folder
+// name, entering through main.oboe.
+import shapes
+import _plainfolder as plain
+
+func main(array args) {
+    print(shapes.area(10))
+    print(shapes.area(10, 4))
+    print(plain.shout("quiet"))
+}

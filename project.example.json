@@ -12,10 +12,29 @@
         "target": "linux",
         "compiler": "gcc",
         "desktop": true,
-        "meta-name": "My Project",
-        "meta-description": "description goes here",
-        "meta-version": "1.0.0",
-        "meta-icon": "myicon.ico"
+        "meta": { // Program metadata. The older flat "meta-name" etc. keys still work.
+            "name": "My Project",
+            "description": "description goes here",
+            "version": "1.0.0",
+            "icon": "myicon.ico"
+        },
+        "targets": { // Optional named build configs. `oboe build` builds every one of
+                     // them in turn; `oboe build -t windows` builds just that one.
+                     // Each may set any build field and inherits the rest from above.
+                     // A config with no "target" targets the OS it is named after.
+            "linux": {
+                "output": "dist/my_project",
+                "desktop": true
+            },
+            "windows": {
+                "output": "dist/my_project.exe"
+            },
+            "portable": {
+                "target": "linux",
+                "output": "dist/my_project-portable",
+                "desktop": false
+            }
+        }
     },
     "dependencies": { // This is where libraries are checked when running oboe tidy
         "oboe": ">=1.0.0", // Added on init. Uses the version of oboe that is running init

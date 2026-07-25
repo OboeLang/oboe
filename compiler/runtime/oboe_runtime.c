@@ -17,6 +17,8 @@
 #include <string.h>
 #include <stdarg.h>
 #include <signal.h>
+#include <ctype.h>
+#include <math.h>
 #include <sys/stat.h>
 #ifdef _WIN32
 #include <windows.h>
@@ -36,12 +38,74 @@ static void ob_oom(void) {
     exit(1);
 }
 
-OboeValue ob_int(int64_t v) { OboeValue r; r.tag = OB_INT; r.as.i = v; return r; }
-OboeValue ob_bool(bool v) { OboeValue r; r.tag = OB_BOOL; r.as.b = v; return r; }
-OboeValue ob_null(void) { OboeValue r; r.tag = OB_NULL; r.as.i = 0; return r; }
+/* ---- numeric representation ----
+   An OB_INT is stored as an int64_t plus the width/signedness of the Oboe type
+   it was declared as. width 0 means the plain `int` (64-bit signed); 8/16/32/64
+   are the sized types. A sized value is always kept already wrapped into its
+   range, so nothing downstream has to re-normalize before reading `.as.i`.
+
+   Arithmetic promotes to the wider operand, and to unsigned when the widest
+   operand is unsigned — the same shape as C's usual arithmetic conversions,
+   minus the integer-promotion-to-int step (there is no `int` smaller than the
+   value's own width here). Two plain ints stay a plain int, so ordinary code
+   never acquires a width it didn't ask for. */
+
+static int ob_eff_width(OboeValue v) { return v.width ? v.width : 64; }
+
+static void ob_promote(OboeValue a, OboeValue b, int *out_w, bool *out_u) {
+    if (a.width == 0 && b.width == 0) { *out_w = 0; *out_u = false; return; }
+    int wa = ob_eff_width(a), wb = ob_eff_width(b);
+    int w = wa > wb ? wa : wb;
+    bool u = (wa == w && a.is_unsigned) || (wb == w && b.is_unsigned);
+    *out_w = w;
+    *out_u = u;
+}
+
+/* truncates to `width` bits, sign-extending for signed types */
+static int64_t ob_wrap(int64_t v, int width, bool is_unsigned) {
+    if (width == 0 || width >= 64) return v; /* 64-bit: signedness is interpretation only */
+    uint64_t mask = (1ULL << width) - 1;
+    uint64_t raw = (uint64_t)v & mask;
+    if (!is_unsigned && (raw & (1ULL << (width - 1)))) return (int64_t)(raw | ~mask);
+    return (int64_t)raw;
+}
+
+static bool ob_is_num(OboeValue v) { return v.tag == OB_INT || v.tag == OB_FLOAT; }
+
+static double ob_as_double(OboeValue v) {
+    if (v.tag == OB_FLOAT) return v.as.f;
+    if (v.is_unsigned) return (double)(uint64_t)v.as.i;
+    return (double)v.as.i;
+}
+
+OboeValue ob_int(int64_t v) {
+    OboeValue r = {0};
+    r.tag = OB_INT;
+    r.as.i = v;
+    return r;
+}
+
+OboeValue ob_int_sized(int64_t v, int width, bool is_unsigned) {
+    OboeValue r = {0};
+    r.tag = OB_INT;
+    r.width = (uint8_t)width;
+    r.is_unsigned = is_unsigned;
+    r.as.i = ob_wrap(v, width, is_unsigned);
+    return r;
+}
+
+OboeValue ob_float(double v) {
+    OboeValue r = {0};
+    r.tag = OB_FLOAT;
+    r.as.f = v;
+    return r;
+}
+
+OboeValue ob_bool(bool v) { OboeValue r = {0}; r.tag = OB_BOOL; r.as.b = v; return r; }
+OboeValue ob_null(void) { OboeValue r = {0}; r.tag = OB_NULL; r.as.i = 0; return r; }
 
 OboeValue ob_string(const char *v) {
-    OboeValue r;
+    OboeValue r = {0};
     r.tag = OB_STRING;
     r.as.s = strdup(v ? v : "");
     if (!r.as.s) ob_oom();
@@ -49,14 +113,14 @@ OboeValue ob_string(const char *v) {
 }
 
 OboeValue ob_string_take(char *v) {
-    OboeValue r;
+    OboeValue r = {0};
     r.tag = OB_STRING;
     r.as.s = v;
     return r;
 }
 
 OboeValue ob_array_new(void) {
-    OboeValue r;
+    OboeValue r = {0};
     r.tag = OB_ARRAY;
     r.as.arr = malloc(sizeof(OboeArray));
     if (!r.as.arr) ob_oom();
@@ -67,7 +131,7 @@ OboeValue ob_array_new(void) {
 }
 
 OboeValue ob_dict_new(void) {
-    OboeValue r;
+    OboeValue r = {0};
     r.tag = OB_DICT;
     r.as.dict = malloc(sizeof(OboeDict));
     if (!r.as.dict) ob_oom();
@@ -78,7 +142,7 @@ OboeValue ob_dict_new(void) {
 }
 
 OboeValue ob_object_wrap(void *obj) {
-    OboeValue r;
+    OboeValue r = {0};
     r.tag = OB_OBJECT;
     r.as.obj = obj;
     return r;
@@ -177,7 +241,24 @@ char *ob_to_cstr(OboeValue v) {
     char buf[64];
     switch (v.tag) {
         case OB_NULL: return strdup("null");
-        case OB_INT: snprintf(buf, sizeof buf, "%lld", (long long)v.as.i); return strdup(buf);
+        case OB_INT:
+            if (v.is_unsigned) snprintf(buf, sizeof buf, "%llu", (unsigned long long)v.as.i);
+            else snprintf(buf, sizeof buf, "%lld", (long long)v.as.i);
+            return strdup(buf);
+        case OB_FLOAT: {
+            double d = v.as.f;
+            if (isnan(d)) return strdup("nan");
+            if (isinf(d)) return strdup(d < 0 ? "-inf" : "inf");
+            /* shortest %g that still round-trips, so 0.1 prints as "0.1" rather
+               than 0.10000000000000001 while nothing loses information */
+            for (int prec = 1; prec <= 17; prec++) {
+                snprintf(buf, sizeof buf, "%.*g", prec, d);
+                if (strtod(buf, NULL) == d) break;
+            }
+            /* keep floats visibly floats: 1 prints as "1.0", not "1" */
+            if (!strpbrk(buf, ".eE")) strncat(buf, ".0", sizeof(buf) - strlen(buf) - 1);
+            return strdup(buf);
+        }
         case OB_BOOL: return strdup(v.as.b ? "true" : "false");
         case OB_STRING: return strdup(v.as.s);
         case OB_ARRAY: {
@@ -452,6 +533,19 @@ static void ob_type_error(const char *op) {
     exit(1);
 }
 
+/* result of integer arithmetic under the promotion rules above */
+static OboeValue ob_int_result(OboeValue a, OboeValue b, int64_t raw) {
+    int w; bool u;
+    ob_promote(a, b, &w, &u);
+    if (w == 0) return ob_int(raw);
+    return ob_int_sized(raw, w, u);
+}
+
+/* true when the operation should be done in floating point */
+static bool ob_either_float(OboeValue a, OboeValue b) {
+    return a.tag == OB_FLOAT || b.tag == OB_FLOAT;
+}
+
 OboeValue ob_add(OboeValue a, OboeValue b) {
     if (a.tag == OB_STRING || b.tag == OB_STRING) {
         char *as = ob_to_cstr(a);
@@ -461,39 +555,142 @@ OboeValue ob_add(OboeValue a, OboeValue b) {
         free(as); free(bs);
         return ob_string_take(out);
     }
-    if (a.tag == OB_INT && b.tag == OB_INT) return ob_int(a.as.i + b.as.i);
+    if (ob_is_num(a) && ob_is_num(b)) {
+        if (ob_either_float(a, b)) return ob_float(ob_as_double(a) + ob_as_double(b));
+        return ob_int_result(a, b, (int64_t)((uint64_t)a.as.i + (uint64_t)b.as.i));
+    }
     ob_type_error("+");
     return ob_null();
 }
 
 OboeValue ob_sub(OboeValue a, OboeValue b) {
-    if (a.tag == OB_INT && b.tag == OB_INT) return ob_int(a.as.i - b.as.i);
+    if (ob_is_num(a) && ob_is_num(b)) {
+        if (ob_either_float(a, b)) return ob_float(ob_as_double(a) - ob_as_double(b));
+        return ob_int_result(a, b, (int64_t)((uint64_t)a.as.i - (uint64_t)b.as.i));
+    }
     ob_type_error("-"); return ob_null();
 }
 OboeValue ob_mul(OboeValue a, OboeValue b) {
-    if (a.tag == OB_INT && b.tag == OB_INT) return ob_int(a.as.i * b.as.i);
+    if (ob_is_num(a) && ob_is_num(b)) {
+        if (ob_either_float(a, b)) return ob_float(ob_as_double(a) * ob_as_double(b));
+        return ob_int_result(a, b, (int64_t)((uint64_t)a.as.i * (uint64_t)b.as.i));
+    }
     ob_type_error("*"); return ob_null();
 }
+/* int / int stays integer division; a float operand makes it real division,
+   where dividing by zero yields inf/nan rather than being an error */
 OboeValue ob_div(OboeValue a, OboeValue b) {
-    if (a.tag == OB_INT && b.tag == OB_INT) {
+    if (ob_is_num(a) && ob_is_num(b)) {
+        if (ob_either_float(a, b)) return ob_float(ob_as_double(a) / ob_as_double(b));
         if (b.as.i == 0) { fprintf(stderr, "oboe: division by zero\n"); exit(1); }
-        return ob_int(a.as.i / b.as.i);
+        int w; bool u;
+        ob_promote(a, b, &w, &u);
+        if (u) return ob_int_sized((int64_t)((uint64_t)a.as.i / (uint64_t)b.as.i), w, u);
+        return ob_int_result(a, b, a.as.i / b.as.i);
     }
     ob_type_error("/"); return ob_null();
 }
 OboeValue ob_mod(OboeValue a, OboeValue b) {
-    if (a.tag == OB_INT && b.tag == OB_INT) {
+    if (ob_is_num(a) && ob_is_num(b)) {
+        if (ob_either_float(a, b)) {
+            double db = ob_as_double(b);
+            if (db == 0.0) { fprintf(stderr, "oboe: modulo by zero\n"); exit(1); }
+            return ob_float(fmod(ob_as_double(a), db));
+        }
         if (b.as.i == 0) { fprintf(stderr, "oboe: modulo by zero\n"); exit(1); }
-        return ob_int(a.as.i % b.as.i);
+        int w; bool u;
+        ob_promote(a, b, &w, &u);
+        if (u) return ob_int_sized((int64_t)((uint64_t)a.as.i % (uint64_t)b.as.i), w, u);
+        return ob_int_result(a, b, a.as.i % b.as.i);
     }
     ob_type_error("%"); return ob_null();
 }
 
+/* ---- bitwise ----
+   Integer-only; the result takes the promoted width, and shifts take the width
+   of their left operand alone (the right operand is only a count). */
+static int64_t ob_want_bits(OboeValue v, const char *op) {
+    if (v.tag != OB_INT) ob_type_error(op);
+    return v.as.i;
+}
+
+OboeValue ob_band(OboeValue a, OboeValue b) {
+    return ob_int_result(a, b, ob_want_bits(a, "&") & ob_want_bits(b, "&"));
+}
+OboeValue ob_bor(OboeValue a, OboeValue b) {
+    return ob_int_result(a, b, ob_want_bits(a, "|") | ob_want_bits(b, "|"));
+}
+OboeValue ob_bxor(OboeValue a, OboeValue b) {
+    return ob_int_result(a, b, ob_want_bits(a, "^") ^ ob_want_bits(b, "^"));
+}
+
+static OboeValue ob_shift_result(OboeValue a, int64_t raw) {
+    if (a.width == 0) return ob_int(raw);
+    return ob_int_sized(raw, a.width, a.is_unsigned);
+}
+
+OboeValue ob_shl(OboeValue a, OboeValue b) {
+    int64_t n = ob_want_bits(b, "<<");
+    ob_want_bits(a, "<<");
+    if (n < 0 || n >= 64) return ob_shift_result(a, 0);
+    return ob_shift_result(a, (int64_t)((uint64_t)a.as.i << n));
+}
+OboeValue ob_shr(OboeValue a, OboeValue b) {
+    int64_t n = ob_want_bits(b, ">>");
+    ob_want_bits(a, ">>");
+    if (n < 0) return ob_shift_result(a, 0);
+    /* unsigned values shift in zeros, signed ones keep their sign */
+    if (n >= 64) return ob_shift_result(a, (!a.is_unsigned && a.as.i < 0) ? -1 : 0);
+    if (a.is_unsigned) return ob_shift_result(a, (int64_t)((uint64_t)a.as.i >> n));
+    return ob_shift_result(a, a.as.i >> n);
+}
+OboeValue ob_bnot(OboeValue a) {
+    ob_want_bits(a, "~");
+    return ob_shift_result(a, ~a.as.i);
+}
+
+/* ---- coercion at typed stores ---- */
+OboeValue ob_coerce_int(OboeValue v, int width, bool is_unsigned) {
+    if (v.tag == OB_FLOAT) return ob_int_sized((int64_t)v.as.f, width, is_unsigned);
+    if (v.tag != OB_INT) return v; /* leave non-numerics alone; nothing enforces types here */
+    return ob_int_sized(v.as.i, width, is_unsigned);
+}
+
+OboeValue ob_coerce_float(OboeValue v, int width) {
+    double d;
+    if (v.tag == OB_INT) d = ob_as_double(v);
+    else if (v.tag == OB_FLOAT) d = v.as.f;
+    else return v;
+    if (width == 32) d = (double)(float)d; /* float32 stores round through single precision */
+    OboeValue r = ob_float(d);
+    r.width = (uint8_t)width;
+    return r;
+}
+
+/* compares two numbers under the promotion rules; ints of different widths (and
+   an int against a float) compare by value, so `5 == 5.0` and `int8(5) == 5` */
+static int ob_num_cmp(OboeValue a, OboeValue b) {
+    if (ob_either_float(a, b)) {
+        double x = ob_as_double(a), y = ob_as_double(b);
+        return x < y ? -1 : (x > y ? 1 : 0);
+    }
+    int w; bool u;
+    ob_promote(a, b, &w, &u);
+    if (u) {
+        uint64_t x = (uint64_t)a.as.i, y = (uint64_t)b.as.i;
+        /* a signed operand promoted to unsigned wraps, exactly as it would in C */
+        return x < y ? -1 : (x > y ? 1 : 0);
+    }
+    return a.as.i < b.as.i ? -1 : (a.as.i > b.as.i ? 1 : 0);
+}
+
 static bool ob_raw_eq(OboeValue a, OboeValue b) {
+    if (ob_is_num(a) && ob_is_num(b)) return ob_num_cmp(a, b) == 0;
     if (a.tag != b.tag) return false;
     switch (a.tag) {
         case OB_NULL: return true;
         case OB_INT: return a.as.i == b.as.i;
+        case OB_FLOAT: return a.as.f == b.as.f;
         case OB_BOOL: return a.as.b == b.as.b;
         case OB_STRING: return strcmp(a.as.s, b.as.s) == 0;
         case OB_OBJECT: return a.as.obj == b.as.obj;
@@ -507,22 +704,22 @@ OboeValue ob_eq(OboeValue a, OboeValue b) { return ob_bool(ob_raw_eq(a, b)); }
 OboeValue ob_neq(OboeValue a, OboeValue b) { return ob_bool(!ob_raw_eq(a, b)); }
 
 OboeValue ob_lt(OboeValue a, OboeValue b) {
-    if (a.tag == OB_INT && b.tag == OB_INT) return ob_bool(a.as.i < b.as.i);
+    if (ob_is_num(a) && ob_is_num(b)) return ob_bool(ob_num_cmp(a, b) < 0);
     if (a.tag == OB_STRING && b.tag == OB_STRING) return ob_bool(strcmp(a.as.s, b.as.s) < 0);
     ob_type_error("<"); return ob_null();
 }
 OboeValue ob_lte(OboeValue a, OboeValue b) {
-    if (a.tag == OB_INT && b.tag == OB_INT) return ob_bool(a.as.i <= b.as.i);
+    if (ob_is_num(a) && ob_is_num(b)) return ob_bool(ob_num_cmp(a, b) <= 0);
     if (a.tag == OB_STRING && b.tag == OB_STRING) return ob_bool(strcmp(a.as.s, b.as.s) <= 0);
     ob_type_error("<="); return ob_null();
 }
 OboeValue ob_gt(OboeValue a, OboeValue b) {
-    if (a.tag == OB_INT && b.tag == OB_INT) return ob_bool(a.as.i > b.as.i);
+    if (ob_is_num(a) && ob_is_num(b)) return ob_bool(ob_num_cmp(a, b) > 0);
     if (a.tag == OB_STRING && b.tag == OB_STRING) return ob_bool(strcmp(a.as.s, b.as.s) > 0);
     ob_type_error(">"); return ob_null();
 }
 OboeValue ob_gte(OboeValue a, OboeValue b) {
-    if (a.tag == OB_INT && b.tag == OB_INT) return ob_bool(a.as.i >= b.as.i);
+    if (ob_is_num(a) && ob_is_num(b)) return ob_bool(ob_num_cmp(a, b) >= 0);
     if (a.tag == OB_STRING && b.tag == OB_STRING) return ob_bool(strcmp(a.as.s, b.as.s) >= 0);
     ob_type_error(">="); return ob_null();
 }
@@ -532,6 +729,7 @@ bool ob_truthy(OboeValue v) {
         case OB_NULL: return false;
         case OB_BOOL: return v.as.b;
         case OB_INT: return v.as.i != 0;
+        case OB_FLOAT: return v.as.f != 0.0;
         case OB_STRING: return v.as.s[0] != '\0';
         case OB_ARRAY: return v.as.arr->count != 0;
         case OB_DICT: return v.as.dict->count != 0;
@@ -544,7 +742,8 @@ OboeValue ob_and(OboeValue a, OboeValue b) { return ob_bool(ob_truthy(a) && ob_t
 OboeValue ob_or(OboeValue a, OboeValue b) { return ob_bool(ob_truthy(a) || ob_truthy(b)); }
 OboeValue ob_not(OboeValue a) { return ob_bool(!ob_truthy(a)); }
 OboeValue ob_neg(OboeValue a) {
-    if (a.tag == OB_INT) return ob_int(-a.as.i);
+    if (a.tag == OB_FLOAT) return ob_float(-a.as.f);
+    if (a.tag == OB_INT) return ob_shift_result(a, (int64_t)(0 - (uint64_t)a.as.i));
     ob_type_error("unary -"); return ob_null();
 }
 
@@ -566,6 +765,27 @@ OboeValue ob_coalesce(OboeValue a, OboeValue b) {
 }
 
 bool ob_is_int(OboeValue v) { return v.tag == OB_INT; }
+bool ob_is_float(OboeValue v) { return v.tag == OB_FLOAT; }
+
+/* `x is int8` is a range question, not a "how was this declared" question, so a
+   plain int holding 127 is an int8 and one holding 200 is not. */
+bool ob_is_int_width(OboeValue v, int width, bool is_unsigned) {
+    if (v.tag != OB_INT) return false;
+    if (v.is_unsigned) {
+        uint64_t x = (uint64_t)v.as.i;
+        if (is_unsigned) return width >= 64 || x <= (1ULL << width) - 1;
+        if (width >= 64) return x <= (uint64_t)INT64_MAX;
+        return x <= (uint64_t)((1LL << (width - 1)) - 1);
+    }
+    int64_t x = v.as.i;
+    if (is_unsigned) {
+        if (x < 0) return false;
+        return width >= 64 || (uint64_t)x <= (1ULL << width) - 1;
+    }
+    if (width >= 64) return true;
+    return x >= -(1LL << (width - 1)) && x <= (1LL << (width - 1)) - 1;
+}
+
 bool ob_is_bool(OboeValue v) { return v.tag == OB_BOOL; }
 bool ob_is_string(OboeValue v) { return v.tag == OB_STRING; }
 bool ob_is_array(OboeValue v) { return v.tag == OB_ARRAY; }
@@ -628,22 +848,44 @@ static int64_t ob_want_int(OboeValue v, const char *what) {
     return v.as.i;
 }
 
+/* math keeps its exact integer behavior when given ints, and switches to
+   floating point as soon as any argument is a float, so `math.sqrt(2)` is still
+   the floor square root while `math.sqrt(2.0)` is 1.414... */
+static double ob_want_num(OboeValue v, const char *what) {
+    if (!ob_is_num(v)) {
+        fprintf(stderr, "oboe: %s expects a number\n", what);
+        exit(1);
+    }
+    return ob_as_double(v);
+}
+
 OboeValue ob_std_math_abs(OboeValue a) {
+    if (a.tag == OB_FLOAT) return ob_float(fabs(a.as.f));
     int64_t v = ob_want_int(a, "math.abs");
     return ob_int(v < 0 ? -v : v);
 }
 
 OboeValue ob_std_math_min(OboeValue a, OboeValue b) {
+    if (ob_either_float(a, b)) {
+        double x = ob_want_num(a, "math.min"), y = ob_want_num(b, "math.min");
+        return ob_float(x < y ? x : y);
+    }
     int64_t x = ob_want_int(a, "math.min"), y = ob_want_int(b, "math.min");
     return ob_int(x < y ? x : y);
 }
 
 OboeValue ob_std_math_max(OboeValue a, OboeValue b) {
+    if (ob_either_float(a, b)) {
+        double x = ob_want_num(a, "math.max"), y = ob_want_num(b, "math.max");
+        return ob_float(x > y ? x : y);
+    }
     int64_t x = ob_want_int(a, "math.max"), y = ob_want_int(b, "math.max");
     return ob_int(x > y ? x : y);
 }
 
 OboeValue ob_std_math_pow(OboeValue a, OboeValue b) {
+    if (ob_either_float(a, b))
+        return ob_float(pow(ob_want_num(a, "math.pow"), ob_want_num(b, "math.pow")));
     int64_t base = ob_want_int(a, "math.pow"), exp = ob_want_int(b, "math.pow");
     if (exp < 0) ob_throw("ValueError", ob_string("math.pow: negative exponent"));
     int64_t r = 1;
@@ -656,11 +898,32 @@ OboeValue ob_std_math_pow(OboeValue a, OboeValue b) {
 }
 
 OboeValue ob_std_math_sqrt(OboeValue a) {
+    if (a.tag == OB_FLOAT) {
+        if (a.as.f < 0) ob_throw("ValueError", ob_string("math.sqrt: negative argument"));
+        return ob_float(sqrt(a.as.f));
+    }
     int64_t n = ob_want_int(a, "math.sqrt");
     if (n < 0) ob_throw("ValueError", ob_string("math.sqrt: negative argument"));
     int64_t r = 0;
     while ((r + 1) * (r + 1) <= n) r++;
     return ob_int(r);
+}
+
+/* floor/ceil/round answer "which integer", so they return an int for both int
+   and float input rather than a float that happens to be integral */
+OboeValue ob_std_math_floor(OboeValue a) {
+    if (a.tag == OB_INT) return a;
+    return ob_int((int64_t)floor(ob_want_num(a, "math.floor")));
+}
+
+OboeValue ob_std_math_ceil(OboeValue a) {
+    if (a.tag == OB_INT) return a;
+    return ob_int((int64_t)ceil(ob_want_num(a, "math.ceil")));
+}
+
+OboeValue ob_std_math_round(OboeValue a) {
+    if (a.tag == OB_INT) return a;
+    return ob_int((int64_t)round(ob_want_num(a, "math.round")));
 }
 
 /* ---- built-in stdlib modules: random (xorshift64*, platform-independent) ---- */
@@ -797,3 +1060,417 @@ OboeValue ob_std_os_getenv(OboeValue name) {
     free(n);
     return v ? ob_string(v) : ob_null();
 }
+
+/* ---- iteration ----
+   One dispatch point behind every `for` form. Strings iterate by byte, matching
+   the rest of the runtime's byte-oriented string handling; multi-byte UTF-8
+   characters therefore come back one byte at a time. */
+
+static void ob_iter_type_error(OboeValue v) {
+    (void)v;
+    ob_throw("TypeError", ob_string("value is not iterable (expected an array, dict or string)"));
+}
+
+int64_t ob_iter_len(OboeValue v) {
+    switch (v.tag) {
+        case OB_ARRAY: return (int64_t)v.as.arr->count;
+        case OB_DICT: return (int64_t)v.as.dict->count;
+        case OB_STRING: return (int64_t)strlen(v.as.s);
+        default: ob_iter_type_error(v); return 0;
+    }
+}
+
+OboeValue ob_iter_key(OboeValue v, int64_t i) {
+    if (v.tag == OB_DICT) {
+        if (i < 0 || (size_t)i >= v.as.dict->count) return ob_null();
+        return ob_string(v.as.dict->entries[i].key);
+    }
+    if (v.tag == OB_ARRAY || v.tag == OB_STRING) return ob_int(i);
+    ob_iter_type_error(v);
+    return ob_null();
+}
+
+OboeValue ob_iter_value(OboeValue v, int64_t i) {
+    switch (v.tag) {
+        case OB_ARRAY:
+            if (i < 0 || (size_t)i >= v.as.arr->count) return ob_null();
+            return v.as.arr->items[i];
+        case OB_DICT:
+            if (i < 0 || (size_t)i >= v.as.dict->count) return ob_null();
+            return v.as.dict->entries[i].value;
+        case OB_STRING: {
+            if (i < 0 || (size_t)i >= strlen(v.as.s)) return ob_null();
+            char one[2] = { v.as.s[i], '\0' };
+            return ob_string(one);
+        }
+        default: ob_iter_type_error(v); return ob_null();
+    }
+}
+
+/* ---- methods on primitives ----
+   The compiler can't know a primitive's type statically, so each method
+   tag-checks its receiver here and throws a catchable TypeError on a mismatch,
+   rather than the compiler rejecting the call. */
+
+static void ob_method_type_error(const char *method, const char *want) {
+    char buf[160];
+    snprintf(buf, sizeof buf, "%s() expects %s", method, want);
+    ob_throw("TypeError", ob_string(buf));
+}
+
+static const char *ob_want_str(OboeValue v, const char *method) {
+    if (v.tag != OB_STRING) ob_method_type_error(method, "a string");
+    return v.as.s;
+}
+
+static OboeArray *ob_want_arr(OboeValue v, const char *method) {
+    if (v.tag != OB_ARRAY) ob_method_type_error(method, "an array");
+    return v.as.arr;
+}
+
+static OboeDict *ob_want_dict(OboeValue v, const char *method) {
+    if (v.tag != OB_DICT) ob_method_type_error(method, "a dict");
+    return v.as.dict;
+}
+
+static int64_t ob_want_idx(OboeValue v, const char *method) {
+    if (v.tag != OB_INT) ob_method_type_error(method, "an integer index");
+    return v.as.i;
+}
+
+/* ---- string methods ---- */
+
+static OboeValue ob_str_len(OboeValue s) { return ob_int((int64_t)strlen(ob_want_str(s, "len"))); }
+
+OboeValue ob_str_upper(OboeValue s) {
+    char *out = strdup(ob_want_str(s, "upper"));
+    for (char *p = out; *p; p++) *p = (char)toupper((unsigned char)*p);
+    return ob_string_take(out);
+}
+
+OboeValue ob_str_lower(OboeValue s) {
+    char *out = strdup(ob_want_str(s, "lower"));
+    for (char *p = out; *p; p++) *p = (char)tolower((unsigned char)*p);
+    return ob_string_take(out);
+}
+
+static OboeValue ob_str_reverse(OboeValue s) {
+    const char *in = ob_want_str(s, "reverse");
+    size_t n = strlen(in);
+    char *out = malloc(n + 1);
+    for (size_t i = 0; i < n; i++) out[i] = in[n - 1 - i];
+    out[n] = '\0';
+    return ob_string_take(out);
+}
+
+OboeValue ob_str_trim(OboeValue s) {
+    const char *in = ob_want_str(s, "trim");
+    while (*in && isspace((unsigned char)*in)) in++;
+    size_t n = strlen(in);
+    while (n > 0 && isspace((unsigned char)in[n - 1])) n--;
+    char *out = malloc(n + 1);
+    memcpy(out, in, n);
+    out[n] = '\0';
+    return ob_string_take(out);
+}
+
+/* An empty separator splits into individual characters, mirroring how `for`
+   iterates a string; otherwise adjacent separators produce empty pieces. */
+OboeValue ob_str_split(OboeValue s, OboeValue sep) {
+    const char *in = ob_want_str(s, "split");
+    const char *sp = ob_want_str(sep, "split");
+    OboeValue out = ob_array_new();
+    size_t splen = strlen(sp);
+    if (splen == 0) {
+        for (const char *p = in; *p; p++) {
+            char one[2] = { *p, '\0' };
+            ob_array_push(out, ob_string(one));
+        }
+        return out;
+    }
+    const char *start = in;
+    for (;;) {
+        const char *hit = strstr(start, sp);
+        if (!hit) {
+            ob_array_push(out, ob_string(start));
+            break;
+        }
+        char *piece = strndup(start, (size_t)(hit - start));
+        ob_array_push(out, ob_string_take(piece));
+        start = hit + splen;
+    }
+    return out;
+}
+
+OboeValue ob_str_starts_with(OboeValue s, OboeValue prefix) {
+    const char *in = ob_want_str(s, "starts_with");
+    const char *p = ob_want_str(prefix, "starts_with");
+    return ob_bool(strncmp(in, p, strlen(p)) == 0);
+}
+
+OboeValue ob_str_ends_with(OboeValue s, OboeValue suffix) {
+    const char *in = ob_want_str(s, "ends_with");
+    const char *p = ob_want_str(suffix, "ends_with");
+    size_t n = strlen(in), m = strlen(p);
+    return ob_bool(m <= n && strcmp(in + n - m, p) == 0);
+}
+
+static OboeValue ob_str_contains(OboeValue s, OboeValue needle) {
+    const char *in = ob_want_str(s, "contains");
+    return ob_bool(strstr(in, ob_want_str(needle, "contains")) != NULL);
+}
+
+static OboeValue ob_str_index_of(OboeValue s, OboeValue needle) {
+    const char *in = ob_want_str(s, "index_of");
+    const char *hit = strstr(in, ob_want_str(needle, "index_of"));
+    return ob_int(hit ? (int64_t)(hit - in) : -1);
+}
+
+OboeValue ob_str_replace(OboeValue s, OboeValue from, OboeValue to) {
+    const char *in = ob_want_str(s, "replace");
+    const char *f = ob_want_str(from, "replace");
+    const char *t = ob_want_str(to, "replace");
+    size_t flen = strlen(f);
+    if (flen == 0) return ob_string(in);
+    size_t tlen = strlen(t), cap = strlen(in) + 1, n = 0;
+    char *out = malloc(cap);
+    for (const char *p = in; *p;) {
+        const char *hit = strstr(p, f);
+        size_t chunk = hit ? (size_t)(hit - p) : strlen(p);
+        size_t need = n + chunk + tlen + 1;
+        if (need > cap) { cap = need * 2; out = realloc(out, cap); }
+        memcpy(out + n, p, chunk);
+        n += chunk;
+        if (!hit) { p += chunk; break; }
+        memcpy(out + n, t, tlen);
+        n += tlen;
+        p = hit + flen;
+    }
+    out[n] = '\0';
+    return ob_string_take(out);
+}
+
+/* out-of-range starts and lengths clamp rather than throwing, so slicing near
+   the end of a string doesn't need a guard at every call site */
+OboeValue ob_str_substr(OboeValue s, OboeValue start, OboeValue len) {
+    const char *in = ob_want_str(s, "substr");
+    int64_t n = (int64_t)strlen(in);
+    int64_t a = ob_want_idx(start, "substr");
+    int64_t l = ob_want_idx(len, "substr");
+    if (a < 0) a = 0;
+    if (a > n) a = n;
+    if (l < 0) l = 0;
+    if (a + l > n) l = n - a;
+    char *out = malloc((size_t)l + 1);
+    memcpy(out, in + a, (size_t)l);
+    out[l] = '\0';
+    return ob_string_take(out);
+}
+
+OboeValue ob_str_repeat(OboeValue s, OboeValue n) {
+    return ob_repeat(ob_string(ob_want_str(s, "repeat")), n);
+}
+
+OboeValue ob_str_to_int(OboeValue s) {
+    const char *in = ob_want_str(s, "to_int");
+    char *end;
+    long long v = strtoll(in, &end, 10);
+    while (*end && isspace((unsigned char)*end)) end++;
+    if (end == in || *end) ob_throw("ValueError", ob_string(in));
+    return ob_int((int64_t)v);
+}
+
+OboeValue ob_str_to_float(OboeValue s) {
+    const char *in = ob_want_str(s, "to_float");
+    char *end;
+    double v = strtod(in, &end);
+    while (*end && isspace((unsigned char)*end)) end++;
+    if (end == in || *end) ob_throw("ValueError", ob_string(in));
+    return ob_float(v);
+}
+
+/* ---- array methods ----
+   Arrays are held by pointer, so push/pop/insert/remove_at mutate the array the
+   receiver names rather than a copy; reverse and slice return new arrays. */
+
+static OboeValue ob_arr_len(OboeValue a) { return ob_int((int64_t)ob_want_arr(a, "len")->count); }
+
+OboeValue ob_arr_push(OboeValue a, OboeValue v) {
+    ob_want_arr(a, "push");
+    ob_array_push(a, v);
+    return a;
+}
+
+OboeValue ob_arr_pop(OboeValue a) {
+    OboeArray *arr = ob_want_arr(a, "pop");
+    if (arr->count == 0) ob_throw("ValueError", ob_string("pop() from an empty array"));
+    return arr->items[--arr->count];
+}
+
+OboeValue ob_arr_insert(OboeValue a, OboeValue idx, OboeValue v) {
+    OboeArray *arr = ob_want_arr(a, "insert");
+    int64_t i = ob_want_idx(idx, "insert");
+    if (i < 0) i = 0;
+    if (i > (int64_t)arr->count) i = (int64_t)arr->count;
+    ob_array_push(a, v); /* grows the backing store */
+    for (int64_t j = (int64_t)arr->count - 1; j > i; j--) arr->items[j] = arr->items[j - 1];
+    arr->items[i] = v;
+    return a;
+}
+
+OboeValue ob_arr_remove_at(OboeValue a, OboeValue idx) {
+    OboeArray *arr = ob_want_arr(a, "remove_at");
+    int64_t i = ob_want_idx(idx, "remove_at");
+    ob_bounds_check(arr, i);
+    OboeValue gone = arr->items[i];
+    for (size_t j = (size_t)i; j + 1 < arr->count; j++) arr->items[j] = arr->items[j + 1];
+    arr->count--;
+    return gone;
+}
+
+static OboeValue ob_arr_index_of(OboeValue a, OboeValue v) {
+    OboeArray *arr = ob_want_arr(a, "index_of");
+    for (size_t i = 0; i < arr->count; i++)
+        if (ob_raw_eq(arr->items[i], v)) return ob_int((int64_t)i);
+    return ob_int(-1);
+}
+
+static OboeValue ob_arr_contains(OboeValue a, OboeValue v) {
+    OboeArray *arr = ob_want_arr(a, "contains");
+    for (size_t i = 0; i < arr->count; i++)
+        if (ob_raw_eq(arr->items[i], v)) return ob_bool(true);
+    return ob_bool(false);
+}
+
+OboeValue ob_arr_join(OboeValue a, OboeValue sep) {
+    OboeArray *arr = ob_want_arr(a, "join");
+    const char *sp = ob_want_str(sep, "join");
+    size_t splen = strlen(sp), cap = 64, n = 0;
+    char *out = malloc(cap);
+    out[0] = '\0';
+    for (size_t i = 0; i < arr->count; i++) {
+        char *piece = ob_to_cstr(arr->items[i]);
+        size_t plen = strlen(piece);
+        size_t need = n + plen + splen + 1;
+        if (need > cap) { cap = need * 2; out = realloc(out, cap); }
+        if (i > 0) { memcpy(out + n, sp, splen); n += splen; }
+        memcpy(out + n, piece, plen);
+        n += plen;
+        free(piece);
+    }
+    out[n] = '\0';
+    return ob_string_take(out);
+}
+
+static OboeValue ob_arr_reverse(OboeValue a) {
+    OboeArray *arr = ob_want_arr(a, "reverse");
+    OboeValue out = ob_array_new();
+    for (size_t i = arr->count; i > 0; i--) ob_array_push(out, arr->items[i - 1]);
+    return out;
+}
+
+/* half-open [start, end), clamped, like ob_str_substr */
+static OboeValue ob_arr_slice(OboeValue a, OboeValue start, OboeValue end) {
+    OboeArray *arr = ob_want_arr(a, "slice");
+    int64_t n = (int64_t)arr->count;
+    int64_t s = ob_want_idx(start, "slice"), e = ob_want_idx(end, "slice");
+    if (s < 0) s = 0;
+    if (e > n) e = n;
+    OboeValue out = ob_array_new();
+    for (int64_t i = s; i < e; i++) ob_array_push(out, arr->items[i]);
+    return out;
+}
+
+/* ---- dict methods ---- */
+
+static OboeValue ob_dict_len(OboeValue d) { return ob_int((int64_t)ob_want_dict(d, "len")->count); }
+
+OboeValue ob_dict_keys(OboeValue d) {
+    OboeDict *dict = ob_want_dict(d, "keys");
+    OboeValue out = ob_array_new();
+    for (size_t i = 0; i < dict->count; i++) ob_array_push(out, ob_string(dict->entries[i].key));
+    return out;
+}
+
+OboeValue ob_dict_values(OboeValue d) {
+    OboeDict *dict = ob_want_dict(d, "values");
+    OboeValue out = ob_array_new();
+    for (size_t i = 0; i < dict->count; i++) ob_array_push(out, dict->entries[i].value);
+    return out;
+}
+
+OboeValue ob_dict_has_m(OboeValue d, OboeValue key) {
+    ob_want_dict(d, "has");
+    char *k = ob_to_cstr(key);
+    bool found = ob_dict_has(d, k);
+    free(k);
+    return ob_bool(found);
+}
+
+OboeValue ob_dict_remove(OboeValue d, OboeValue key) {
+    OboeDict *dict = ob_want_dict(d, "remove");
+    char *k = ob_to_cstr(key);
+    for (size_t i = 0; i < dict->count; i++) {
+        if (strcmp(dict->entries[i].key, k) != 0) continue;
+        OboeValue gone = dict->entries[i].value;
+        free(dict->entries[i].key);
+        for (size_t j = i; j + 1 < dict->count; j++) dict->entries[j] = dict->entries[j + 1];
+        dict->count--;
+        free(k);
+        return gone;
+    }
+    free(k);
+    return ob_null();
+}
+
+/* ---- polymorphic methods ----
+   A method name shared by several receiver types resolves here, since the
+   compiler emits the same call whatever the receiver turns out to be. */
+
+OboeValue ob_m_len(OboeValue v) {
+    switch (v.tag) {
+        case OB_STRING: return ob_str_len(v);
+        case OB_ARRAY: return ob_arr_len(v);
+        case OB_DICT: return ob_dict_len(v);
+        default: ob_method_type_error("len", "a string, array or dict"); return ob_null();
+    }
+}
+
+OboeValue ob_m_contains(OboeValue v, OboeValue needle) {
+    switch (v.tag) {
+        case OB_STRING: return ob_str_contains(v, needle);
+        case OB_ARRAY: return ob_arr_contains(v, needle);
+        case OB_DICT: return ob_dict_has_m(v, needle);
+        default: ob_method_type_error("contains", "a string, array or dict"); return ob_null();
+    }
+}
+
+OboeValue ob_m_index_of(OboeValue v, OboeValue needle) {
+    if (v.tag == OB_STRING) return ob_str_index_of(v, needle);
+    if (v.tag == OB_ARRAY) return ob_arr_index_of(v, needle);
+    ob_method_type_error("index_of", "a string or array");
+    return ob_null();
+}
+
+OboeValue ob_m_reverse(OboeValue v) {
+    if (v.tag == OB_STRING) return ob_str_reverse(v);
+    if (v.tag == OB_ARRAY) return ob_arr_reverse(v);
+    ob_method_type_error("reverse", "a string or array");
+    return ob_null();
+}
+
+/* half-open [start, end) over an array's elements or a string's bytes */
+OboeValue ob_m_slice(OboeValue v, OboeValue start, OboeValue end) {
+    if (v.tag == OB_ARRAY) return ob_arr_slice(v, start, end);
+    if (v.tag == OB_STRING) {
+        int64_t n = (int64_t)strlen(v.as.s);
+        int64_t a = ob_want_idx(start, "slice"), b = ob_want_idx(end, "slice");
+        if (a < 0) a = 0;
+        if (b > n) b = n;
+        return ob_str_substr(v, ob_int(a), ob_int(b > a ? b - a : 0));
+    }
+    ob_method_type_error("slice", "a string or array");
+    return ob_null();
+}
+
+OboeValue ob_m_str(OboeValue v) { return ob_str(v); }

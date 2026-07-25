@@ -12,6 +12,7 @@
  * GNU General Public License for more details.
  */
 #include "codegen.h"
+#include "projectjson.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -70,7 +71,7 @@ static int compile_c_to_binary(const char *c_path, const char *out_path, bool ve
     char *home = oboe_home();
     char cmd[8192];
     snprintf(cmd, sizeof cmd,
-             "%s -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -O2 -I\"%s/../runtime\" \"%s\" \"%s/../runtime/oboe_runtime.c\"%s%s%s%s -o \"%s\" 2>&1",
+             "%s -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -O2 -I\"%s/../runtime\" \"%s\" \"%s/../runtime/oboe_runtime.c\"%s%s%s%s -lm -o \"%s\" 2>&1",
              cc ? cc : "gcc", home, c_path, home,
              extra_obj ? " \"" : "", extra_obj ? extra_obj : "", extra_obj ? "\"" : "",
              is_windows ? "" : " -ldl", out_path);
@@ -118,25 +119,6 @@ static void cmd_run_file(const char *path) {
     int run_rc = system(bin_path);
     remove(bin_path);
     exit(WIFEXITED(run_rc) ? WEXITSTATUS(run_rc) : 1);
-}
-
-/* Extracts a top-level string field like "entry": "main.oboe" from project.json.
-   project.json's shape is fixed for this project (see project.example.json), so a
-   minimal targeted scan is used instead of a full JSON parser. */
-static char *json_extract_string_field(const char *json, const char *field) {
-    char needle[256];
-    snprintf(needle, sizeof needle, "\"%s\"", field);
-    const char *p = strstr(json, needle);
-    if (!p) return NULL;
-    p = strchr(p + strlen(needle), ':');
-    if (!p) return NULL;
-    p++;
-    while (*p == ' ' || *p == '\t' || *p == '\n') p++;
-    if (*p != '"') return NULL;
-    p++;
-    const char *end = strchr(p, '"');
-    if (!end) return NULL;
-    return strndup(p, end - p);
 }
 
 static void cmd_init(const char *dir) {
@@ -206,20 +188,6 @@ static void cmd_run_project(void) {
     cmd_run_file(entry);
 }
 
-/* minimal check for `"field": true` in project.json, same spirit as the
-   string-field scan above */
-static bool json_extract_bool_field(const char *json, const char *field) {
-    char needle[256];
-    snprintf(needle, sizeof needle, "\"%s\"", field);
-    const char *p = strstr(json, needle);
-    if (!p) return false;
-    p = strchr(p + strlen(needle), ':');
-    if (!p) return false;
-    p++;
-    while (*p == ' ' || *p == '\t' || *p == '\n') p++;
-    return strncmp(p, "true", 4) == 0;
-}
-
 #if defined(_WIN32)
 #define HOST_OS "windows"
 #elif defined(__APPLE__)
@@ -228,19 +196,43 @@ static bool json_extract_bool_field(const char *json, const char *field) {
 #define HOST_OS "linux"
 #endif
 
-/* accepts the preferred names plus the kernel-flavored aliases */
+/* Every OS a build can target. The name is what `-t` accepts and what an
+   OS-specific module file is suffixed with (`foo.freebsd.oboe`); `cc` is the
+   default compiler when cross-compiling to it, always overridable with --cc. */
+static const struct { const char *name; const char *alias; const char *cc; } k_targets[] = {
+    {"linux",   NULL,     "gcc"},
+    {"windows", "nt",     "x86_64-w64-mingw32-gcc"},
+    {"macos",   "darwin", "o64-clang"},
+    {"freebsd", NULL,     "clang"},
+    {"openbsd", NULL,     "clang"},
+    {"netbsd",  NULL,     "clang"},
+    {NULL, NULL, NULL}
+};
+
 static const char *normalize_target(const char *t) {
     if (!t) return HOST_OS;
-    if (strcmp(t, "linux") == 0) return "linux";
-    if (strcmp(t, "windows") == 0 || strcmp(t, "nt") == 0) return "windows";
-    if (strcmp(t, "macos") == 0 || strcmp(t, "darwin") == 0 || strcmp(t, "osx") == 0) return "macos";
-    fprintf(stderr, "oboe: unknown build target '%s' (expected linux, windows or macos)\n", t);
+    if (strcmp(t, "osx") == 0) return "macos"; /* a third macOS spelling */
+    for (int i = 0; k_targets[i].name; i++)
+        if (strcmp(t, k_targets[i].name) == 0 ||
+            (k_targets[i].alias && strcmp(t, k_targets[i].alias) == 0))
+            return k_targets[i].name;
+    fprintf(stderr, "oboe: unknown build target '%s' (expected one of:", t);
+    for (int i = 0; k_targets[i].name; i++) fprintf(stderr, " %s", k_targets[i].name);
+    fprintf(stderr, ")\n");
     exit(1);
+}
+
+static const char *default_cc_for(const char *target) {
+    if (strcmp(target, HOST_OS) == 0) return "gcc";
+    for (int i = 0; k_targets[i].name; i++)
+        if (strcmp(target, k_targets[i].name) == 0) return k_targets[i].cc;
+    return "gcc";
 }
 
 typedef struct {
     const char *file;        /* explicit script, or NULL for the project entry */
     const char *output;      /* -o override */
+    const char *config;      /* -t as written: a project.json target name, or an OS */
     const char *target;      /* normalized target OS */
     const char *cc;          /* --cc override */
     bool verbose;
@@ -317,6 +309,146 @@ static void write_desktop_file(const BuildOpts *o, const char *out_path, const c
     printf("Wrote %s\n", desk_path);
 }
 
+/* Wraps the built executable in a macOS .app bundle:
+
+       <dir>/<name>.app/Contents/Info.plist
+                                /MacOS/<name>      the executable, moved here
+                                /Resources/<icon>  when --meta-icon was given
+
+   This is what `--desktop` means on a macOS target, mirroring the .desktop file
+   it writes on Linux. The executable is moved rather than copied, so the build
+   still produces exactly one artifact. */
+static void write_app_bundle(const BuildOpts *o, const char *out_path, const char *name) {
+    char dir[4096];
+    strncpy(dir, out_path, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = '\0';
+    char *d = dirname(dir);
+
+    /* sized above the 4096-byte `dir` they are built from, so appending the
+       fixed bundle path components can never truncate */
+    char contents[4200], macos[4300], resources[4300];
+    snprintf(contents, sizeof contents, "%s/%s.app/Contents", d, name);
+    snprintf(macos, sizeof macos, "%s/MacOS", contents);
+    snprintf(resources, sizeof resources, "%s/Resources", contents);
+    mkdirs(macos);
+    mkdirs(resources);
+
+    char exe[4600];
+    snprintf(exe, sizeof exe, "%s/%s", macos, name);
+    remove(exe);
+    if (rename(out_path, exe) != 0) {
+        fprintf(stderr, "oboe: cannot move '%s' into the .app bundle\n", out_path);
+        return;
+    }
+
+    /* a bundle identifier must be reverse-DNS-ish; keep only safe characters */
+    char ident[256];
+    size_t n = 0;
+    for (const char *c = name; *c && n < sizeof(ident) - 1; c++)
+        if ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9'))
+            ident[n++] = *c;
+    ident[n] = '\0';
+    if (n == 0) snprintf(ident, sizeof ident, "app");
+
+    char *icon_base = NULL;
+    if (o->meta_icon) {
+        char icon_copy[4096];
+        strncpy(icon_copy, o->meta_icon, sizeof(icon_copy) - 1);
+        icon_copy[sizeof(icon_copy) - 1] = '\0';
+        icon_base = strdup(basename(icon_copy));
+        char cmd[8192];
+        snprintf(cmd, sizeof cmd, "cp \"%s\" \"%s/%s\" 2>/dev/null", o->meta_icon, resources, icon_base);
+        if (system(cmd) != 0)
+            printf("oboe: note: could not copy icon '%s' into the bundle\n", o->meta_icon);
+    }
+
+    char plist[4400];
+    snprintf(plist, sizeof plist, "%s/Info.plist", contents);
+    FILE *f = fopen(plist, "w");
+    if (!f) { fprintf(stderr, "oboe: cannot write '%s'\n", plist); free(icon_base); return; }
+    fprintf(f,
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+        "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+        "<plist version=\"1.0\">\n<dict>\n"
+        "    <key>CFBundleName</key><string>%s</string>\n"
+        "    <key>CFBundleExecutable</key><string>%s</string>\n"
+        "    <key>CFBundleIdentifier</key><string>com.oboe.%s</string>\n"
+        "    <key>CFBundlePackageType</key><string>APPL</string>\n"
+        "    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>\n",
+        name, name, ident);
+    if (o->meta_version)
+        fprintf(f, "    <key>CFBundleShortVersionString</key><string>%s</string>\n", o->meta_version);
+    if (o->meta_description)
+        fprintf(f, "    <key>NSHumanReadableCopyright</key><string>%s</string>\n", o->meta_description);
+    if (icon_base)
+        fprintf(f, "    <key>CFBundleIconFile</key><string>%s</string>\n", icon_base);
+    fprintf(f, "</dict>\n</plist>\n");
+    fclose(f);
+    free(icon_base);
+    printf("Wrote %s/%s.app\n", d, name);
+}
+
+static void take_string(const char **slot, const char *obj, const char *field) {
+    if (*slot || !obj) return;
+    char *v = json_get_string(obj, field);
+    if (v) *slot = v;
+}
+
+/* Metadata is read from a `meta` object; the older flat `meta-xxxx` keys are
+   still honored as a fallback, so project.json files written before the change
+   keep working without a warning. */
+static void take_meta(const char **slot, const char *obj, const char *key) {
+    if (*slot || !obj) return;
+    char *meta = json_extract_object(obj, "meta");
+    if (meta) {
+        char *v = json_get_string(meta, key);
+        free(meta);
+        if (v) { *slot = v; return; }
+    }
+    char flat[128];
+    snprintf(flat, sizeof flat, "meta-%s", key);
+    take_string(slot, obj, flat);
+}
+
+/* Layers project.json build settings under the CLI flags, most specific first:
+   `build.targets.<config>`, then `build`. Anything already set (from the
+   command line, which is parsed first) is left alone. */
+static void load_build_settings(BuildOpts *o, const char *json, const char *config) {
+    char *build = json_extract_object(json, "build");
+    char *cfg = NULL;
+    if (config && build) {
+        char path[512];
+        snprintf(path, sizeof path, "targets.%s", config);
+        cfg = json_extract_object(build, path);
+    }
+    const char *layers[] = { cfg, build };
+    for (int i = 0; i < 2; i++) {
+        if (!layers[i]) continue;
+        take_string(&o->target, layers[i], "target");
+        take_string(&o->output, layers[i], "output");
+        take_string(&o->cc, layers[i], "compiler");
+        if (!o->desktop) o->desktop = json_get_bool(layers[i], "desktop");
+        take_meta(&o->meta_name, layers[i], "name");
+        take_meta(&o->meta_version, layers[i], "version");
+        take_meta(&o->meta_description, layers[i], "description");
+        take_meta(&o->meta_icon, layers[i], "icon");
+    }
+    /* a named target with no `target` field of its own targets the OS it is
+       named after, which is why `"windows": {}` is a usable declaration */
+    if (!o->target && config) o->target = strdup(config);
+
+    char *project = json_extract_object(json, "project");
+    if (project) {
+        take_string(&o->meta_name, project, "name");
+        take_string(&o->meta_version, project, "version");
+        take_string(&o->meta_description, project, "description");
+        free(project);
+    }
+    free(cfg);
+    free(build);
+}
+
 /* `oboe build` builds the project entry into dist/<name>;
    `oboe build <file>` builds a single script into ./<file-without-.oboe>;
    `-o path` overrides the output location, creating missing directories. */
@@ -341,47 +473,34 @@ static void cmd_build(BuildOpts *o) {
         char *name = NULL;
         if (json) {
             entry = json_extract_string_field(json, "entry");
-            name = json_extract_string_field(json, "name");
-            /* project.json may carry build settings; the CLI flags win */
-            if (!o->target) {
-                char *t = json_extract_string_field(json, "target");
-                if (t) o->target = t;
-            }
-            if (!o->output) {
-                char *op = json_extract_string_field(json, "output");
-                if (op) output = op;
-            }
-            if (!o->desktop) o->desktop = json_extract_bool_field(json, "desktop");
-            if (!o->meta_name) o->meta_name = name ? strdup(name) : NULL;
-            if (!o->meta_version) o->meta_version = json_extract_string_field(json, "version");
-            if (!o->meta_description) o->meta_description = json_extract_string_field(json, "description");
-            if (!o->meta_icon) o->meta_icon = json_extract_string_field(json, "icon");
+            char *project = json_extract_object(json, "project");
+            if (project) { name = json_get_string(project, "name"); free(project); }
+            load_build_settings(o, json, o->config);
+            output = o->output;
             free(json);
         }
         if (!entry) entry = strdup("main.oboe");
         if (!name) name = strdup("program");
-        snprintf(out_path, sizeof out_path, "dist/%s", name);
+        if (!output) snprintf(out_path, sizeof out_path, "dist/%s", name);
         if (!o->meta_name) o->meta_name = strdup(name);
         free(name);
     }
 
+    /* -t names a project.json target config when there is one, and otherwise is
+       just an OS name — load_build_settings has already resolved the first case */
+    if (!o->target) o->target = o->config;
     const char *target = normalize_target(o->target);
     o->target = target;
     bool is_windows = strcmp(target, "windows") == 0;
     codegen_set_target_os(target);
 
     /* pick the compiler: --cc wins, else a per-target default */
-    const char *cc = o->cc;
-    if (!cc) {
-        if (strcmp(target, HOST_OS) == 0) cc = "gcc";
-        else if (is_windows) cc = "x86_64-w64-mingw32-gcc";
-        else if (strcmp(target, "macos") == 0) cc = "o64-clang";
-        else cc = "gcc";
-    }
+    const char *cc = o->cc ? o->cc : default_cc_for(target);
     if (!tool_exists(cc)) {
         fprintf(stderr, "oboe: compiler '%s' for target '%s' not found", cc, target);
         if (is_windows) fprintf(stderr, " (install mingw-w64, or pass --cc)");
         else if (strcmp(target, "macos") == 0) fprintf(stderr, " (install osxcross, or pass --cc)");
+        else fprintf(stderr, " (install a cross-compiler for it, or pass --cc)");
         fprintf(stderr, "\n");
         exit(1);
     }
@@ -408,12 +527,9 @@ static void cmd_build(BuildOpts *o) {
     transpile_to_c(entry, c_path);
     if (verbose) printf("oboe: transpiled %s (target: %s)\n", entry, target);
 
-    char *res_obj = NULL;
-    if (is_windows) res_obj = build_windows_resource(o);
-    else if (o->meta_version || o->meta_description) {
-        if (strcmp(target, "macos") == 0)
-            printf("oboe: note: macOS metadata needs an .app bundle, which isn't generated yet\n");
-    }
+    /* macOS carries its metadata in an .app bundle's Info.plist instead of in
+       the executable, so it is written by write_app_bundle under --desktop */
+    char *res_obj = is_windows ? build_windows_resource(o) : NULL;
 
     bool made_dist = !file && !output;
     if (made_dist) mkdir("dist", 0755);
@@ -426,13 +542,59 @@ static void cmd_build(BuildOpts *o) {
     }
     printf("Built %s\n", out_path);
 
+    /* --desktop asks for a desktop-installable artifact for this target: a
+       .desktop launcher on Linux, an .app bundle on macOS */
     if (o->desktop) {
-        if (strcmp(target, "linux") == 0)
-            write_desktop_file(o, out_path, o->meta_name ? o->meta_name : "program");
+        const char *app_name = o->meta_name ? o->meta_name : "program";
+        if (strcmp(target, "linux") == 0) write_desktop_file(o, out_path, app_name);
+        else if (strcmp(target, "macos") == 0) write_app_bundle(o, out_path, app_name);
         else
-            printf("oboe: note: .desktop files only apply to Linux targets; skipped\n");
+            printf("oboe: note: --desktop has no meaning for the '%s' target; skipped\n", target);
     }
     free(entry);
+}
+
+/* Target names declared under `build.targets` in project.json, in file order.
+   `oboe build` with no -t builds every one of them; with no `targets` object it
+   builds once with the plain `build` settings, as it always has. */
+static char **declared_targets(int *out_count) {
+    *out_count = 0;
+    char *json = read_whole_file("project.json");
+    if (!json) return NULL;
+    char *targets = json_extract_object(json, "build.targets");
+    free(json);
+    if (!targets) return NULL;
+    char **names = json_object_keys(targets, out_count);
+    free(targets);
+    return names;
+}
+
+/* `oboe build <file>` is always a single script. Otherwise a project build runs
+   once per declared target, each with its own settings layered under the CLI
+   flags — so the per-target fields must be re-resolved from a clean copy of the
+   options every time round rather than accumulating across iterations. */
+static void cmd_build_all(const BuildOpts *base) {
+    if (base->file || base->config) {
+        BuildOpts o = *base;
+        cmd_build(&o);
+        return;
+    }
+    int count = 0;
+    char **names = declared_targets(&count);
+    if (count == 0) {
+        free(names);
+        BuildOpts o = *base;
+        cmd_build(&o);
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        BuildOpts o = *base;
+        o.config = names[i];
+        printf("=== %s ===\n", names[i]);
+        cmd_build(&o);
+        free(names[i]);
+    }
+    free(names);
 }
 
 static void cmd_tidy(bool verbose) {
@@ -448,6 +610,107 @@ static void cmd_tidy(bool verbose) {
     printf("Cleaned build artifacts. No package repository is configured yet, so no dependencies were fetched.\n");
 }
 
+/* rm -rf, for a package directory under .oboe/libraries */
+static void remove_tree(const char *path) {
+    char cmd[8192];
+    snprintf(cmd, sizeof cmd, "rm -rf \"%s\"", path);
+    if (system(cmd) != 0) fprintf(stderr, "oboe: could not remove '%s'\n", path);
+}
+
+/* Rewrites project.json with `pkg`'s dependency line dropped, leaving every
+   other byte alone — a line-oriented edit rather than a reserialize, since the
+   file is hand-written and keeping its formatting and comments matters. A
+   trailing comma left dangling on the previous entry is cleaned up. */
+static bool remove_dependency_line(const char *pkg) {
+    char *json = read_whole_file("project.json");
+    if (!json) return false;
+    char needle[256];
+    snprintf(needle, sizeof needle, "\"%s\"", pkg);
+
+    char *out = malloc(strlen(json) + 1);
+    size_t n = 0;
+    bool removed = false;
+    for (char *line = json; *line;) {
+        char *eol = strchr(line, '\n');
+        size_t len = eol ? (size_t)(eol - line) + 1 : strlen(line);
+        char *hit = strstr(line, needle);
+        bool is_dep_line = hit && hit < line + len && strchr(line, ':') > hit;
+        if (is_dep_line && !removed) {
+            removed = true;
+        } else {
+            memcpy(out + n, line, len);
+            n += len;
+        }
+        line += len;
+    }
+    out[n] = '\0';
+
+    /* Dropping the last entry of an object leaves the previous one ending in a
+       comma before the closing brace; strip any such dangling comma. Commas
+       inside strings are skipped so a value like "a,b" is never touched. */
+    if (removed) {
+        bool in_string = false;
+        for (char *p = out; *p; p++) {
+            if (in_string) {
+                if (*p == '\\' && p[1]) p++;
+                else if (*p == '"') in_string = false;
+                continue;
+            }
+            if (*p == '"') { in_string = true; continue; }
+            if (*p != ',') continue;
+            char *q = p + 1;
+            while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+            if (*q == '}' || *q == ']') { memmove(p, p + 1, strlen(p)); p--; }
+        }
+    }
+
+    if (removed) {
+        FILE *f = fopen("project.json", "w");
+        if (!f) { fprintf(stderr, "oboe: cannot write project.json\n"); free(json); free(out); return false; }
+        fputs(out, f);
+        fclose(f);
+    }
+    free(json);
+    free(out);
+    return removed;
+}
+
+/* Undoes `oboe get`: drops the package's files from .oboe/libraries and its
+   entry from project.json. Works on hand-placed libraries too, which is all
+   there is until a package registry exists. */
+static void cmd_remove(const char *name) {
+    if (!name) {
+        fprintf(stderr, "oboe: 'remove' needs a package name\n");
+        exit(1);
+    }
+    struct stat st;
+    if (stat("project.json", &st) != 0) {
+        fprintf(stderr, "oboe: no project.json here; 'remove' only works inside a project\n");
+        exit(1);
+    }
+
+    bool any = false;
+    char path[4096];
+    snprintf(path, sizeof path, ".oboe/libraries/%s.oboe", name);
+    if (remove(path) == 0) { printf("Removed %s\n", path); any = true; }
+    for (int i = 0; k_targets[i].name; i++) {
+        snprintf(path, sizeof path, ".oboe/libraries/%s.%s.oboe", name, k_targets[i].name);
+        if (remove(path) == 0) { printf("Removed %s\n", path); any = true; }
+    }
+    snprintf(path, sizeof path, ".oboe/libraries/%s", name);
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+        remove_tree(path);
+        printf("Removed %s/\n", path);
+        any = true;
+    }
+
+    if (remove_dependency_line(name)) {
+        printf("Removed \"%s\" from project.json dependencies.\n", name);
+        any = true;
+    }
+    if (!any) printf("oboe: nothing to remove for '%s'.\n", name);
+}
+
 static void cmd_get_or_install(const char *what, const char *name) {
     fprintf(stderr, "oboe: '%s %s' is not yet implemented — there is no package registry to fetch from yet.\n", what, name ? name : "");
     exit(1);
@@ -455,7 +718,7 @@ static void cmd_get_or_install(const char *what, const char *name) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: oboe <init|run|build|tidy|get|install> [args]\n");
+        fprintf(stderr, "usage: oboe <init|run|build|tidy|get|install|remove> [args]\n");
         return 1;
     }
     const char *cmd = argv[1];
@@ -471,7 +734,7 @@ int main(int argc, char **argv) {
             const char *a = argv[i];
             const char **takes_value =
                 (strcmp(a, "-o") == 0 || strcmp(a, "--output") == 0) ? &o.output :
-                (strcmp(a, "-t") == 0 || strcmp(a, "--target") == 0) ? &o.target :
+                (strcmp(a, "-t") == 0 || strcmp(a, "--target") == 0) ? &o.config :
                 (strcmp(a, "--cc") == 0) ? &o.cc :
                 (strcmp(a, "--meta-name") == 0) ? &o.meta_name :
                 (strcmp(a, "--meta-version") == 0) ? &o.meta_version :
@@ -486,7 +749,7 @@ int main(int argc, char **argv) {
             else if (a[0] == '-') { fprintf(stderr, "oboe: unknown build flag '%s'\n", a); return 1; }
             else o.file = a;
         }
-        cmd_build(&o);
+        cmd_build_all(&o);
         return 0;
     }
     if (strcmp(cmd, "tidy") == 0) {
@@ -496,6 +759,7 @@ int main(int argc, char **argv) {
         cmd_tidy(verbose);
         return 0;
     }
+    if (strcmp(cmd, "remove") == 0) { cmd_remove(argc >= 3 ? argv[2] : NULL); return 0; }
     if (strcmp(cmd, "get") == 0) { cmd_get_or_install("get", argc >= 3 ? argv[2] : NULL); return 0; }
     if (strcmp(cmd, "install") == 0) { cmd_get_or_install("install", argc >= 3 ? argv[2] : NULL); return 0; }
 

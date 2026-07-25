@@ -36,7 +36,7 @@ struct Type {
 
 /* ---- expressions ---- */
 typedef enum {
-    EXPR_INT, EXPR_BOOL, EXPR_NULL, EXPR_STRING, EXPR_IDENT,
+    EXPR_INT, EXPR_FLOAT, EXPR_BOOL, EXPR_NULL, EXPR_STRING, EXPR_IDENT,
     EXPR_ARRAY, EXPR_DICT, EXPR_BINARY, EXPR_UNARY, EXPR_CALL,
     EXPR_FIELD, EXPR_SAFE_FIELD, EXPR_INDEX, EXPR_IS, EXPR_ASSIGN,
     EXPR_TERNARY
@@ -54,6 +54,7 @@ struct Expr {
     int line;
     union {
         long long int_val;
+        double float_val;
         bool bool_val;
         char *ident;         /* EXPR_IDENT */
         StringPart *str_parts; /* EXPR_STRING */
@@ -61,7 +62,9 @@ struct Expr {
         struct { Expr **keys; Expr **values; int count; } dict_lit; /* keys are literal strings */
         struct { char *op; Expr *l, *r; } binary;
         struct { char *op; Expr *operand; } unary;
-        struct { Expr *callee; Expr **args; int arg_count; } call;
+        /* arg_names is parallel to args; an entry is the parameter name for a
+           `name = value` argument and NULL for a positional one */
+        struct { Expr *callee; Expr **args; char **arg_names; int arg_count; } call;
         struct { Expr *obj; char *name; } field;       /* EXPR_FIELD / EXPR_SAFE_FIELD */
         struct { Expr *arr; Expr *idx; } index;
         struct { Expr *value; char *type_name; } is_check;
@@ -75,6 +78,12 @@ typedef enum {
     STMT_LET, STMT_EXPR, STMT_RETURN, STMT_IF, STMT_WHILE, STMT_FOR,
     STMT_SWITCH, STMT_TRY, STMT_THROW, STMT_BLOCK
 } StmtKind;
+
+/* what a `for` loop walks: a numeric range, the values of an iterable, or the
+   key/value or index/value pairs of one (Lua's `pairs`/`ipairs`) */
+typedef enum {
+    FOR_RANGE, FOR_ITER, FOR_PAIRS, FOR_IPAIRS
+} ForIterKind;
 
 struct CatchClause {
     char *type_name;
@@ -102,8 +111,10 @@ struct Stmt {
         struct { Expr *cond; Stmt **body; int body_count; } while_stmt;
         struct {
             char *var_name;
-            bool is_range; Expr *range_a, *range_b;
-            Expr *iterable; /* used when !is_range */
+            char *var2_name; /* the value binding for pairs/ipairs, else NULL */
+            ForIterKind kind;
+            Expr *range_a, *range_b; /* FOR_RANGE */
+            Expr *iterable;          /* every other kind */
             Stmt **body; int body_count;
         } for_stmt;
         struct { Expr *subject; CaseClause *cases; } switch_stmt;
@@ -121,6 +132,7 @@ struct Stmt {
 struct Param {
     char *type_name; /* may be NULL */
     char *name;
+    Expr *default_value; /* `int x = 1` in a parameter list; NULL when required */
     Param *next;
 };
 

@@ -49,7 +49,8 @@ static bool is_op_char(char c) { return strchr("+-*/%<>=!&|^~?@#$:.", c) != NULL
 static bool is_builtin_op(const char *s) {
     static const char *builtins[] = {
         "+", "-", "*", "/", "%", "=", "==", "!=", "<", "<=", ">", ">=",
-        "&&", "||", "??", "?.", "!", "?", ".", "->", ":", NULL
+        "&&", "||", "??", "?.", "!", "?", ".", "->", ":",
+        "&", "|", "^", "~", "<<", ">>", NULL
     };
     for (int i = 0; builtins[i]; i++) if (strcmp(builtins[i], s) == 0) return true;
     return false;
@@ -105,6 +106,7 @@ static Token make(TokenType type, const char *text, int line) {
     t.type = type;
     t.text = text ? strdup(text) : NULL;
     t.ival = 0;
+    t.dval = 0;
     t.line = line;
     return t;
 }
@@ -200,9 +202,18 @@ Token *lex_all(const char *src, int *out_count) {
         if (isdigit((unsigned char)c)) {
             size_t start = pos;
             while (pos < len && isdigit((unsigned char)src[pos])) pos++;
+            /* a '.' only starts a fraction when a digit follows, so `1.foo()`
+               and a range like `1..n` keep lexing '.' as its own token */
+            bool is_float = false;
+            if (pos + 1 < len && src[pos] == '.' && isdigit((unsigned char)src[pos + 1])) {
+                is_float = true;
+                pos++;
+                while (pos < len && isdigit((unsigned char)src[pos])) pos++;
+            }
             char *numstr = strndup(src + start, pos - start);
-            Token t = make(T_INT, numstr, line);
-            t.ival = atoll(numstr);
+            Token t = make(is_float ? T_FLOAT : T_INT, numstr, line);
+            if (is_float) t.dval = strtod(numstr, NULL);
+            else t.ival = atoll(numstr);
             free(numstr);
             push_tok(&buf, t);
             continue;
@@ -253,16 +264,20 @@ Token *lex_all(const char *src, int *out_count) {
                 push_tok(&buf, make(T_NOT, "!", line)); pos++; continue;
             case '<':
                 if (pos + 1 < len && src[pos+1] == '=') { push_tok(&buf, make(T_LTE, "<=", line)); pos += 2; continue; }
+                if (pos + 1 < len && src[pos+1] == '<') { push_tok(&buf, make(T_SHL, "<<", line)); pos += 2; continue; }
                 push_tok(&buf, make(T_LT, "<", line)); pos++; continue;
             case '>':
                 if (pos + 1 < len && src[pos+1] == '=') { push_tok(&buf, make(T_GTE, ">=", line)); pos += 2; continue; }
+                if (pos + 1 < len && src[pos+1] == '>') { push_tok(&buf, make(T_SHR, ">>", line)); pos += 2; continue; }
                 push_tok(&buf, make(T_GT, ">", line)); pos++; continue;
             case '&':
                 if (pos + 1 < len && src[pos+1] == '&') { push_tok(&buf, make(T_ANDAND, "&&", line)); pos += 2; continue; }
-                fprintf(stderr, "oboe: unexpected '&' at line %d\n", line); exit(1);
+                push_tok(&buf, make(T_AMP, "&", line)); pos++; continue;
             case '|':
                 if (pos + 1 < len && src[pos+1] == '|') { push_tok(&buf, make(T_OROR, "||", line)); pos += 2; continue; }
-                fprintf(stderr, "oboe: unexpected '|' at line %d\n", line); exit(1);
+                push_tok(&buf, make(T_PIPE, "|", line)); pos++; continue;
+            case '^': push_tok(&buf, make(T_CARET, "^", line)); pos++; continue;
+            case '~': push_tok(&buf, make(T_TILDE, "~", line)); pos++; continue;
             case '?':
                 if (pos + 1 < len && src[pos+1] == '?') { push_tok(&buf, make(T_QQ, "??", line)); pos += 2; continue; }
                 if (pos + 1 < len && src[pos+1] == '.') { push_tok(&buf, make(T_QDOT, "?.", line)); pos += 2; continue; }

@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+func main(array args) {
+    var s = "Hello, World"
+    print(s.upper())
+    print(s.lower())
+    print(s.reverse())
+    print(s.len())
+    print(s.split(", "))
+    print("a,b,,c".split(","))
+    print("abc".split(""))
+    print("  padded  ".trim())
+    print(s.starts_with("Hello"), s.ends_with("World"), s.contains("o, W"))
+    print(s.index_of("World"), s.index_of("nope"))
+    print(s.replace("l", "L"))
+    print(s.substr(7, 5))
+    print(s.slice(0, 5))
+    print("ab".repeat(3))
+    print("42".to_int() + 1)
+    print("2.5".to_float() * 2)
+
+    // methods chain, and work on a literal receiver
+    print("  MiXeD  ".trim().lower().reverse())
+
+    // a bad receiver throws a catchable TypeError
+    try {
+        print([1, 2].upper())
+    } catch (TypeError e) {
+        print("caught: ${e}")
+    }
+    try {
+        print("abc".to_int())
+    } catch (ValueError e) {
+        print("bad int: ${e}")
+    }
+}

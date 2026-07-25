@@ -113,18 +113,35 @@ static StringPart *parse_string_literal_parts(Parser *p, const char *raw, int li
 }
 
 /* ---------- expressions ---------- */
-static Expr **parse_arg_list(Parser *p, TokenType close, int *out_count) {
+/* When out_names is non-NULL (a call's argument list, never an array literal),
+   an argument written `name = value` is recorded as a by-name argument. This is
+   why `f(x = 1)` binds the parameter `x` rather than assigning to a variable
+   named x and passing the result. */
+static Expr **parse_arg_list(Parser *p, TokenType close, int *out_count, char ***out_names) {
     Expr **items = NULL;
+    char **names = NULL;
     int cap = 0, count = 0;
     if (!check(p, close)) {
         do {
+            char *name = NULL;
+            if (out_names && check(p, T_IDENT) && peekAt(p, 1)->type == T_ASSIGN) {
+                name = strdup(advance(p)->text);
+                advance(p); /* '=' */
+            }
             Expr *e = parse_expression(p);
-            if (count == cap) { cap = cap ? cap * 2 : 4; items = realloc(items, cap * sizeof(Expr *)); }
+            if (count == cap) {
+                cap = cap ? cap * 2 : 4;
+                items = realloc(items, cap * sizeof(Expr *));
+                names = realloc(names, cap * sizeof(char *));
+            }
+            names[count] = name;
             items[count++] = e;
         } while (match(p, T_COMMA));
     }
     expect(p, close, "expected closing delimiter");
     *out_count = count;
+    if (out_names) *out_names = names;
+    else free(names);
     return items;
 }
 
@@ -134,6 +151,11 @@ static Expr *parse_primary(Parser *p) {
     if (match(p, T_INT)) {
         Expr *e = new_expr(EXPR_INT, line);
         e->as.int_val = t->ival;
+        return e;
+    }
+    if (match(p, T_FLOAT)) {
+        Expr *e = new_expr(EXPR_FLOAT, line);
+        e->as.float_val = t->dval;
         return e;
     }
     if (match(p, T_TRUE)) { Expr *e = new_expr(EXPR_BOOL, line); e->as.bool_val = true; return e; }
@@ -158,7 +180,7 @@ static Expr *parse_primary(Parser *p) {
     }
     if (match(p, T_LBRACKET)) {
         int count;
-        Expr **items = parse_arg_list(p, T_RBRACKET, &count);
+        Expr **items = parse_arg_list(p, T_RBRACKET, &count, NULL);
         Expr *e = new_expr(EXPR_ARRAY, line);
         e->as.array_lit.items = items;
         e->as.array_lit.count = count;
@@ -209,10 +231,12 @@ static Expr *parse_postfix(Parser *p) {
             e = f;
         } else if (match(p, T_LPAREN)) {
             int count;
-            Expr **args = parse_arg_list(p, T_RPAREN, &count);
+            char **names;
+            Expr **args = parse_arg_list(p, T_RPAREN, &count, &names);
             Expr *c = new_expr(EXPR_CALL, line);
             c->as.call.callee = e;
             c->as.call.args = args;
+            c->as.call.arg_names = names;
             c->as.call.arg_count = count;
             e = c;
         } else if (match(p, T_LBRACKET)) {
@@ -240,6 +264,12 @@ static Expr *parse_unary(Parser *p) {
     if (match(p, T_MINUS)) {
         Expr *e = new_expr(EXPR_UNARY, line);
         e->as.unary.op = strdup("-");
+        e->as.unary.operand = parse_unary(p);
+        return e;
+    }
+    if (match(p, T_TILDE)) {
+        Expr *e = new_expr(EXPR_UNARY, line);
+        e->as.unary.op = strdup("~");
         e->as.unary.operand = parse_unary(p);
         return e;
     }
@@ -287,8 +317,36 @@ static Expr *parse_additive(Parser *p) {
     return e;
 }
 
+/* Bitwise operators follow C's precedence: shifts sit between additive and
+   comparison, and `&`, `^`, `|` sit between equality and the user-declared
+   operators, tightest first. All are left-associative. */
+static Expr *parse_binary_level(Parser *p, Expr *(*next)(Parser *),
+                                const TokenType *types, const char **ops) {
+    Expr *e = next(p);
+    for (;;) {
+        int line = peek(p)->line;
+        const char *op = NULL;
+        for (int i = 0; ops[i]; i++) if (check(p, types[i])) { op = ops[i]; break; }
+        if (!op) break;
+        advance(p);
+        Expr *rhs = next(p);
+        Expr *b = new_expr(EXPR_BINARY, line);
+        b->as.binary.op = strdup(op);
+        b->as.binary.l = e;
+        b->as.binary.r = rhs;
+        e = b;
+    }
+    return e;
+}
+
+static Expr *parse_shift(Parser *p) {
+    static const TokenType types[] = { T_SHL, T_SHR };
+    static const char *ops[] = { "<<", ">>", NULL };
+    return parse_binary_level(p, parse_additive, types, ops);
+}
+
 static Expr *parse_is(Parser *p) {
-    Expr *e = parse_additive(p);
+    Expr *e = parse_shift(p);
     if (match(p, T_IS)) {
         int line = peek(p)->line;
         Token *name = expect(p, T_IDENT, "expected type name after 'is'");
@@ -340,14 +398,32 @@ static Expr *parse_equality(Parser *p) {
     return e;
 }
 
-/* user-declared operators (`operator ||> (...)`) bind looser than equality
-   and tighter than `and`, left-associative */
+static Expr *parse_bitand(Parser *p) {
+    static const TokenType types[] = { T_AMP };
+    static const char *ops[] = { "&", NULL };
+    return parse_binary_level(p, parse_equality, types, ops);
+}
+
+static Expr *parse_bitxor(Parser *p) {
+    static const TokenType types[] = { T_CARET };
+    static const char *ops[] = { "^", NULL };
+    return parse_binary_level(p, parse_bitand, types, ops);
+}
+
+static Expr *parse_bitor(Parser *p) {
+    static const TokenType types[] = { T_PIPE };
+    static const char *ops[] = { "|", NULL };
+    return parse_binary_level(p, parse_bitxor, types, ops);
+}
+
+/* user-declared operators (`operator ||> (...)`) bind looser than the bitwise
+   operators and tighter than `and`, left-associative */
 static Expr *parse_custom_op(Parser *p) {
-    Expr *e = parse_equality(p);
+    Expr *e = parse_bitor(p);
     while (check(p, T_CUSTOMOP)) {
         int line = peek(p)->line;
         Token *op = advance(p);
-        Expr *rhs = parse_equality(p);
+        Expr *rhs = parse_bitor(p);
         Expr *b = new_expr(EXPR_BINARY, line);
         b->as.binary.op = strdup(op->text);
         b->as.binary.l = e;
@@ -453,10 +529,14 @@ static void parse_typed_name(Parser *p, char **out_type, char **out_name) {
     }
 }
 
+/* `(int x, str name = "Jade")` — a parameter may carry a default. Requiring
+   defaults to come last keeps positional calls unambiguous: everything before
+   the first default must be supplied by position or by name. */
 static Param *parse_params(Parser *p) {
     expect(p, T_LPAREN, "expected '('");
     Param head = {0};
     Param *tail = &head;
+    bool seen_default = false;
     if (!check(p, T_RPAREN)) {
         do {
             char *type_name, *name;
@@ -464,6 +544,12 @@ static Param *parse_params(Parser *p) {
             Param *param = calloc(1, sizeof(Param));
             param->type_name = type_name;
             param->name = name;
+            if (match(p, T_ASSIGN)) {
+                param->default_value = parse_expression(p);
+                seen_default = true;
+            } else if (seen_default && strcmp(name, "this") != 0) {
+                fail(p, "a parameter without a default cannot follow one with a default");
+            }
             tail->next = param;
             tail = param;
         } while (match(p, T_COMMA));
@@ -531,31 +617,49 @@ static Stmt *parse_while(Parser *p) {
     return s;
 }
 
-static bool looks_like_range_call(Parser *p) {
-    return check(p, T_IDENT) && strcmp(peek(p)->text, "range") == 0 && peekAt(p, 1)->type == T_LPAREN;
+/* `range(...)`, `pairs(...)` and `ipairs(...)` are recognized here as loop
+   syntax rather than as real functions, the way `range` always has been. */
+static bool looks_like_call_to(Parser *p, const char *name) {
+    return check(p, T_IDENT) && strcmp(peek(p)->text, name) == 0 && peekAt(p, 1)->type == T_LPAREN;
 }
 
 static Stmt *parse_for(Parser *p) {
     int line = peek(p)->line;
     expect(p, T_LPAREN, "expected '(' after for");
     Token *var = expect(p, T_IDENT, "expected loop variable");
-    expect(p, T_IN, "expected 'in' in for loop");
     Stmt *s = new_stmt(STMT_FOR, line);
     s->as.for_stmt.var_name = strdup(var->text);
-    if (looks_like_range_call(p)) {
+    if (match(p, T_COMMA)) {
+        Token *var2 = expect(p, T_IDENT, "expected second loop variable");
+        s->as.for_stmt.var2_name = strdup(var2->text);
+    }
+    expect(p, T_IN, "expected 'in' in for loop");
+    if (looks_like_call_to(p, "range")) {
         advance(p); /* 'range' ident */
         expect(p, T_LPAREN, "expected '(' after range");
         Expr *a = parse_expression(p);
         expect(p, T_COMMA, "expected ',' in range()");
         Expr *b = parse_expression(p);
         expect(p, T_RPAREN, "expected ')'");
-        s->as.for_stmt.is_range = true;
+        s->as.for_stmt.kind = FOR_RANGE;
         s->as.for_stmt.range_a = a;
         s->as.for_stmt.range_b = b;
+    } else if (looks_like_call_to(p, "pairs") || looks_like_call_to(p, "ipairs")) {
+        bool indexed = peek(p)->text[0] == 'i';
+        advance(p);
+        expect(p, T_LPAREN, "expected '('");
+        s->as.for_stmt.kind = indexed ? FOR_IPAIRS : FOR_PAIRS;
+        s->as.for_stmt.iterable = parse_expression(p);
+        expect(p, T_RPAREN, "expected ')'");
     } else {
-        s->as.for_stmt.is_range = false;
+        s->as.for_stmt.kind = FOR_ITER;
         s->as.for_stmt.iterable = parse_expression(p);
     }
+    bool is_pairs = s->as.for_stmt.kind == FOR_PAIRS || s->as.for_stmt.kind == FOR_IPAIRS;
+    if (is_pairs && !s->as.for_stmt.var2_name)
+        fail(p, "pairs()/ipairs() need two loop variables, as in `for (k, v in pairs(d))`");
+    if (!is_pairs && s->as.for_stmt.var2_name)
+        fail(p, "two loop variables require pairs() or ipairs()");
     expect(p, T_RPAREN, "expected ')'");
     Stmt **body; int count;
     parse_block(p, &body, &count);

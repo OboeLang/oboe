@@ -85,6 +85,59 @@ else
 fi
 rm -rf "$tmp"
 
+# `oboe remove` deletes the package's files and its dependency entry, leaving
+# the rest of project.json untouched
+tmp="$(mktemp -d)"
+mkdir -p "$tmp/.oboe/libraries/mylib"
+touch "$tmp/.oboe/libraries/mylib.oboe" "$tmp/.oboe/libraries/mylib/main.oboe"
+cat > "$tmp/project.json" <<'EOF'
+{
+    "project": { "name": "p", "entry": "main.oboe" },
+    "dependencies": {
+        "oboe": ">=1.0.0",
+        "mylib": ">=1.0.0"
+    }
+}
+EOF
+( cd "$tmp" && "$OLDPWD/$OBOE" remove mylib ) >/dev/null 2>&1
+if [ ! -e "$tmp/.oboe/libraries/mylib.oboe" ] && [ ! -d "$tmp/.oboe/libraries/mylib" ] &&
+   ! grep -q mylib "$tmp/project.json" && grep -q '"oboe"' "$tmp/project.json" &&
+   ! tr -d '[:space:]' < "$tmp/project.json" | grep -q ',}'; then
+    echo "PASS remove_package"
+    pass=$((pass+1))
+else
+    echo "FAIL remove_package"
+    cat "$tmp/project.json" | sed 's/^/    /'
+    fail=$((fail+1))
+fi
+rm -rf "$tmp"
+
+# `oboe build` with a build.targets object builds every declared target
+tmp="$(mktemp -d)"
+cat > "$tmp/main.oboe" <<'EOF'
+func main(array args) { print("hi") }
+EOF
+cat > "$tmp/project.json" <<'EOF'
+{
+    "project": { "name": "multi", "entry": "main.oboe" },
+    "build": {
+        "targets": {
+            "one": { "target": "linux", "output": "dist/one" },
+            "two": { "target": "linux", "output": "dist/two" }
+        }
+    }
+}
+EOF
+( cd "$tmp" && "$OLDPWD/$OBOE" build ) >/dev/null 2>&1
+if [ -x "$tmp/dist/one" ] && [ -x "$tmp/dist/two" ]; then
+    echo "PASS build_all_targets"
+    pass=$((pass+1))
+else
+    echo "FAIL build_all_targets (dist: $(ls "$tmp/dist" 2>/dev/null | tr '\n' ' '))"
+    fail=$((fail+1))
+fi
+rm -rf "$tmp"
+
 echo
 echo "$pass passed, $fail failed"
 [ $fail -eq 0 ]

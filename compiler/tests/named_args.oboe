@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+func code(int one = 1, int two = 2, int three = 3, int four = 4) {
+    print(one, two, three, four)
+}
+
+func mixed(int required, str label = "none") {
+    print(required, label)
+}
+
+class Point {
+    func init(this, int x = 0, int y = 0) {
+        this.x = x
+        this.y = y
+    }
+    func show(this, str prefix = "at") {
+        print("${prefix} ${this.x},${this.y}")
+    }
+}
+
+func main(array args) {
+    // set by position and by name in the same call
+    code(6, three = 5)
+    code(three = 5)
+    code(four = 40, two = 20)
+    code(one = 10, two = 20, three = 30, four = 40)
+
+    mixed(1, label = "named")
+    mixed(required = 2)
+
+    Point(y = 5).show()
+    Point(3, y = 4).show(prefix = "point")
+}

@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+func main(array args) {
+    print(6 & 3)
+    print(6 | 3)
+    print(6 ^ 3)
+    print(~6)
+    print(1 << 4)
+    print(256 >> 2)
+    print(0 - 8 >> 1)
+
+    // unsigned values shift in zeros
+    uint8 u = 200
+    print(u >> 1)
+    print(~u)
+
+    // precedence: shifts bind tighter than comparison, & ^ | looser than ==
+    print(1 << 3 == 8)
+    print((4 | 1) == 5)
+    print(6 & 3 | 8)
+    print(1 | 2 ^ 3 & 3)
+}

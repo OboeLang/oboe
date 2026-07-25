@@ -11,6 +11,8 @@ oboe init # Initializes a project structure in the current directory.
 
 oboe get <package name> # Installs a library package to the current project, similar to PyPI or NPM.
 oboe install <package name> # Installs a program made in Oboe on the repository, like CLI tools.
+oboe remove <package name> # Un-`get`s a package: deletes its files from .oboe/libraries and
+                           # drops it from project.json's dependencies.
 oboe tidy # Cleans up build/temp files and installs needed packages.
           # Should not do anything if not in a project directory.
     -v --verbose # Self-explanatory.
@@ -24,18 +26,47 @@ oboe build # Self-explanatory. Builds the program into an executable, in the dis
     -v --verbose # Self-explanatory.
     -o --output # Manually describes the output file. Creates nonexistent folders when specified.
                 # e.g. -o my_folder/output.exe will create my_folder.
-    -t --target # Cross-compilation target: linux, windows or macos (nt/darwin also accepted).
-                # Defaults to the host OS. Windows outputs get .exe appended automatically.
-                # windows needs mingw-w64 installed; macos needs osxcross.
+    -t --target # Names either a build config declared in project.json's `build.targets`,
+                # or an OS directly: linux, windows, macos, freebsd, openbsd or netbsd
+                # (nt/darwin/osx also accepted). Defaults to the host OS. Windows outputs
+                # get .exe appended automatically. windows needs mingw-w64 installed;
+                # macos needs osxcross; the BSDs default to clang.
     --cc <compiler> # Overrides the C compiler used, for targets/toolchains not covered above.
-    --desktop # Generates a .desktop launcher next to the output (Linux targets only).
+    --desktop # Generates a desktop-installable artifact for the target: a .desktop
+              # launcher on Linux, a .app bundle on macOS. Ignored elsewhere.
     --meta-name / --meta-version / --meta-description / --meta-icon
                 # Program metadata. On Windows targets this is embedded as version info
-                # (via windres); it also fills in the .desktop file. Defaults come from
-                # project.json when building a project.
+                # (via windres); on macOS it fills in the .app bundle's Info.plist, and on
+                # Linux the .desktop file. Defaults come from project.json when building
+                # a project.
 ```
 
-Build settings may also live in project.json under a `"build"` object (`"target"`, `"output"` and `"desktop"`) with CLI flags taking precedence.
+### Build settings in project.json
+
+Build settings may also live under a `"build"` object, with CLI flags always taking
+precedence. Program metadata goes in a nested `"meta"` object (the older flat
+`"meta-name"` / `"meta-version"` / ... keys are still read as a fallback).
+
+`"build.targets"` declares named build configurations. Each may set any build field;
+one with no `"target"` of its own targets the OS it is named after.
+
+```json
+"build": {
+    "output": "dist/app",
+    "meta": { "name": "My App", "version": "1.0.0", "icon": "myicon.ico" },
+    "targets": {
+        "linux":   { "output": "dist/app-linux", "desktop": true },
+        "windows": { "output": "dist/app.exe" },
+        "portable": { "target": "linux", "output": "dist/app-portable" }
+    }
+}
+```
+
+- `oboe build` with `targets` declared builds every one of them in turn, each with its
+  own settings; without it, it builds once from the plain `build` settings.
+- `oboe build -t windows` builds just that config. A `-t` value that isn't a declared
+  target name is treated as an OS name, as before.
+- `oboe build <file>` always means a single script, never a target name.
 
 - Oboe is a compiled language. The reference implementation transpiles to C and compiles with `gcc`.
 
@@ -72,12 +103,38 @@ const int x = 1  // typed constant
 
 ## Primitive types
 
-- `int`s are 32-bit
+- `int` is the default integer type: 64-bit signed, and it does not wrap on its own.
+- Sized integers: `int8`, `int16`, `int32`, `int64` and the unsigned `uint8`, `uint16`,
+  `uint32`, `uint64` (`uint` is `uint64`).
+- `float` is 64-bit; `float64` is a synonym for it, and `float32` differs only in
+  rounding its stores through single precision.
 - `bool`
 - `string`s are immutable
 - `array`s, which are ordered and may hold more than one type in the same array (not statically homogeneous).
 - `dict`
 - Primitives have methods.
+
+### Numeric semantics
+
+Type annotations are enforced at stores. Assigning into a variable, parameter or field declared with a sized integer type wraps the value into that type's range; a `float32` store rounds through single precision. Plain `int` and `float` never truncate.
+
+```
+int8 a = 127
+a = a + 1     // -128, wrapped
+uint8 b = 200
+int16 c = a + b   // arithmetic promotes to the wider operand
+```
+
+Arithmetic promotes to the wider operand, and to unsigned when the widest operand is unsigned (C's usual arithmetic conversions). Two plain `int`s stay a plain `int`.
+
+Division between two integers is integer division; any float operand makes it real division, where dividing by zero yields infinity or NaN rather than erroring.
+
+```
+7 / 2      // 3
+7.0 / 2    // 3.5
+```
+
+`is` with a sized type asks whether the value *fits* that type's range, not how it was declared: `127 is int8` is true and `200 is int8` is false.
 
 ## Functions
 
@@ -92,6 +149,31 @@ int func add(int x, int y) {
 - Parameters are `type name` pairs.
 - `array args` is the convention for a program's `main` entry point: `func main(array args) { ... }`.
 - Free functions are allowed; functions do not have to belong to a class.
+
+### Optional parameters and named arguments
+
+A parameter may carry a default, making it optional. Defaulted parameters must come last, so a positional call is never ambiguous.
+
+```
+func hello(str name = "Jade") {
+    print("Hello, ${name}!")
+}
+
+hello()          // Hello, Jade!
+hello("Robin")   // Hello, Robin!
+```
+
+Arguments can also be given by name, mixed with positional ones. Positional arguments fill parameters in order and must all come before the named ones.
+
+```
+func code(int one = 1, int two = 2, int three = 3, int four = 4) { ... }
+
+code(6, three = 5)   // one by position, three by name; two and four keep their defaults
+```
+
+A default is an expression, evaluated at each call site that omits it. That means it can refer to module-level state but not to the function's own earlier parameters (`func f(int a = 1, int b = a)` is an error).
+
+Omitting a parameter that has no default is a compile error naming it (`missing required argument 'x' in call to 'f'`), as are an unknown parameter name, an argument given twice, and too many arguments. This applies to constructors and methods as well as free functions; a constructor overload is still selected by argument count alone, never by type.
 
 ## Strings and interpolation
 
@@ -145,6 +227,7 @@ class Dog extends Animal {
 - `super(args...)` inside `init` chains to the nearest ancestor constructor.
 - A class that declares no `init` of its own inherits its ancestor's constructors (`Cat("Whiskers")` works if `Animal` has a one-arg `init`).
 
+
 ### Access control
 
 - Members are public by default; `private` is an explicit modifier to restrict access.
@@ -173,6 +256,8 @@ switch x {
 ```
 
 - `for ... in range(a, b)` iterates a numeric range (upper bound exclusive, per `range(1, n + 1)` covering `1..n`).
+- `for (x in iterable)` walks an array's elements, a dict's values, or a string one character at a time: `for (c in "test")` binds `c` to `"t"`, `"e"`, `"s"`, `"t"`.
+- `for (k, v in pairs(x))` binds key/value pairs: the keys of a dict, the indices of an array or string. `for (i, v in ipairs(x))` binds index/value pairs for any iterable. Both need exactly two loop variables, and two loop variables need one of them.
 - `if` / `else if` / `else` with parenthesized conditions.
 - `while` with parenthesized condition.
 - `switch`/`case` exists, with each `case` given its own `{ }` block body.
@@ -201,12 +286,14 @@ func main(array args) {
 - A generic `Exception` type exists as a catch-all.
 - File-related exceptions (e.g. `FileNotFoundError`) are expected to live in a file/IO standard-library module (`os.FileNotFoundError`), not the language core.
 
+
 ## Operators
 
 - Operator overloading and custom operators are both supported.
 - `??` null-coalescing: `x ?? default`.
 - `?.` safe navigation / optional chaining: `user?.address?.city` short-circuits instead of throwing.
 - Repetition operator: `x`, e.g. `"ab" x 3` → `"ababab"`.
+- Bitwise operators on integers: `&`, `|`, `^`, `~`, `<<`, `>>`. They follow C's precedence -- shifts bind between the additive and comparison operators, and `&`, `^`, `|` bind between equality and any user-declared operators, tightest first. The result takes the promoted width of its operands; shifting an unsigned value shifts in zeros. A float operand is an error. All six can be overloaded on a class like any other operator.
 
 ## Modules / imports
 
@@ -223,7 +310,9 @@ l.method()
 - `import <member> from <name>` imports a specific member.
 - `import <member>, <member> from <name>` imports specific members.
 - Members include a module's top-level variables, not just its functions.
-- OS-specific module files: when compiling for a given target OS, a file named `foo.<os>.oboe` (e.g. `foo.windows.oboe`) is preferred over `foo.oboe` for `import foo`. Useful for per-OS `cimport`s with a shared generic fallback. OS names match the build targets: `linux`, `windows`, `macos`.
+- OS-specific module files: when compiling for a given target OS, a file named `foo.<os>.oboe` (e.g. `foo.windows.oboe`) is preferred over `foo.oboe` for `import foo`. Useful for per-OS `cimport`s with a shared generic fallback. OS names match the build targets: `linux`, `windows`, `macos`, `freebsd`, `openbsd`, `netbsd`.
+- A module may be a folder rather than a single file. A folder containing a project.json is imported under that project's `name`, entering through its `entry` file; a folder without one is imported under its own directory name, entering through its `main.oboe`. A folder module resolves its own imports relative to itself, so a library can import its siblings by bare name.
+- Resolution order for `import foo`, first in the importing file's own directory and then in `.oboe/libraries`: `foo.<target-os>.oboe`, `foo.oboe`, then a module folder.
 
 ## Standard library philosophy
 
@@ -238,10 +327,29 @@ l.method()
 
 Importing `math`, `random` or `os` works with no file on disk, they're built into the language runtime. (A file of the same name next to your code still wins, so nothing is reserved.)
 
-- `math.abs(n)`, `math.min(a, b)`, `math.max(a, b)`, `math.pow(base, exp)`, `math.sqrt(n)` (integer math, matching the 32-bit-int world: `pow` is integer exponentiation, `sqrt` is the floor square root.)
+- `math.abs(n)`, `math.min(a, b)`, `math.max(a, b)`, `math.pow(base, exp)`, `math.sqrt(n)`, `math.floor(n)`, `math.ceil(n)`, `math.round(n)`. Integer arguments get exact integer math (`pow` is integer exponentiation, `sqrt` is the floor square root); as soon as any argument is a float the result is floating point. `floor`/`ceil`/`round` always return an int.
 - `random.seed(n)`, `random.randint(lo, hi)` (inclusive on both ends, like Python), `random.choice(array)` (a deterministic PRNG: the same seed gives the same sequence on every platform.)
 - `os.run(cmd)` runs a command through the shell and returns its exit code; `os.spawn(cmd)` starts it without waiting and returns the pid.
 - `os.read_file(path)` (throws `os.FileNotFoundError`), `os.write_file(path, content)`, `os.append_file(path, content)`, `os.exists(path)`, `os.remove(path)`, `os.getenv(name)` (string, or `null` when unset).
+- `os.script_file()` is the absolute path of the running script and `os.script_dir()` its directory; `os.project_root()` is the nearest ancestor directory containing a project.json, falling back to `os.script_dir()`. All three are resolved at compile time.
+
+### Methods on primitives
+
+Strings, arrays and dicts carry methods. Because the compiler does not track primitive types, the receiver's type is checked when the method runs: calling one on the wrong kind of value throws a catchable `TypeError`.
+
+- Any: `.str()`
+- Shared: `.len()`, `.contains(x)`, `.index_of(x)`, `.reverse()`, `.slice(start, end)`
+- Strings: `.upper()`, `.lower()`, `.trim()`, `.split(sep)`, `.starts_with(s)`, `.ends_with(s)`, `.replace(from, to)`, `.substr(start, len)`, `.repeat(n)`, `.to_int()`, `.to_float()` (the conversions throw `ValueError` on unparsable input)
+- Arrays: `.push(v)`, `.pop()`, `.insert(i, v)`, `.remove_at(i)`, `.join(sep)`
+- Dicts: `.keys()`, `.values()`, `.has(k)`, `.remove(k)`
+
+`.push`/`.pop`/`.insert`/`.remove_at` mutate the array in place; `.reverse()` and `.slice()` return new values. `.split("")` splits into single characters, and `.index_of` returns -1 when absent.
+
+```
+"a,b,c".split(",")   // ["a", "b", "c"]
+"Hello".upper()      // "HELLO"
+[1, 2, 3].join("-")  // "1-2-3"
+```
 
 ## Project structure
 
@@ -380,6 +488,7 @@ func main(array args) {
 `cimport <symbol> from "<library>"` resolves `<symbol>` in `<library>` at program startup and makes it callable like a normal function. The string operand distinguishes it from a module member import (`import member from module`).
 
 Arguments and return values are word-sized: ints, bools, and nulls pass by value, strings pass as C string pointers, and the return value comes back as an int. Calls take at most 8 arguments. Floats, structs, and out-parameters are not yet supported.
+
 
 ## Open questions
 

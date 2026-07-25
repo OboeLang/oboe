@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+func main(array args) {
+    // ranges still work
+    for (i in range(0, 3)) { write(i) }
+    print()
+
+    // strings iterate character by character
+    for (c in "test") { write("[${c}]") }
+    print()
+
+    // arrays iterate their values
+    for (v in [10, 20]) { write(v, "") }
+    print()
+
+    // dicts iterate their values
+    var d = {"a": 1, "b": 2}
+    for (v in d) { write(v, "") }
+    print()
+
+    // pairs gives key/value, ipairs gives index/value
+    for (k, v in pairs(d)) { print(k, v) }
+    for (i, v in ipairs(["x", "y"])) { print(i, v) }
+    for (i, v in ipairs("hi")) { print(i, v) }
+    for (k, v in pairs([7, 8])) { print(k, v) }
+
+    // nested loops keep their own bindings
+    for (k, v in pairs(d)) {
+        for (c in k) { write(c.upper()) }
+    }
+    print()
+}

@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+func hello(str name = "Jade") {
+    print("Hello, ${name}!")
+}
+
+func code(int one = 1, int two = 2, int three = 3, int four = 4) {
+    print(one, two, three, four)
+}
+
+func mixed(int required, str label = "none", int times = 1) {
+    print(required, label, times)
+}
+
+class Greeter {
+    func init(this, str greeting = "Hi", str who = "world") {
+        this.greeting = greeting
+        this.who = who
+    }
+    func say(this, str suffix = "!") {
+        print("${this.greeting}, ${this.who}${suffix}")
+    }
+}
+
+func main(array args) {
+    hello()
+    hello("Robin")
+
+    code()
+    code(9)
+    code(9, 8)
+    code(9, 8, 7, 6)
+
+    mixed(1)
+    mixed(1, "two")
+    mixed(1, "two", 3)
+
+    // defaults may be expressions, evaluated at the call site
+    Greeter().say()
+    Greeter("Hey").say()
+    Greeter("Hey", "you").say("?")
+}
