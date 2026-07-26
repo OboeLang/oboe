@@ -31,191 +31,281 @@ typedef struct CaseClause CaseClause;
 
 /* ---- types ---- */
 struct Type {
-    char *name; /* "int", "bool", "string", "array", "dict", class name, or NULL if unspecified */
+	char *name; /* "int", "bool", "string", "array", "dict", class name, or NULL if unspecified */
 };
 
 /* ---- expressions ---- */
 typedef enum {
-    EXPR_INT, EXPR_FLOAT, EXPR_BOOL, EXPR_NULL, EXPR_STRING, EXPR_IDENT,
-    EXPR_ARRAY, EXPR_DICT, EXPR_BINARY, EXPR_UNARY, EXPR_CALL,
-    EXPR_FIELD, EXPR_SAFE_FIELD, EXPR_INDEX, EXPR_IS, EXPR_ASSIGN,
-    EXPR_TERNARY
+	EXPR_INT,
+	EXPR_FLOAT,
+	EXPR_BOOL,
+	EXPR_NULL,
+	EXPR_STRING,
+	EXPR_IDENT,
+	EXPR_ARRAY,
+	EXPR_DICT,
+	EXPR_BINARY,
+	EXPR_UNARY,
+	EXPR_CALL,
+	EXPR_FIELD,
+	EXPR_SAFE_FIELD,
+	EXPR_INDEX,
+	EXPR_IS,
+	EXPR_ASSIGN,
+	EXPR_TERNARY
 } ExprKind;
 
 struct StringPart {
-    bool is_expr;
-    char *literal;   /* when !is_expr */
-    Expr *expr;      /* when is_expr */
-    StringPart *next;
+	bool is_expr;
+	char *literal; /* when !is_expr */
+	Expr *expr; /* when is_expr */
+	StringPart *next;
 };
 
 struct Expr {
-    ExprKind kind;
-    int line;
-    union {
-        long long int_val;
-        double float_val;
-        bool bool_val;
-        char *ident;         /* EXPR_IDENT */
-        StringPart *str_parts; /* EXPR_STRING */
-        struct { Expr **items; int count; } array_lit;
-        struct { Expr **keys; Expr **values; int count; } dict_lit; /* keys are literal strings */
-        struct { char *op; Expr *l, *r; } binary;
-        struct { char *op; Expr *operand; } unary;
-        /* arg_names is parallel to args; an entry is the parameter name for a
+	ExprKind kind;
+	int line;
+	union {
+		long long int_val;
+		double float_val;
+		bool bool_val;
+		char *ident; /* EXPR_IDENT */
+		StringPart *str_parts; /* EXPR_STRING */
+		struct {
+			Expr **items;
+			int count;
+		} array_lit;
+		struct {
+			Expr **keys;
+			Expr **values;
+			int count;
+		} dict_lit; /* keys are literal strings */
+		struct {
+			char *op;
+			Expr *l, *r;
+		} binary;
+		struct {
+			char *op;
+			Expr *operand;
+		} unary;
+		/* arg_names is parallel to args; an entry is the parameter name for a
            `name = value` argument and NULL for a positional one */
-        struct { Expr *callee; Expr **args; char **arg_names; int arg_count; } call;
-        struct { Expr *obj; char *name; } field;       /* EXPR_FIELD / EXPR_SAFE_FIELD */
-        struct { Expr *arr; Expr *idx; } index;
-        struct { Expr *value; char *type_name; } is_check;
-        struct { Expr *target; Expr *value; } assign;
-        struct { Expr *cond; Expr *then_e; Expr *else_e; } ternary;
-    } as;
+		struct {
+			Expr *callee;
+			Expr **args;
+			char **arg_names;
+			int arg_count;
+		} call;
+		struct {
+			Expr *obj;
+			char *name;
+		} field; /* EXPR_FIELD / EXPR_SAFE_FIELD */
+		struct {
+			Expr *arr;
+			Expr *idx;
+		} index;
+		struct {
+			Expr *value;
+			char *type_name;
+		} is_check;
+		struct {
+			Expr *target;
+			Expr *value;
+		} assign;
+		struct {
+			Expr *cond;
+			Expr *then_e;
+			Expr *else_e;
+		} ternary;
+	} as;
 };
 
 /* ---- statements ---- */
 typedef enum {
-    STMT_LET, STMT_EXPR, STMT_RETURN, STMT_IF, STMT_WHILE, STMT_FOR,
-    STMT_SWITCH, STMT_TRY, STMT_THROW, STMT_BLOCK
+	STMT_LET,
+	STMT_EXPR,
+	STMT_RETURN,
+	STMT_IF,
+	STMT_WHILE,
+	STMT_FOR,
+	STMT_SWITCH,
+	STMT_TRY,
+	STMT_THROW,
+	STMT_BLOCK
 } StmtKind;
 
 /* what a `for` loop walks: a numeric range, the values of an iterable, or the
    key/value or index/value pairs of one (Lua's `pairs`/`ipairs`) */
-typedef enum {
-    FOR_RANGE, FOR_ITER, FOR_PAIRS, FOR_IPAIRS
-} ForIterKind;
+typedef enum { FOR_RANGE, FOR_ITER, FOR_PAIRS, FOR_IPAIRS } ForIterKind;
 
 struct CatchClause {
-    char *type_name;
-    char *var_name;
-    Stmt **body;
-    int body_count;
-    CatchClause *next;
+	char *type_name;
+	char *var_name;
+	Stmt **body;
+	int body_count;
+	CatchClause *next;
 };
 
 struct CaseClause {
-    Expr *value; /* NULL means default */
-    Stmt **body;
-    int body_count;
-    CaseClause *next;
+	Expr *value; /* NULL means default */
+	Stmt **body;
+	int body_count;
+	CaseClause *next;
 };
 
 struct Stmt {
-    StmtKind kind;
-    int line;
-    union {
-        struct { char *name; char *type_name; bool is_const; Expr *init; } let;
-        struct { Expr *expr; } expr_stmt;
-        struct { Expr *value; } ret;
-        struct { Expr *cond; Stmt **then_body; int then_count; Stmt **else_body; int else_count; } if_stmt;
-        struct { Expr *cond; Stmt **body; int body_count; } while_stmt;
-        struct {
-            char *var_name;
-            char *var2_name; /* the value binding for pairs/ipairs, else NULL */
-            ForIterKind kind;
-            Expr *range_a, *range_b; /* FOR_RANGE */
-            Expr *iterable;          /* every other kind */
-            Stmt **body; int body_count;
-        } for_stmt;
-        struct { Expr *subject; CaseClause *cases; } switch_stmt;
-        struct {
-            Stmt **body; int body_count;
-            CatchClause *catches;
-            Stmt **finally_body; int finally_count;
-        } try_stmt;
-        struct { char *type_name; Expr *value; } throw_stmt;
-        struct { Stmt **body; int body_count; } block;
-    } as;
+	StmtKind kind;
+	int line;
+	union {
+		struct {
+			char *name;
+			char *type_name;
+			bool is_const;
+			Expr *init;
+		} let;
+		struct {
+			Expr *expr;
+		} expr_stmt;
+		struct {
+			Expr *value;
+		} ret;
+		struct {
+			Expr *cond;
+			Stmt **then_body;
+			int then_count;
+			Stmt **else_body;
+			int else_count;
+		} if_stmt;
+		struct {
+			Expr *cond;
+			Stmt **body;
+			int body_count;
+		} while_stmt;
+		struct {
+			char *var_name;
+			char *var2_name; /* the value binding for pairs/ipairs, else NULL */
+			ForIterKind kind;
+			Expr *range_a, *range_b; /* FOR_RANGE */
+			Expr *iterable; /* every other kind */
+			Stmt **body;
+			int body_count;
+		} for_stmt;
+		struct {
+			Expr *subject;
+			CaseClause *cases;
+		} switch_stmt;
+		struct {
+			Stmt **body;
+			int body_count;
+			CatchClause *catches;
+			Stmt **finally_body;
+			int finally_count;
+		} try_stmt;
+		struct {
+			char *type_name;
+			Expr *value;
+		} throw_stmt;
+		struct {
+			Stmt **body;
+			int body_count;
+		} block;
+	} as;
 };
 
 /* ---- declarations ---- */
 struct Param {
-    char *type_name; /* may be NULL */
-    char *name;
-    Expr *default_value; /* `int x = 1` in a parameter list; NULL when required */
-    Param *next;
+	char *type_name; /* may be NULL */
+	char *name;
+	Expr *default_value; /* `int x = 1` in a parameter list; NULL when required */
+	Param *next;
 };
 
 struct FuncDecl {
-    char *name;
-    char *return_type; /* may be NULL */
-    Param *params;
-    bool is_static;
-    bool is_private;
-    char *op_symbol;   /* non-NULL for `operator <sym> (...)` declarations */
-    Stmt **body;
-    int body_count;
-    int line;
+	char *name;
+	char *return_type; /* may be NULL */
+	Param *params;
+	bool is_static;
+	bool is_private;
+	char *op_symbol; /* non-NULL for `operator <sym> (...)` declarations */
+	Stmt **body;
+	int body_count;
+	int line;
 };
 
 struct FieldDecl {
-    char *type_name;
-    char *name;
-    bool is_static;
-    bool is_private;
-    bool is_const;
-    Expr *init; /* may be NULL */
-    FieldDecl *next;
+	char *type_name;
+	char *name;
+	bool is_static;
+	bool is_private;
+	bool is_const;
+	Expr *init; /* may be NULL */
+	FieldDecl *next;
 };
 
 struct ClassDecl {
-    char *name;
-    char *parent_name; /* may be NULL */
-    FieldDecl *fields;
-    FuncDecl **methods;
-    int method_count;
-    int line;
-    char *unit_prefix; /* set by codegen: "" for the main file, "<module>__" otherwise */
+	char *name;
+	char *parent_name; /* may be NULL */
+	FieldDecl *fields;
+	FuncDecl **methods;
+	int method_count;
+	int line;
+	char *unit_prefix; /* set by codegen: "" for the main file, "<module>__" otherwise */
 };
 
 typedef enum {
-    DECL_FUNC, DECL_CLASS, DECL_IMPORT, DECL_STMT,
-    DECL_OPERATOR, DECL_EVENT, DECL_ON, DECL_CIMPORT
+	DECL_FUNC,
+	DECL_CLASS,
+	DECL_IMPORT,
+	DECL_STMT,
+	DECL_OPERATOR,
+	DECL_EVENT,
+	DECL_ON,
+	DECL_CIMPORT
 } DeclKind;
 
 typedef struct {
-    char *module;      /* module name imported */
-    char *alias;       /* `as` alias, may be NULL */
-    char **members;    /* `from` member list, may be NULL */
-    int member_count;
+	char *module; /* module name imported */
+	char *alias; /* `as` alias, may be NULL */
+	char **members; /* `from` member list, may be NULL */
+	int member_count;
 } ImportDecl;
 
 typedef struct {
-    char *name;        /* event name, e.g. MyEvent */
-    Param *params;     /* payload fields, e.g. (str name) */
-    int line;
+	char *name; /* event name, e.g. MyEvent */
+	Param *params; /* payload fields, e.g. (str name) */
+	int line;
 } EventDecl;
 
 typedef struct {
-    char *event_name;
-    char *var_name;    /* `as e` binding, may be NULL */
-    Stmt **body;
-    int body_count;
-    int line;
+	char *event_name;
+	char *var_name; /* `as e` binding, may be NULL */
+	Stmt **body;
+	int body_count;
+	int line;
 } OnDecl;
 
 typedef struct {
-    char *name;        /* imported C symbol */
-    char *lib;         /* shared library path/soname */
-    int line;
+	char *name; /* imported C symbol */
+	char *lib; /* shared library path/soname */
+	int line;
 } CImportDecl;
 
 struct Decl {
-    DeclKind kind;
-    union {
-        FuncDecl *func;   /* DECL_FUNC and DECL_OPERATOR */
-        ClassDecl *klass;
-        ImportDecl import;
-        Stmt *stmt;
-        EventDecl event;
-        OnDecl on;
-        CImportDecl cimport;
-    } as;
-    Decl *next;
+	DeclKind kind;
+	union {
+		FuncDecl *func; /* DECL_FUNC and DECL_OPERATOR */
+		ClassDecl *klass;
+		ImportDecl import;
+		Stmt *stmt;
+		EventDecl event;
+		OnDecl on;
+		CImportDecl cimport;
+	} as;
+	Decl *next;
 };
 
 struct Program {
-    Decl *decls;
+	Decl *decls;
 };
 
 #endif

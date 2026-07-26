@@ -20,14 +20,14 @@
 #include <setjmp.h>
 
 typedef enum {
-    OB_NULL,
-    OB_INT,
-    OB_FLOAT,
-    OB_BOOL,
-    OB_STRING,
-    OB_ARRAY,
-    OB_DICT,
-    OB_OBJECT
+	OB_NULL,
+	OB_INT,
+	OB_FLOAT,
+	OB_BOOL,
+	OB_STRING,
+	OB_ARRAY,
+	OB_DICT,
+	OB_OBJECT
 } OboeTag;
 
 typedef struct OboeValue OboeValue;
@@ -37,12 +37,12 @@ typedef struct OboeObject OboeObject;
 typedef struct OboeClassInfo OboeClassInfo;
 
 struct OboeClassInfo {
-    const char *name;
-    const OboeClassInfo *parent;
+	const char *name;
+	const OboeClassInfo *parent;
 };
 
 struct OboeObject {
-    const OboeClassInfo *cls;
+	const OboeClassInfo *cls;
 };
 
 /* `width` and `is_unsigned` describe an OB_INT's declared integer type; they sit
@@ -53,35 +53,35 @@ struct OboeObject {
    width 32 when they were stored into a `float32`, purely so the value can be
    re-rounded on later assignments; arithmetic is always done in double. */
 struct OboeValue {
-    OboeTag tag;
-    uint8_t width;
-    bool is_unsigned;
-    union {
-        int64_t i;
-        double f;
-        bool b;
-        char *s;
-        OboeArray *arr;
-        OboeDict *dict;
-        void *obj;
-    } as;
+	OboeTag tag;
+	uint8_t width;
+	bool is_unsigned;
+	union {
+		int64_t i;
+		double f;
+		bool b;
+		char *s;
+		OboeArray *arr;
+		OboeDict *dict;
+		void *obj;
+	} as;
 };
 
 struct OboeArray {
-    OboeValue *items;
-    size_t count;
-    size_t capacity;
+	OboeValue *items;
+	size_t count;
+	size_t capacity;
 };
 
 typedef struct {
-    char *key;
-    OboeValue value;
+	char *key;
+	OboeValue value;
 } OboeDictEntry;
 
 struct OboeDict {
-    OboeDictEntry *entries;
-    size_t count;
-    size_t capacity;
+	OboeDictEntry *entries;
+	size_t count;
+	size_t capacity;
 };
 
 /* constructors */
@@ -114,11 +114,13 @@ OboeValue ob_index_set(OboeValue container, OboeValue key, OboeValue value);
 
 /* io / conversion */
 void ob_print(OboeValue v);
-void ob_write(OboeValue v);  /* print without a trailing newline */
-OboeValue ob_input(void);    /* reads one line from stdin (newline stripped); null on EOF */
+void ob_write(OboeValue v); /* print without a trailing newline */
+OboeValue
+ob_input(void); /* reads one line from stdin (newline stripped); null on EOF */
 OboeValue ob_str(OboeValue v);
 char *ob_to_cstr(OboeValue v); /* borrowed pointer, valid until value freed */
-OboeValue ob_interpolate(int count, ...); /* args are OboeValue strings, concatenated */
+OboeValue ob_interpolate(int count,
+			 ...); /* args are OboeValue strings, concatenated */
 
 /* operators */
 OboeValue ob_add(OboeValue a, OboeValue b);
@@ -173,8 +175,10 @@ bool ob_is_object_of(OboeValue v, const OboeClassInfo *cls);
    symbol; ob_binop consults the class (and its ancestors) for a handler
    before falling back to the builtin behavior. */
 typedef OboeValue (*OboeOpFunc)(OboeValue, OboeValue);
-void ob_register_operator(const OboeClassInfo *cls, const char *op, OboeOpFunc fn);
-OboeValue ob_binop(const char *op, OboeValue a, OboeValue b, OboeOpFunc fallback);
+void ob_register_operator(const OboeClassInfo *cls, const char *op,
+			  OboeOpFunc fn);
+OboeValue ob_binop(const char *op, OboeValue a, OboeValue b,
+		   OboeOpFunc fallback);
 /* fallback for operators that only exist as class overloads: errors at runtime
    when neither operand's class provides a handler */
 OboeValue ob_op_missing(OboeValue a, OboeValue b);
@@ -206,10 +210,13 @@ OboeValue ob_std_math_floor(OboeValue a); /* returns an int */
 OboeValue ob_std_math_ceil(OboeValue a);
 OboeValue ob_std_math_round(OboeValue a); /* half away from zero */
 OboeValue ob_std_random_seed(OboeValue a);
-OboeValue ob_std_random_randint(OboeValue a, OboeValue b); /* inclusive bounds */
+OboeValue ob_std_random_randint(OboeValue a,
+				OboeValue b); /* inclusive bounds */
 OboeValue ob_std_random_choice(OboeValue arr);
-OboeValue ob_std_os_run(OboeValue cmd);   /* runs via the shell; returns the exit code */
-OboeValue ob_std_os_spawn(OboeValue cmd); /* starts without waiting; returns the pid */
+OboeValue
+ob_std_os_run(OboeValue cmd); /* runs via the shell; returns the exit code */
+OboeValue
+ob_std_os_spawn(OboeValue cmd); /* starts without waiting; returns the pid */
 OboeValue ob_std_os_read_file(OboeValue path);
 OboeValue ob_std_os_write_file(OboeValue path, OboeValue content);
 OboeValue ob_std_os_append_file(OboeValue path, OboeValue content);
@@ -242,7 +249,8 @@ OboeValue ob_m_len(OboeValue v);
 OboeValue ob_m_contains(OboeValue v, OboeValue needle);
 OboeValue ob_m_index_of(OboeValue v, OboeValue needle); /* -1 when absent */
 OboeValue ob_m_reverse(OboeValue v);
-OboeValue ob_m_slice(OboeValue v, OboeValue start, OboeValue end); /* half-open, clamped */
+OboeValue ob_m_slice(OboeValue v, OboeValue start,
+		     OboeValue end); /* half-open, clamped */
 OboeValue ob_m_str(OboeValue v);
 
 OboeValue ob_str_upper(OboeValue s);
@@ -251,10 +259,11 @@ OboeValue ob_str_trim(OboeValue s);
 OboeValue ob_str_split(OboeValue s, OboeValue sep);
 OboeValue ob_str_starts_with(OboeValue s, OboeValue prefix);
 OboeValue ob_str_ends_with(OboeValue s, OboeValue suffix);
-OboeValue ob_str_replace(OboeValue s, OboeValue from, OboeValue to); /* all occurrences */
+OboeValue ob_str_replace(OboeValue s, OboeValue from,
+			 OboeValue to); /* all occurrences */
 OboeValue ob_str_substr(OboeValue s, OboeValue start, OboeValue len);
 OboeValue ob_str_repeat(OboeValue s, OboeValue n);
-OboeValue ob_str_to_int(OboeValue s);   /* throws ValueError when unparsable */
+OboeValue ob_str_to_int(OboeValue s); /* throws ValueError when unparsable */
 OboeValue ob_str_to_float(OboeValue s);
 
 OboeValue ob_arr_push(OboeValue a, OboeValue v);
@@ -272,8 +281,8 @@ OboeValue ob_dict_remove(OboeValue d, OboeValue key);
    Matching is by exception type name (string), most-specific-first,
    mirroring the ordered catch clauses in source. */
 typedef struct OboeExceptionFrame {
-    jmp_buf buf;
-    struct OboeExceptionFrame *prev;
+	jmp_buf buf;
+	struct OboeExceptionFrame *prev;
 } OboeExceptionFrame;
 
 extern OboeExceptionFrame *ob_exc_stack;
