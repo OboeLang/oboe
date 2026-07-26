@@ -74,11 +74,6 @@ jobs:
   macos:
     name: build & test (macOS, informational)
     runs-on: macos-latest
-    # macOS is not a supported platform yet: the -t macos target and the
-    # dlopen-based FFI are claimed in the spec but have never been exercised.
-    # this job is a probe to find out what actually breaks, so a red result is
-    # information rather than a regression. drop this line to make it binding
-    # once the suite passes here.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
