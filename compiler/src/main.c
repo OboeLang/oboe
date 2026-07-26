@@ -20,6 +20,10 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <libgen.h>
+#ifdef __APPLE__
+#include <stdint.h>
+#include <mach-o/dyld.h>
+#endif
 
 static char *read_whole_file(const char *path)
 {
@@ -50,16 +54,34 @@ static const char *find_project_json(void)
 	return NULL;
 }
 
-/* directory containing this executable, used to find runtime/oboe_runtime.{h,c} */
+/* directory containing this executable, used to find runtime/oboe_runtime.{h,c}
+ *
+ * there is no portable way to ask for this, so it is per-kernel. the bsds want
+ * sysctl KERN_PROC_PATHNAME and are unimplemented; add them here if we ever
+ * build there natively. cross-compiling *to* a target doesn't come through
+ * here, only a natively built oboe asking where it lives. */
 static char *oboe_home(void)
 {
 	char buf[4096];
+#ifdef __APPLE__
+	/* darwin has no /proc. the path this returns is whatever was used to
+	 * exec us, so it can carry symlinks or .. and needs resolving. */
+	uint32_t size = sizeof(buf);
+	if (_NSGetExecutablePath(buf, &size) != 0) {
+		fprintf(stderr, "oboe: cannot locate oboe installation\n");
+		exit(1);
+	}
+	char resolved[4096];
+	if (realpath(buf, resolved))
+		snprintf(buf, sizeof(buf), "%s", resolved);
+#else
 	ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
 	if (n < 0) {
 		fprintf(stderr, "oboe: cannot locate oboe installation\n");
 		exit(1);
 	}
 	buf[n] = '\0';
+#endif
 	char *dir = strdup(dirname(buf));
 	return dir;
 }
