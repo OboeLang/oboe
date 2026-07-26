@@ -72,21 +72,18 @@ jobs:
           make CC="clang -Werror"
 
   macos:
-    name: build & test (macOS, informational)
+    name: build & test (macOS)
     runs-on: macos-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
       # `gcc` on a macOS runner is Apple's clang shim, so the Makefile's
-      # CC = gcc needs no override. known-suspect areas if this fails:
-      #   - CFLAGS sets _POSIX_C_SOURCE, which on Darwin *hides* non-POSIX
-      #     declarations that glibc exposes anyway (_DARWIN_C_SOURCE is the
-      #     Darwin equivalent), so expect implicit-declaration errors first
-      #   - _DEFAULT_SOURCE is glibc-only and simply does nothing here
-      #   - the FFI loads .so files; macOS produces .dylib
-      #   - import resolution prefers <module>.<target-os>.oboe, and only
-      #     _osmod.linux.oboe exists
+      # CC = gcc needs no override.
+      #
+      # this covers `oboe run` on darwin and nothing more: cross-compiling
+      # (-t macos from another host), .app bundling and the desktop metadata
+      # paths have no coverage anywhere, so a green tick here is not a claim
+      # that macOS is a supported build target.
       - name: Build from scratch and run the test suite
         working-directory: compiler
         run: |
