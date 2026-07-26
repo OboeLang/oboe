@@ -209,9 +209,14 @@ static void emit_script_path_builtins(const char *main_path)
 	if (!realpath(main_path, abs))
 		snprintf(abs, sizeof abs, "%s", main_path);
 
+	/* dirname() is allowed to return static storage that the next call
+	   overwrites, and darwin does exactly that where glibc rewrites the
+	   buffer in place. the project_root walk below calls it repeatedly, so
+	   copy the answer out before it can be clobbered. */
 	char dirbuf[4096];
 	snprintf(dirbuf, sizeof dirbuf, "%s", abs);
-	char *dir = dirname(dirbuf);
+	char dir[4096];
+	snprintf(dir, sizeof dir, "%s", dirname(dirbuf));
 
 	char root[4096];
 	snprintf(root, sizeof root, "%s", dir);
