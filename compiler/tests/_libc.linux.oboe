@@ -10,21 +10,6 @@
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
-// a module declaring an event and a custom operator, and using a cimport that
-// a *different* module (_libc) declared, since cimports are program-global
-import _libc
-
-event ModEvent = event(str msg)
-
-on ModEvent as e {
-    print("module handler: ${e.msg}")
-}
-
-operator <*> (int a, int b) {
-    return a * b + 1
-}
-
-func moduleWork(int n) {
-    ModEvent.fire("from module")
-    return abs(n) <*> 2
-}
+// the C library under its linux soname; see _libc.macos.oboe for the other half
+cimport strlen from "libc.so.6"
+cimport abs from "libc.so.6"

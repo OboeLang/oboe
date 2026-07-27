@@ -21,16 +21,40 @@ OBOE=bin/oboe
 pass=0
 fail=0
 
+# Mirrors HOST_OS in src/main.c, so a per-OS fixture is suffixed the same way an
+# OS-specific module is (foo.macos.expected alongside foo.macos.oboe).
+# Overridable so the selection itself can be exercised from one machine; note
+# that only the fixture *choice* changes, the compiler still targets this host.
+if [ -z "$HOST_OS" ]; then
+    case "$(uname -s)" in
+        Darwin) HOST_OS=macos ;;
+        Linux)  HOST_OS=linux ;;
+        CYGWIN*|MINGW*|MSYS*) HOST_OS=windows ;;
+        *)      HOST_OS="$(uname -s | tr '[:upper:]' '[:lower:]')" ;;
+    esac
+fi
+
+# Some output is legitimately platform-specific. Prefer <name>.<os>.<kind>, fall
+# back to the shared <name>.<kind>; prints nothing if neither exists.
+fixture() {
+    if [ -f "$1.$HOST_OS.$2" ]; then
+        printf '%s' "$1.$HOST_OS.$2"
+    elif [ -f "$1.$2" ]; then
+        printf '%s' "$1.$2"
+    fi
+}
+
 for src in tests/*.oboe; do
     name="${src%.oboe}"
     base="$(basename "$name")"
     # helper modules (imported by other tests) start with _ and aren't run directly
     case "$base" in _*) continue ;; esac
 
-    if [ -f "$name.expect_fail" ]; then
+    expect_fail="$(fixture "$name" expect_fail)"
+    if [ -n "$expect_fail" ]; then
         out="$($OBOE run "$src" 2>&1)"
         rc=$?
-        want="$(cat "$name.expect_fail")"
+        want="$(cat "$expect_fail")"
         if [ $rc -ne 0 ] && { [ -z "$want" ] || printf '%s' "$out" | grep -qF "$want"; }; then
             echo "PASS $base (failed as expected)"
             pass=$((pass+1))
@@ -42,8 +66,8 @@ for src in tests/*.oboe; do
         continue
     fi
 
-    expected="$name.expected"
-    if [ ! -f "$expected" ]; then
+    expected="$(fixture "$name" expected)"
+    if [ -z "$expected" ]; then
         echo "SKIP $base (no .expected file)"
         continue
     fi

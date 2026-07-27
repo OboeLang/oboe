@@ -10,9 +10,10 @@
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
-// cimport FFI: call into libc
-cimport strlen from "libc.so.6"
-cimport abs from "libc.so.6"
+// cimport FFI: call into libc, whose soname differs per OS, so the cimports
+// live in _libc.<os>.oboe. like events and operators they are global once that
+// file is part of the program, so they are called here by bare name.
+import _libc
 
 func main(array args) {
     print(strlen("hello"))

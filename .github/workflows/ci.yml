@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# © 2026 Sushii64
+# © 2026 robinpie
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 2 as
+# published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# a new push to the same branch supersedes an in-flight run
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build & test (gcc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # src/*.o and bin/oboe are committed, and git does not preserve mtimes:
+      # after checkout make may consider them up to date and skip compiling,
+      # which would silently test the committed binary instead of this commit.
+      # cleaning first forces a real build.
+      - name: Build from scratch and run the test suite
+        working-directory: compiler
+        run: |
+          make clean
+          make test
+
+  format:
+    name: clang-format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # pinned to match the version used locally; minor releases disagree on
+      # enough edge cases that an unpinned clang-format fails on CI only
+      - name: Install clang-format
+        run: pip install --disable-pip-version-check clang-format==22.1.8
+
+      - name: Check formatting
+        run: clang-format --dry-run -Werror $(git ls-files '*.c' '*.h')
+
+  warnings:
+    name: warnings-as-errors (clang)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # -Werror rides on CC rather than CFLAGS so the Makefile's flags stay the
+      # single source of truth and cannot drift out of sync with this workflow
+      - name: Build with -Werror
+        working-directory: compiler
+        run: |
+          make clean
+          make CC="clang -Werror"
+
+  macos:
+    name: build & test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `gcc` on a macOS runner is Apple's clang shim, so the Makefile's
+      # CC = gcc needs no override.
+      #
+      # this covers `oboe run` on darwin and nothing more: cross-compiling
+      # (-t macos from another host), .app bundling and the desktop metadata
+      # paths have no coverage anywhere, so a green tick here is not a claim
+      # that macOS is a supported build target.
+      - name: Build from scratch and run the test suite
+        working-directory: compiler
+        run: |
+          make clean
+          make test

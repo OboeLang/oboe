@@ -12,7 +12,10 @@
 # GNU General Public License for more details.
 
 CC = gcc
-CFLAGS = -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Wall -Wextra -Wno-unused-parameter -g -Iruntime -Isrc
+# _POSIX_C_SOURCE alone hides the BSD extensions we use (mkstemps): glibc still
+# exposes them under _DEFAULT_SOURCE, but darwin needs _DARWIN_C_SOURCE to do
+# the same. both are ignored by the libc they don't belong to.
+CFLAGS = -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -Wall -Wextra -Wno-unused-parameter -g -Iruntime -Isrc
 
 SRC = src/lexer.c src/parser.c src/codegen.c src/projectjson.c src/main.c
 OBJ = $(SRC:.c=.o)
