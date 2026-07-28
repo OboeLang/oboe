@@ -23,6 +23,11 @@ void codegen_set_source_dir(const char *dir);
 void codegen_set_target_os(const char *os);
 /* Loads the main file and every transitively imported module, then generates
    one C translation unit for the whole program. */
+/* Establishes the project's .oboe/libraries as a module search root. Called by
+   codegen_compile; exposed so a caller that resolves modules on its own can set
+   it too. */
+void codegen_set_library_root(const char *main_path);
+
 void codegen_compile(const char *main_path, FILE *out);
 
 #endif

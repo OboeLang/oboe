@@ -20,6 +20,10 @@ cd "$(dirname "$0")/.." || exit 1
 OBOE=bin/oboe
 pass=0
 fail=0
+# Some tests need a C compiler for a helper, or a network stack. They are
+# skipped rather than failed where that is genuinely absent, and the count is
+# reported so a silently-shrinking suite is visible.
+skip=0
 
 # Mirrors HOST_OS in src/main.c, so a per-OS fixture is suffixed the same way an
 # OS-specific module is (foo.macos.expected alongside foo.macos.oboe).
@@ -162,6 +166,307 @@ else
 fi
 rm -rf "$tmp"
 
+# ---- katare client ------------------------------------------------------
+#
+# Driven against tests/helpers/katare_stub.c, a scripted server compiled here.
+# The real registry lives in the reedbed repository, which this repo's CI does
+# not check out -- and the stub can be made to misbehave in ways a correct
+# server never would, which is most of what is worth testing on the client.
+
+stub_bin=""
+stub_dir="$(mktemp -d)"
+if ${CC:-gcc} -std=c11 -D_POSIX_C_SOURCE=200809L -o "$stub_dir/stub" \
+        tests/helpers/katare_stub.c 2>/dev/null; then
+    stub_bin="$stub_dir/stub"
+else
+    echo "SKIP katare_client (no C compiler for the test helper)"
+    skip=$((skip+1))
+fi
+
+# a stub that outlives the suite would hold its port and hang the next run
+stub_pid=""
+kill_stub() { [ -n "$stub_pid" ] && kill "$stub_pid" 2>/dev/null; stub_pid=""; }
+trap 'kill_stub; rm -rf "$stub_dir"' EXIT
+
+# start_stub <script-file> -> sets $stub_port
+start_stub() {
+    "$stub_bin" "$1" > "$stub_dir/out" 2>"$stub_dir/err" &
+    stub_pid=$!
+    stub_port=""
+    for _ in $(seq 1 100); do
+        stub_port="$(sed -n 's/^listening //p' "$stub_dir/out" 2>/dev/null)"
+        [ -n "$stub_port" ] && return 0
+        kill -0 "$stub_pid" 2>/dev/null || break
+        sleep 0.05
+    done
+    return 1
+}
+
+# builds a kabuk from a directory, entries sorted by byte order
+mkkabuk() { # <dir> <out> <file>...
+    d="$1"; o="$2"; shift 2
+    {
+        printf 'kabuk1\n'
+        for f in "$@"; do
+            printf '%s\n%d\n' "$f" "$(wc -c < "$d/$f")"
+            cat "$d/$f"
+        done
+        printf 'sampura\n'
+    } > "$o"
+}
+
+if [ -n "$stub_bin" ]; then
+    pkg="$(mktemp -d)"
+    mkdir -p "$pkg/src"
+    cat > "$pkg/src/project.jsonc" <<'JSON'
+{
+    "project": {
+        "name": "mylib",
+        "version": "1.0.0",
+        "entry": "main.oboe",
+        "description": "a test library"
+    }
+}
+JSON
+    printf 'func hello() { return 7 }\n' > "$pkg/src/main.oboe"
+    mkkabuk "$pkg/src" "$pkg/good.kabuk" main.oboe project.jsonc
+    good_sema="$($OBOE sema "$pkg/good.kabuk" | cut -d' ' -f1)"
+    good_len="$(wc -c < "$pkg/good.kabuk")"
+
+    # an archive that tries to escape the package directory
+    mkdir -p "$pkg/eviltree"
+    printf 'pwned\n' > "$pkg/eviltree/evil"
+    {
+        printf 'kabuk1\n'
+        printf '../evil\n%d\n' "$(wc -c < "$pkg/eviltree/evil")"
+        cat "$pkg/eviltree/evil"
+        printf 'sampura\n'
+    } > "$pkg/evil.kabuk"
+    evil_sema="$($OBOE sema "$pkg/evil.kabuk" | cut -d' ' -f1)"
+    evil_len="$(wc -c < "$pkg/evil.kabuk")"
+
+    newproj() { # -> $proj, an initialised project directory
+        proj="$(mktemp -d)"
+        ( cd "$proj" && "$OLDPWD/$OBOE" init >/dev/null 2>&1 )
+    }
+
+    # ---- a plain successful get ----
+    cat > "$stub_dir/s1" <<SCRIPT
+send dijabon katare/1 reedbed/0.1
+expect dijabon katare/1 oboe/0.1
+send si jexa cizujo kyx67108864
+expect ko cizujo mylib *
+send si kyx 79
+sendbody $stub_dir/pins
+expectpre ko ghazema mylib 1.0.0
+send si $good_sema kyx $good_len
+sendbody $pkg/good.kabuk
+read
+SCRIPT
+    printf 'mylib 1.0.0 %s\n' "$good_sema" > "$stub_dir/pins"
+    # the body length has to match what we actually send
+    sed -i "s/^send si kyx 79$/send si kyx $(wc -c < "$stub_dir/pins")/" "$stub_dir/s1"
+
+    if start_stub "$stub_dir/s1"; then
+        newproj
+        ( cd "$proj" && OBOE_REGISTRY="katare://127.0.0.1:$stub_port/" \
+            "$OLDPWD/$OBOE" get mylib >/dev/null 2>&1 )
+        if [ -f "$proj/.oboe/libraries/mylib/main.oboe" ] &&
+           grep -q '"mylib"' "$proj/project.jsonc" &&
+           grep -q "mylib 1.0.0 $good_sema" "$proj/.oboe/lock"; then
+            echo "PASS get_installs_package"
+            pass=$((pass+1))
+        else
+            echo "FAIL get_installs_package"
+            fail=$((fail+1))
+        fi
+        rm -rf "$proj"
+    else
+        echo "FAIL get_installs_package (stub did not start)"
+        fail=$((fail+1))
+    fi
+    kill_stub
+
+    # ---- a digest that does not match the bytes ----
+    cat > "$stub_dir/s2" <<SCRIPT
+send dijabon katare/1 reedbed/0.1
+expect dijabon katare/1 oboe/0.1
+send si jexa cizujo kyx67108864
+expect ko cizujo mylib *
+send si kyx $(wc -c < "$stub_dir/pins")
+sendbody $stub_dir/pins
+expectpre ko ghazema mylib 1.0.0
+send si sha256:0000000000000000000000000000000000000000000000000000000000000000 kyx $good_len
+sendbody $pkg/good.kabuk
+read
+SCRIPT
+    if start_stub "$stub_dir/s2"; then
+        newproj
+        ( cd "$proj" && OBOE_REGISTRY="katare://127.0.0.1:$stub_port/" \
+            "$OLDPWD/$OBOE" get mylib >/dev/null 2>&1 )
+        rc=$?
+        # nothing may be installed, and the manifest must be untouched
+        if [ $rc -ne 0 ] && [ ! -e "$proj/.oboe/libraries/mylib" ] &&
+           ! grep -q '"mylib"' "$proj/project.jsonc"; then
+            echo "PASS get_rejects_bad_digest"
+            pass=$((pass+1))
+        else
+            echo "FAIL get_rejects_bad_digest"
+            fail=$((fail+1))
+        fi
+        rm -rf "$proj"
+    else
+        echo "FAIL get_rejects_bad_digest (stub did not start)"
+        fail=$((fail+1))
+    fi
+    kill_stub
+
+    # ---- an archive with a path that escapes the destination ----
+    printf 'mylib 1.0.0 %s\n' "$evil_sema" > "$stub_dir/evilpins"
+    cat > "$stub_dir/s3" <<SCRIPT
+send dijabon katare/1 reedbed/0.1
+expect dijabon katare/1 oboe/0.1
+send si jexa cizujo kyx67108864
+expect ko cizujo mylib *
+send si kyx $(wc -c < "$stub_dir/evilpins")
+sendbody $stub_dir/evilpins
+expectpre ko ghazema mylib 1.0.0
+send si $evil_sema kyx $evil_len
+sendbody $pkg/evil.kabuk
+read
+SCRIPT
+    if start_stub "$stub_dir/s3"; then
+        newproj
+        canary="$proj/../evil"
+        rm -f "$canary"
+        ( cd "$proj" && OBOE_REGISTRY="katare://127.0.0.1:$stub_port/" \
+            "$OLDPWD/$OBOE" get mylib >/dev/null 2>&1 )
+        rc=$?
+        if [ $rc -ne 0 ] && [ ! -e "$canary" ] &&
+           [ ! -e "$proj/.oboe/libraries/mylib" ]; then
+            echo "PASS get_rejects_path_traversal"
+            pass=$((pass+1))
+        else
+            echo "FAIL get_rejects_path_traversal"
+            fail=$((fail+1))
+        fi
+        rm -f "$canary"
+        rm -rf "$proj"
+    else
+        echo "FAIL get_rejects_path_traversal (stub did not start)"
+        fail=$((fail+1))
+    fi
+    kill_stub
+
+    # ---- a status the protocol does not define is fatal ----
+    cat > "$stub_dir/s4" <<'SCRIPT'
+send dijabon katare/1 reedbed/0.1
+expect dijabon katare/1 oboe/0.1
+send si jexa cizujo kyx67108864
+expect ko cizujo mylib *
+send qqqq
+read
+SCRIPT
+    if start_stub "$stub_dir/s4"; then
+        newproj
+        out="$( cd "$proj" && OBOE_REGISTRY="katare://127.0.0.1:$stub_port/" \
+            "$OLDPWD/$OBOE" get mylib 2>&1 )"
+        rc=$?
+        if [ $rc -ne 0 ]; then
+            echo "PASS get_unknown_status_is_fatal"
+            pass=$((pass+1))
+        else
+            echo "FAIL get_unknown_status_is_fatal ($out)"
+            fail=$((fail+1))
+        fi
+        rm -rf "$proj"
+    else
+        echo "FAIL get_unknown_status_is_fatal (stub did not start)"
+        fail=$((fail+1))
+    fi
+    kill_stub
+
+    # ---- a greeting from something that is not a katare/1 server ----
+    cat > "$stub_dir/s5" <<'SCRIPT'
+send dijabon katare/9 reedbed/0.1
+read
+SCRIPT
+    if start_stub "$stub_dir/s5"; then
+        newproj
+        out="$( cd "$proj" && OBOE_REGISTRY="katare://127.0.0.1:$stub_port/" \
+            "$OLDPWD/$OBOE" get mylib 2>&1 )"
+        rc=$?
+        if [ $rc -ne 0 ] && printf '%s' "$out" | grep -q 'katare/1'; then
+            echo "PASS get_rejects_wrong_protocol_version"
+            pass=$((pass+1))
+        else
+            echo "FAIL get_rejects_wrong_protocol_version ($out)"
+            fail=$((fail+1))
+        fi
+        rm -rf "$proj"
+    else
+        echo "FAIL get_rejects_wrong_protocol_version (stub did not start)"
+        fail=$((fail+1))
+    fi
+    kill_stub
+
+    # ---- tidy is offline when the lockfile is already satisfied ----
+    # No stub is running at all: if tidy dials out here, it fails.
+    newproj
+    mkdir -p "$proj/.oboe/libraries/mylib"
+    cp "$pkg/src/project.jsonc" "$proj/.oboe/libraries/mylib/"
+    cp "$pkg/src/main.oboe" "$proj/.oboe/libraries/mylib/"
+    printf 'mylib 1.0.0 %s\n' "$good_sema" > "$proj/.oboe/lock"
+    ( cd "$proj" && OBOE_REGISTRY="katare://127.0.0.1:1/" \
+        "$OLDPWD/$OBOE" tidy >/dev/null 2>&1 )
+    if [ $? -eq 0 ]; then
+        echo "PASS tidy_offline_when_satisfied"
+        pass=$((pass+1))
+    else
+        echo "FAIL tidy_offline_when_satisfied"
+        fail=$((fail+1))
+    fi
+    rm -rf "$proj"
+
+    rm -rf "$pkg"
+fi
+
+# ---- vendored wire-format code ------------------------------------------
+#
+# common/ lives in the reedbed repository; these are copies. Checking them
+# against the manifest catches the usual failure -- editing a copy in place --
+# here, without needing the other repository checked out.
+
+if [ -f src/VENDOR.sha256 ]; then
+    if ( cd src && "$OLDPWD/$OBOE" sema sha256.c sha256.h izim.c izim.h \
+            record.c record.h kabuk.c kabuk.h projectjson.c projectjson.h |
+            diff -u VENDOR.sha256 - >/dev/null ); then
+        echo "PASS vendor_manifest"
+        pass=$((pass+1))
+    else
+        echo "FAIL vendor_manifest (re-vendor from reedbed common/)"
+        fail=$((fail+1))
+    fi
+else
+    echo "SKIP vendor_manifest (no src/VENDOR.sha256)"
+    skip=$((skip+1))
+fi
+
+# ---- sha256 known-answer vectors ----------------------------------------
+
+kat_ok=1
+[ "$(printf '' | $OBOE sema - | cut -d' ' -f1)" = \
+  "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ] || kat_ok=0
+[ "$(printf 'abc' | $OBOE sema - | cut -d' ' -f1)" = \
+  "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" ] || kat_ok=0
+if [ $kat_ok -eq 1 ]; then
+    echo "PASS sha256_kat"
+    pass=$((pass+1))
+else
+    echo "FAIL sha256_kat"
+    fail=$((fail+1))
+fi
+
 echo
-echo "$pass passed, $fail failed"
+echo "$pass passed, $fail failed, $skip skipped"
 [ $fail -eq 0 ]

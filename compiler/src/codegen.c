@@ -203,6 +203,27 @@ static char *escape_c_string(const char *s)
    rather than being resolved in the runtime, which has no idea where its
    program's source lived. project_root is the nearest ancestor directory of the
    script holding a project.json, falling back to the script's own directory. */
+/* Nearest ancestor of `dir` holding a project.json, or `dir` itself. */
+static void walk_to_project_root(const char *dir, char *out, size_t out_sz)
+{
+	char root[4096];
+	snprintf(root, sizeof root, "%s", dir);
+	char probe[4200]; /* sized above `root` so appending can't truncate */
+	for (;;) {
+		if (find_project_json_in(root, probe, sizeof probe))
+			break;
+		char up[4096];
+		snprintf(up, sizeof up, "%s", root);
+		char *parent = dirname(up);
+		if (strcmp(parent, root) == 0) {
+			snprintf(root, sizeof root, "%s", dir);
+			break;
+		}
+		snprintf(root, sizeof root, "%s", parent);
+	}
+	snprintf(out, out_sz, "%s", root);
+}
+
 static void emit_script_path_builtins(const char *main_path)
 {
 	char abs[4096];
@@ -219,20 +240,7 @@ static void emit_script_path_builtins(const char *main_path)
 	snprintf(dir, sizeof dir, "%s", dirname(dirbuf));
 
 	char root[4096];
-	snprintf(root, sizeof root, "%s", dir);
-	char probe[4200]; /* sized above `root` so appending the filename can't truncate */
-	for (;;) {
-		if (find_project_json_in(root, probe, sizeof probe))
-			break;
-		char up[4096];
-		snprintf(up, sizeof up, "%s", root);
-		char *parent = dirname(up);
-		if (strcmp(parent, root) == 0) {
-			snprintf(root, sizeof root, "%s", dir);
-			break;
-		}
-		snprintf(root, sizeof root, "%s", parent);
-	}
+	walk_to_project_root(dir, root, sizeof root);
 
 	char *e_file = escape_c_string(abs);
 	char *e_dir = escape_c_string(dir);
@@ -2776,8 +2784,33 @@ static char *resolve_folder_module(const char *dir, const char *module)
 	return NULL;
 }
 
-/* Resolution order for `import foo`, in the importing file's directory and then
-   in .oboe/libraries: `foo.<target-os>.oboe`, `foo.oboe`, then a module folder. */
+/* The project's own .oboe/libraries, set once from the main file. An installed
+   package lives in that directory, so its own dependencies are its siblings
+   there rather than anything under its own folder -- without this a fetched
+   package could never import another one. */
+static char g_lib_root[4096];
+
+void codegen_set_library_root(const char *main_path)
+{
+	char abs[4096];
+	if (!realpath(main_path, abs))
+		snprintf(abs, sizeof abs, "%s", main_path);
+
+	/* dirname() may return static storage the next call overwrites, so the
+	   answer is copied out before walk_to_project_root calls it again */
+	char dirbuf[4096];
+	snprintf(dirbuf, sizeof dirbuf, "%s", abs);
+	char dir[4096];
+	snprintf(dir, sizeof dir, "%s", dirname(dirbuf));
+
+	char root[3900];
+	walk_to_project_root(dir, root, sizeof root);
+	snprintf(g_lib_root, sizeof g_lib_root, "%s/.oboe/libraries", root);
+}
+
+/* Resolution order for `import foo`: the importing file's own directory, then
+   that directory's .oboe/libraries, then the project's .oboe/libraries. Within
+   each, `foo.<target-os>.oboe`, `foo.oboe`, then a module folder. */
 static char *resolve_module_path(const char *dir, const char *module)
 {
 	const char *patterns[] = { "%s/%s.oboe", "%s/.oboe/libraries/%s.oboe" };
@@ -2795,6 +2828,20 @@ static char *resolve_module_path(const char *dir, const char *module)
 		char root[4096];
 		snprintf(root, sizeof root, roots[d], dir);
 		char *folder = resolve_folder_module(root, module);
+		if (folder)
+			return folder;
+	}
+
+	if (g_lib_root[0]) {
+		const char *names[] = { suffixed, module };
+		for (int n = 0; n < 2; n++) {
+			char path[4300];
+			snprintf(path, sizeof path, "%s/%s.oboe", g_lib_root,
+				 names[n]);
+			if (file_exists(path))
+				return strdup(path);
+		}
+		char *folder = resolve_folder_module(g_lib_root, module);
 		if (folder)
 			return folder;
 	}
@@ -3247,6 +3294,10 @@ void codegen_compile(const char *main_path, FILE *out)
 		fprintf(stderr, "oboe: cannot read '%s'\n", main_path);
 		exit(1);
 	}
+	/* before any import is resolved, so a module can be found in the
+	   project's library directory no matter which unit asks for it */
+	codegen_set_library_root(main_path);
+
 	load_unit_textual(NULL, main_src, main_path,
 			  g_source_dir ? g_source_dir : ".");
 

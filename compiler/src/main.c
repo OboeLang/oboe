@@ -12,6 +12,8 @@
  * GNU General Public License for more details.
  */
 #include "codegen.h"
+#include "pkg.h"
+#include "projectedit.h"
 #include "projectjson.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -781,7 +783,8 @@ static void cmd_tidy(bool verbose)
 	mkdir(".oboe/libraries", 0755);
 	if (verbose)
 		printf("oboe: ensured .oboe/libraries exists\n");
-	printf("Cleaned build artifacts. No package repository is configured yet, so no dependencies were fetched.\n");
+	if (pkg_tidy(verbose) != 0)
+		exit(1);
 }
 
 /* rm -rf, for a package directory under .oboe/libraries */
@@ -793,87 +796,8 @@ static void remove_tree(const char *path)
 		fprintf(stderr, "oboe: could not remove '%s'\n", path);
 }
 
-/* Rewrites project.json with `pkg`'s dependency line dropped, leaving every
-   other byte alone — a line-oriented edit rather than a reserialize, since the
-   file is hand-written and keeping its formatting and comments matters. A
-   trailing comma left dangling on the previous entry is cleaned up. */
-static bool remove_dependency_line(const char *pkg)
-{
-	const char *path = find_project_json();
-	char *json = path ? read_whole_file(path) : NULL;
-	if (!json)
-		return false;
-	char needle[256];
-	snprintf(needle, sizeof needle, "\"%s\"", pkg);
-
-	char *out = malloc(strlen(json) + 1);
-	size_t n = 0;
-	bool removed = false;
-	for (char *line = json; *line;) {
-		char *eol = strchr(line, '\n');
-		size_t len = eol ? (size_t)(eol - line) + 1 : strlen(line);
-		char *hit = strstr(line, needle);
-		bool is_dep_line = hit && hit < line + len &&
-				   strchr(line, ':') > hit;
-		if (is_dep_line && !removed) {
-			removed = true;
-		} else {
-			memcpy(out + n, line, len);
-			n += len;
-		}
-		line += len;
-	}
-	out[n] = '\0';
-
-	/* Dropping the last entry of an object leaves the previous one ending in a
-       comma before the closing brace; strip any such dangling comma. Commas
-       inside strings are skipped so a value like "a,b" is never touched. */
-	if (removed) {
-		bool in_string = false;
-		for (char *p = out; *p; p++) {
-			if (in_string) {
-				if (*p == '\\' && p[1])
-					p++;
-				else if (*p == '"')
-					in_string = false;
-				continue;
-			}
-			if (*p == '"') {
-				in_string = true;
-				continue;
-			}
-			if (*p != ',')
-				continue;
-			char *q = p + 1;
-			while (*q == ' ' || *q == '\t' || *q == '\n' ||
-			       *q == '\r')
-				q++;
-			if (*q == '}' || *q == ']') {
-				memmove(p, p + 1, strlen(p));
-				p--;
-			}
-		}
-	}
-
-	if (removed) {
-		FILE *f = fopen(path, "w");
-		if (!f) {
-			fprintf(stderr, "oboe: cannot write %s\n", path);
-			free(json);
-			free(out);
-			return false;
-		}
-		fputs(out, f);
-		fclose(f);
-	}
-	free(json);
-	free(out);
-	return removed;
-}
-
 /* Undoes `oboe get`: drops the package's files from .oboe/libraries and its
-   entry from project.json. Works on hand-placed libraries too, which is all
-   there is until a package registry exists. */
+   entry from project.json. Works on hand-placed libraries too. */
 static void cmd_remove(const char *name)
 {
 	if (!name) {
@@ -881,7 +805,9 @@ static void cmd_remove(const char *name)
 		exit(1);
 	}
 	struct stat st;
-	if (!find_project_json()) {
+	const char *pf = find_project_json();
+
+	if (!pf) {
 		fprintf(stderr,
 			"oboe: no project.jsonc here; 'remove' only works inside a project\n");
 		exit(1);
@@ -889,6 +815,7 @@ static void cmd_remove(const char *name)
 
 	bool any = false;
 	char path[4096];
+
 	snprintf(path, sizeof path, ".oboe/libraries/%s.oboe", name);
 	if (remove(path) == 0) {
 		printf("Removed %s\n", path);
@@ -909,7 +836,7 @@ static void cmd_remove(const char *name)
 		any = true;
 	}
 
-	if (remove_dependency_line(name)) {
+	if (remove_dependency_line(pf, name)) {
 		printf("Removed \"%s\" from project.jsonc dependencies.\n",
 		       name);
 		any = true;
@@ -918,19 +845,11 @@ static void cmd_remove(const char *name)
 		printf("oboe: nothing to remove for '%s'.\n", name);
 }
 
-static void cmd_get_or_install(const char *what, const char *name)
-{
-	fprintf(stderr,
-		"oboe: '%s %s' is not yet implemented — there is no package registry to fetch from yet.\n",
-		what, name ? name : "");
-	exit(1);
-}
-
 int main(int argc, char **argv)
 {
 	if (argc < 2) {
 		fprintf(stderr,
-			"usage: oboe <init|run|build|tidy|get|install|remove> [args]\n");
+			"usage: oboe <init|run|build|tidy|get|install|remove|publish|sema> [args]\n");
 		return 1;
 	}
 	const char *cmd = argv[1];
@@ -1001,13 +920,15 @@ int main(int argc, char **argv)
 		cmd_remove(argc >= 3 ? argv[2] : NULL);
 		return 0;
 	}
+	if (strcmp(cmd, "sema") == 0)
+		return cmd_sema(argc - 2, argv + 2);
+	if (strcmp(cmd, "publish") == 0)
+		return cmd_publish(argc - 2, argv + 2);
 	if (strcmp(cmd, "get") == 0) {
-		cmd_get_or_install("get", argc >= 3 ? argv[2] : NULL);
-		return 0;
+		return cmd_get(argc - 2, argv + 2);
 	}
 	if (strcmp(cmd, "install") == 0) {
-		cmd_get_or_install("install", argc >= 3 ? argv[2] : NULL);
-		return 0;
+		return cmd_install(argc - 2, argv + 2);
 	}
 
 	fprintf(stderr, "oboe: unknown command '%s'\n", cmd);

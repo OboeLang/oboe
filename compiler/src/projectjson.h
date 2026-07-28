@@ -10,9 +10,11 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
  * GNU General Public License for more details.
+ *
+ * canonical copy: reedbed common/projectjson.h -- edit there, then re-vendor
  */
-#ifndef OBOE_PROJECTJSON_H
-#define OBOE_PROJECTJSON_H
+#ifndef KATARE_PROJECTJSON_H
+#define KATARE_PROJECTJSON_H
 
 #include <stdbool.h>
 
@@ -34,7 +36,7 @@ char *json_get_string(const char *obj, const char *field);
 bool json_get_bool(const char *obj, const char *field);
 
 /* Body of the object at a dotted path, e.g. "build.meta" or
-   "build.targets.windows" — malloc'd, brace-delimited contents excluded, or
+   "build.targets.windows" -- malloc'd, brace-delimited contents excluded, or
    NULL when any path component is missing. Lookups inside the returned string
    use the same helpers, which is how nested settings are read. */
 char *json_extract_object(const char *json, const char *path);
