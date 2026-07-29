@@ -9,13 +9,22 @@ Many things are still left unresolved; this is incomplete.
 oboe init # Initializes a project structure in the current directory.
     oboe init <directory> # Initializes a project in a new or existing empty directory.
 
-oboe get <package name> # Installs a library package to the current project, similar to PyPI or NPM.
-oboe install <package name> # Installs a program made in Oboe on the repository, like CLI tools.
-oboe remove <package name> # Un-`get`s a package: deletes its files from .oboe/libraries and
-                           # drops it from project.jsonc's dependencies.
-oboe tidy # Cleans up build/temp files and installs needed packages.
+oboe get <package name> # Installs a library package into the current project.
+    oboe get <name>@<constraint> # e.g. oboe get http@^1.2.0. Defaults to the latest release.
+oboe install <package name> # Installs a program made in Oboe, like CLI tools. Builds it and puts the binary in $OBOE_HOME/bin (default ~/.oboe/bin). Does not need to be run inside a project.
+oboe remove <package name> # Un-`get`s a package: deletes its files from .oboe/libraries and drops it from project.jsonc's dependencies.
+oboe tidy # Installs whatever project.jsonc declares and .oboe/lock does not already satisfy. Does nothing, and contacts nothing, when everything is present.
           # Should not do anything if not in a project directory.
     -v --verbose # Self-explanatory.
+oboe publish # Packs the current project into a kabuk archive and uploads it.
+    --dry-run # Print the file list, size and digest without uploading.
+oboe sema <file>... # Prints each file's sha256 in the wire form. `-` reads stdin.
+
+# Packages come from a katare registry (see the reedbed repository). The registry is chosen by --registry, else $OBOE_REGISTRY, else "registry" in project.jsonc, else a compiled-in default. Publishing needs a token in $OBOE_TOKEN or in $XDG_CONFIG_HOME/oboe/credentials (mode 0600), one `katare://host:port <token>` per line.
+#
+# A library is `"kind": "vivlijotiki"` and a tool is `"kind": "pawi"`; `get` and `install` each refuse the other kind rather than installing it somewhere it will never work.
+#
+# Resolved versions are pinned in .oboe/lock, which is meant to be committed. `oboe init` gitignores the rest of .oboe/ but not that file.
 
 # Running and Building
 oboe run helloworld.oboe # Runs a singular Oboe file as-is. Only useful for certain cases, really.

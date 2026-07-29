@@ -258,14 +258,28 @@ send si jexa cizujo kyx67108864
 expect ko cizujo mylib *
 send si kyx 79
 sendbody $stub_dir/pins
+expect ko besal mylib 1.0.0
+send si kyx RECLEN
+sendbody STUBDIR/rec
 expectpre ko ghazema mylib 1.0.0
 send si $good_sema kyx $good_len
 sendbody $pkg/good.kabuk
 read
 SCRIPT
     printf 'mylib 1.0.0 %s\n' "$good_sema" > "$stub_dir/pins"
-    # the body length has to match what we actually send
-    sed -i "s/^send si kyx 79$/send si kyx $(wc -c < "$stub_dir/pins")/" "$stub_dir/s1"
+    # get asks what kind of package this is before fetching it
+    {
+        printf 'izim: mylib\nwaktanimra: 1.0.0\nwarna: vivlijotiki\n'
+        printf 'ozhon: %s\nsema: %s\n' "$good_len" "$good_sema"
+        printf 'wakta: 2026-07-14T09:21:00Z\n'
+    } > "$stub_dir/rec"
+    # body lengths have to match what is actually sent
+    fixup() {
+        sed -e "s|^send si kyx 79$|send si kyx $(wc -c < "$stub_dir/pins")|" \
+            -e "s|RECLEN|$(wc -c < "$stub_dir/rec")|" \
+            -e "s|STUBDIR|$stub_dir|" "$1" > "$1.fixed" && mv "$1.fixed" "$1"
+    }
+    fixup "$stub_dir/s1"
 
     if start_stub "$stub_dir/s1"; then
         newproj
@@ -295,11 +309,15 @@ send si jexa cizujo kyx67108864
 expect ko cizujo mylib *
 send si kyx $(wc -c < "$stub_dir/pins")
 sendbody $stub_dir/pins
+expect ko besal mylib 1.0.0
+send si kyx RECLEN
+sendbody STUBDIR/rec
 expectpre ko ghazema mylib 1.0.0
 send si sha256:0000000000000000000000000000000000000000000000000000000000000000 kyx $good_len
 sendbody $pkg/good.kabuk
 read
 SCRIPT
+    fixup "$stub_dir/s2"
     if start_stub "$stub_dir/s2"; then
         newproj
         ( cd "$proj" && OBOE_REGISTRY="katare://127.0.0.1:$stub_port/" \
@@ -330,11 +348,15 @@ send si jexa cizujo kyx67108864
 expect ko cizujo mylib *
 send si kyx $(wc -c < "$stub_dir/evilpins")
 sendbody $stub_dir/evilpins
+expect ko besal mylib 1.0.0
+send si kyx RECLEN
+sendbody STUBDIR/rec
 expectpre ko ghazema mylib 1.0.0
 send si $evil_sema kyx $evil_len
 sendbody $pkg/evil.kabuk
 read
 SCRIPT
+    fixup "$stub_dir/s3"
     if start_stub "$stub_dir/s3"; then
         newproj
         canary="$proj/../evil"
@@ -428,8 +450,177 @@ SCRIPT
     fi
     rm -rf "$proj"
 
+
+    # ---- the kango exchange ----
+    cat > "$stub_dir/s6" <<'SCRIPT'
+send dijabon katare/1 reedbed/0.1
+expect dijabon katare/1 oboe/0.1
+send si jexa cizujo kalit kango kaldy kyx67108864
+expect kalit testtoken0000000000
+send si robin
+expectpre kango shapes 1.0.0 sha256:
+send si
+read
+SCRIPT
+    if start_stub "$stub_dir/s6"; then
+        pubdir="$(mktemp -d)"
+        cat > "$pubdir/project.jsonc" <<'JSON'
+{
+    "project": {
+        "name": "shapes",
+        "version": "1.0.0",
+        "entry": "main.oboe",
+        "description": "shapes"
+    }
+}
+JSON
+        printf 'func area(int w, int h) { return w * h }\n' > "$pubdir/main.oboe"
+        ( cd "$pubdir" && OBOE_REGISTRY="katare://127.0.0.1:$stub_port/" \
+            OBOE_TOKEN=testtoken0000000000 \
+            "$OLDPWD/$OBOE" publish >/dev/null 2>&1 )
+        rc=$?
+        wait_rc=0
+        wait "$stub_pid" 2>/dev/null || wait_rc=$?
+        stub_pid=""
+        # the stub asserts the exact kalit and the shape of the kango line, so
+        # its own exit status is half of this assertion
+        if [ $rc -eq 0 ] && [ $wait_rc -eq 0 ]; then
+            echo "PASS publish_sends_kango"
+            pass=$((pass+1))
+        else
+            echo "FAIL publish_sends_kango (oboe=$rc stub=$wait_rc)"
+            fail=$((fail+1))
+        fi
+        rm -rf "$pubdir"
+    else
+        echo "FAIL publish_sends_kango (stub did not start)"
+        fail=$((fail+1))
+    fi
+    kill_stub
+
     rm -rf "$pkg"
 fi
+
+# ---- publish ------------------------------------------------------------
+#
+# Packing is offline and deterministic, so most of this needs no server.
+
+newpub() { # -> $pub, a publishable project
+    pub="$(mktemp -d)"
+    cat > "$pub/project.jsonc" <<'JSON'
+{
+    "project": {
+        "name": "shapes",
+        "version": "1.0.0",
+        "entry": "main.oboe",
+        "description": "shapes"
+    }
+}
+JSON
+    printf 'func area(int w, int h) { return w * h }\n' > "$pub/main.oboe"
+}
+
+newpub
+a="$( cd "$pub" && "$OLDPWD/$OBOE" publish --dry-run 2>/dev/null | tail -1 )"
+b="$( cd "$pub" && "$OLDPWD/$OBOE" publish --dry-run 2>/dev/null | tail -1 )"
+if [ -n "$a" ] && [ "$a" = "$b" ]; then
+    echo "PASS publish_dry_run_is_deterministic"
+    pass=$((pass+1))
+else
+    echo "FAIL publish_dry_run_is_deterministic"
+    fail=$((fail+1))
+fi
+
+# Build output and editor droppings must not change the digest, or a rebuild
+# from a clean checkout would not reproduce what was published.
+mkdir -p "$pub/dist" "$pub/.git"
+echo junk > "$pub/dist/leftover"
+echo x > "$pub/.git/config"
+touch "$pub/main.o" "$pub/.DS_Store"
+c="$( cd "$pub" && "$OLDPWD/$OBOE" publish --dry-run 2>/dev/null | tail -1 )"
+if [ "$a" = "$c" ]; then
+    echo "PASS publish_excludes_build_artifacts"
+    pass=$((pass+1))
+else
+    echo "FAIL publish_excludes_build_artifacts"
+    fail=$((fail+1))
+fi
+
+# .oboeignore is the configurable half of that
+printf 'notes.md\n' > "$pub/.oboeignore"
+printf 'notes\n' > "$pub/notes.md"
+d="$( cd "$pub" && "$OLDPWD/$OBOE" publish --dry-run 2>/dev/null )"
+if ! printf '%s' "$d" | grep -q 'notes[.]md' &&
+   printf '%s' "$d" | grep -q 'oboeignore'; then
+    echo "PASS publish_honours_oboeignore"
+    pass=$((pass+1))
+else
+    echo "FAIL publish_honours_oboeignore"
+    fail=$((fail+1))
+fi
+
+# `dist` is build output at the top level, but a package may have a src/dist/ of
+# its own. Excluding it at any depth would publish an archive that is valid,
+# reproducible and missing source -- the worst shape a bug can take here.
+mkdir -p "$pub/src/dist"
+printf 'func draw() { return 1 }\n' > "$pub/src/dist/renderer.oboe"
+e="$( cd "$pub" && "$OLDPWD/$OBOE" publish --dry-run 2>/dev/null )"
+if printf '%s' "$e" | grep -q 'src/dist/renderer[.]oboe'; then
+    echo "PASS publish_keeps_nested_dist"
+    pass=$((pass+1))
+else
+    echo "FAIL publish_keeps_nested_dist"
+    fail=$((fail+1))
+fi
+
+# ... while the top-level one is still excluded
+if ! printf '%s' "$e" | grep -q 'dist/leftover'; then
+    echo "PASS publish_excludes_toplevel_dist"
+    pass=$((pass+1))
+else
+    echo "FAIL publish_excludes_toplevel_dist"
+    fail=$((fail+1))
+fi
+
+# A trailing slash means "directories only", as in .gitignore. Without support
+# for it the idiom matches nothing and appears to work, because .oboeignore
+# itself joins the archive and the digest changes anyway.
+printf 'src/dist/\n' > "$pub/.oboeignore"
+f="$( cd "$pub" && "$OLDPWD/$OBOE" publish --dry-run 2>/dev/null )"
+if ! printf '%s' "$f" | grep -q 'renderer[.]oboe'; then
+    echo "PASS publish_oboeignore_directory_pattern"
+    pass=$((pass+1))
+else
+    echo "FAIL publish_oboeignore_directory_pattern"
+    fail=$((fail+1))
+fi
+rm -rf "$pub"
+
+# A kabuk cannot express a symlink, so publishing one is refused rather than
+# quietly followed.
+newpub
+ln -s main.oboe "$pub/alias.oboe"
+if ! ( cd "$pub" && "$OLDPWD/$OBOE" publish --dry-run >/dev/null 2>&1 ); then
+    echo "PASS publish_refuses_symlink"
+    pass=$((pass+1))
+else
+    echo "FAIL publish_refuses_symlink"
+    fail=$((fail+1))
+fi
+rm -rf "$pub"
+
+# A package name has to be an Oboe identifier, because `import foo` uses it.
+newpub
+sed 's/"name": "shapes"/"name": "Shapes-1"/' "$pub/project.jsonc" > "$pub/p2" &&
+    mv "$pub/p2" "$pub/project.jsonc"
+if ! ( cd "$pub" && "$OLDPWD/$OBOE" publish --dry-run >/dev/null 2>&1 ); then
+    echo "PASS publish_rejects_bad_name"
+    pass=$((pass+1))
+else
+    echo "FAIL publish_rejects_bad_name"
+    fail=$((fail+1))
+fi
+rm -rf "$pub"
 
 # ---- vendored wire-format code ------------------------------------------
 #

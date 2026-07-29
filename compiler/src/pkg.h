@@ -19,6 +19,11 @@
 /* The package-manager commands: oboe get, install, publish and the fetching
    half of oboe tidy. Each returns a process exit status. */
 
+/* Directory holding the running oboe binary. Implemented in main.c, which
+   already needs it to find the bundled runtime; declared here so the installer
+   can re-invoke the compiler rather than duplicating the platform dance. */
+char *oboe_home(void);
+
 int cmd_get(int argc, char **argv);
 int cmd_install(int argc, char **argv);
 int cmd_publish(int argc, char **argv);

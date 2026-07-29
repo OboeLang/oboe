@@ -62,7 +62,7 @@ static const char *find_project_json(void)
  * sysctl KERN_PROC_PATHNAME and are unimplemented; add them here if we ever
  * build there natively. cross-compiling *to* a target doesn't come through
  * here, only a natively built oboe asking where it lives. */
-static char *oboe_home(void)
+char *oboe_home(void)
 {
 	char buf[4096];
 #ifdef __APPLE__
@@ -222,7 +222,11 @@ static void cmd_init(const char *dir)
 
 	if (stat(".gitignore", &st) != 0) {
 		FILE *gi = fopen(".gitignore", "w");
-		fprintf(gi, "dist/\n.oboe/\n");
+		/* .oboe/ holds fetched libraries and scratch, none of which
+		   belongs in a repository -- except the lockfile, which is the
+		   record of exactly which versions this project resolved to and
+		   is worth nothing if it is not shared. */
+		fprintf(gi, "dist/\n.oboe/*\n!.oboe/lock\n");
 		fclose(gi);
 	}
 

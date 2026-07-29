@@ -83,8 +83,16 @@ char *kat_read_body(struct kat_conn *c, size_t *len, char **err);
 bool kat_read_body_verified(struct kat_conn *c, int fd, const char *want_sema,
 			    char **err);
 
-/* Sends a request line whose body follows immediately. */
+/* Sends a request line without waiting for a reply. A verb whose body follows
+   immediately must use this: kat_request would block reading a status the
+   server cannot send until it has the body, and both ends would wait. */
+bool kat_send_line(struct kat_conn *c, const char *fmt, ...);
+
+/* Sends body octets. */
 bool kat_send_body(struct kat_conn *c, const void *p, size_t n, char **err);
+
+/* Reads a status line on its own, for the split send above. */
+enum kat_status kat_read_status(struct kat_conn *c);
 
 const char *kat_status_word(enum kat_status s);
 

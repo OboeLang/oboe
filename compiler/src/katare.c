@@ -477,6 +477,41 @@ unsigned long long kat_body_cap(const struct kat_conn *c)
 
 /* ---- request/response ---------------------------------------------------- */
 
+bool kat_send_line(struct kat_conn *c, const char *fmt, ...)
+{
+	va_list ap;
+
+	c->nwords = 0;
+	c->body = false;
+	c->body_len = 0;
+
+	va_start(ap, fmt);
+	bool ok = write_line(c, fmt, ap);
+	va_end(ap);
+	return ok;
+}
+
+enum kat_status kat_read_status(struct kat_conn *c)
+{
+	c->nwords = 0;
+	c->body = false;
+	c->body_len = 0;
+
+	if (!read_line(c, c->line, sizeof c->line))
+		return KAT_IOERR;
+
+	c->nwords = tokenize(c->line, c->word, KAT_WORDS_MAX);
+	if (c->nwords <= 0)
+		return KAT_IOERR;
+
+	if (c->nwords >= 2 && strcmp(c->word[c->nwords - 2], "kyx") == 0) {
+		if (!parse_count(c->word[c->nwords - 1], &c->body_len))
+			return KAT_IOERR;
+		c->body = true;
+	}
+	return classify(c->word[0]);
+}
+
 enum kat_status kat_request(struct kat_conn *c, const char *fmt, ...)
 {
 	va_list ap;
