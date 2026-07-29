@@ -15,7 +15,7 @@
 
     // Registry for get/install/publish. A --registry flag and then
     // OBOE_REGISTRY both take precedence over this.
-    "registry": "katare://reedbed.oboelang.org/",
+    "registry": "katare://sushipi.dreamstation.systems/",
     "build": { // Optional, everything in here is also optional. See SPEC.md for details.
         "output": "bin/main",
         "target": "linux",

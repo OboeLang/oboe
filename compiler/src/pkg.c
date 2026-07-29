@@ -33,7 +33,7 @@
 #include <unistd.h>
 
 #ifndef OBOE_DEFAULT_REGISTRY
-#define OBOE_DEFAULT_REGISTRY "katare://reedbed.oboelang.org/"
+#define OBOE_DEFAULT_REGISTRY "katare://sushipi.dreamstation.systems/"
 #endif
 
 #define PKG_MAX 256
