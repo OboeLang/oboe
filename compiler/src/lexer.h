@@ -35,6 +35,8 @@ typedef enum {
 	T_WHILE,
 	T_FOR,
 	T_IN,
+	T_BREAK,
+	T_CONTINUE,
 	T_SWITCH,
 	T_CASE,
 	T_TRY,

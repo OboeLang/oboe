@@ -1,0 +1,12 @@
+ord: 65 97 48 126
+chr: A z true
+utf8: 195 2
+roundtrip: Q
+classify: lower,upper,digit,other
+err-line
+out-line
+
+empty: ord() got an empty string
+range: chr() needs a byte value in 0..255
+type: ord() expects a string, got another type
+exiting

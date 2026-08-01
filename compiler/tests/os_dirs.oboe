@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+// os.is_dir / os.mkdir / os.listdir. Works inside a directory it creates under
+// the script's own directory, so the test leaves nothing behind.
+import os
+
+func main(array args) {
+    var root = "${os.script_dir()}/.os_dirs_tmp"
+
+    // mkdir is recursive, and an existing directory is still success
+    print("made:", os.mkdir("${root}/a/b"))
+    print("again:", os.mkdir("${root}/a/b"))
+    print("is_dir:", os.is_dir(root), os.is_dir("${root}/a/b"))
+
+    // is_dir is what distinguishes a folder from a file; exists cannot
+    os.write_file("${root}/zeta.oboe", "// z\n")
+    os.write_file("${root}/alpha.oboe", "// a\n")
+    print("file exists:", os.exists("${root}/zeta.oboe"))
+    print("file is_dir:", os.is_dir("${root}/zeta.oboe"))
+    print("missing is_dir:", os.is_dir("${root}/nope"))
+
+    // sorted by byte order, so a module search over a directory is reproducible
+    print("listing:", os.listdir(root).join(","))
+    print("nested:", os.listdir("${root}/a").join(","))
+    print("empty:", os.listdir("${root}/a/b").len())
+
+    try {
+        os.listdir("${root}/nope")
+    } catch (os.FileNotFoundError e) {
+        print("caught missing dir")
+    }
+    // a file is not a directory to walk
+    try {
+        os.listdir("${root}/zeta.oboe")
+    } catch (os.FileNotFoundError e) {
+        print("caught file-as-dir")
+    }
+
+    os.remove("${root}/zeta.oboe")
+    os.remove("${root}/alpha.oboe")
+    os.remove("${root}/a/b")
+    os.remove("${root}/a")
+    os.remove(root)
+    print("cleaned:", os.exists(root))
+}

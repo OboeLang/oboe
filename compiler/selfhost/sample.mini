@@ -1,0 +1,53 @@
+// a mini-Oboe program, exercising the whole subset the spike supports
+
+func fib(n) {
+    if (n < 2) { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+func gcd(a, b) {
+    while (b != 0) {
+        var t = b
+        b = a % b
+        a = t
+    }
+    return a
+}
+
+func classify(n) {
+    if (n % 15 == 0) { return 15 }
+    else if (n % 3 == 0) { return 3 }
+    else if (n % 5 == 0) { return 5 }
+    return 0
+}
+
+func main() {
+    print("fib:", fib(10), fib(20))
+    print("gcd:", gcd(1071, 462))
+
+    var i = 0
+    var evens = 0
+    while (i < 20) {
+        i = i + 1
+        if (i % 2 != 0) { continue }
+        if (i > 12) { break }
+        evens = evens + i
+    }
+    print("evens up to 12:", evens)
+
+    var n = 1
+    var buzz = 0
+    while (n <= 30) {
+        var k = classify(n)
+        if (k == 15) { buzz = buzz + 100 }
+        else if (k == 3) { buzz = buzz + 10 }
+        else if (k == 5) { buzz = buzz + 1 }
+        n = n + 1
+    }
+    print("fizzbuzz score:", buzz)
+
+    print("precedence:", 2 + 3 * 4, (2 + 3) * 4, -7 / 2, 7 % 3)
+    print("logic:", 1 < 2 && 3 >= 3, !(1 == 2), 0 || 5 > 4)
+    print("escapes:\ta\"quoted\"\tend")
+    return 0
+}

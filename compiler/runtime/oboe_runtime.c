@@ -20,13 +20,18 @@
 #include <ctype.h>
 #include <math.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #ifdef _WIN32
 #include <windows.h>
 #include <process.h>
+#include <direct.h>
+/* the CRT's mkdir takes no mode; POSIX's does */
+#define ob_mkdir_one(p) _mkdir(p)
 #else
 #include <unistd.h>
 #include <sys/wait.h>
 #include <dlfcn.h>
+#define ob_mkdir_one(p) mkdir(p, 0755)
 #endif
 
 OboeExceptionFrame *ob_exc_stack = NULL;
@@ -178,6 +183,8 @@ OboeValue ob_dict_new(void)
 	r.as.dict->entries = NULL;
 	r.as.dict->count = 0;
 	r.as.dict->capacity = 0;
+	r.as.dict->index = NULL;
+	r.as.dict->index_cap = 0;
 	return r;
 }
 
@@ -230,14 +237,71 @@ int64_t ob_array_len(OboeValue arr)
 	return (int64_t)arr.as.arr->count;
 }
 
+/* Below this many entries a scan of the dense array beats hashing it: no hash to
+   compute, and the whole thing is a cache line or two. Most dicts in practice --
+   an object's worth of named fields -- never get past it. */
+#define OB_DICT_INDEX_MIN 8
+
+static size_t ob_dict_hash(const char *key)
+{
+	/* FNV-1a */
+	size_t h = 1469598103934665603ULL;
+	for (const unsigned char *p = (const unsigned char *)key; *p; p++) {
+		h ^= *p;
+		h *= 1099511628211ULL;
+	}
+	return h;
+}
+
+/* slot for `key` in the open-addressed index: either the one holding it, or the
+   empty one where it belongs. Only valid while index_cap > 0. */
+static size_t ob_dict_slot(const OboeDict *dict, const char *key)
+{
+	size_t mask = dict->index_cap - 1;
+	size_t i = ob_dict_hash(key) & mask;
+	while (dict->index[i]) {
+		if (strcmp(dict->entries[dict->index[i] - 1].key, key) == 0)
+			break;
+		i = (i + 1) & mask;
+	}
+	return i;
+}
+
+/* (re)builds the index from `entries`. Also the recovery path after a removal
+   shifts entries down and invalidates every stored position. */
+static void ob_dict_reindex(OboeDict *dict, size_t cap)
+{
+	free(dict->index);
+	dict->index_cap = cap;
+	dict->index = calloc(cap, sizeof(uint32_t));
+	if (!dict->index)
+		ob_oom();
+	for (size_t i = 0; i < dict->count; i++)
+		dict->index[ob_dict_slot(dict, dict->entries[i].key)] =
+			(uint32_t)(i + 1);
+}
+
+/* index of `key` in `entries`, or -1. Scans while the dict is small, since the
+   index only exists past OB_DICT_INDEX_MIN. */
+static ptrdiff_t ob_dict_find(const OboeDict *dict, const char *key)
+{
+	if (!dict->index) {
+		for (size_t i = 0; i < dict->count; i++)
+			if (strcmp(dict->entries[i].key, key) == 0)
+				return (ptrdiff_t)i;
+		return -1;
+	}
+	uint32_t slot = dict->index[ob_dict_slot(dict, key)];
+	return slot ? (ptrdiff_t)(slot - 1) : -1;
+}
+
 void ob_dict_set(OboeValue d, const char *key, OboeValue v)
 {
 	OboeDict *dict = d.as.dict;
-	for (size_t i = 0; i < dict->count; i++) {
-		if (strcmp(dict->entries[i].key, key) == 0) {
-			dict->entries[i].value = v;
-			return;
-		}
+	ptrdiff_t at = ob_dict_find(dict, key);
+	if (at >= 0) {
+		dict->entries[at].value = v;
+		return;
 	}
 	if (dict->count == dict->capacity) {
 		dict->capacity = dict->capacity ? dict->capacity * 2 : 4;
@@ -247,28 +311,33 @@ void ob_dict_set(OboeValue d, const char *key, OboeValue v)
 			ob_oom();
 	}
 	dict->entries[dict->count].key = strdup(key);
+	if (!dict->entries[dict->count].key)
+		ob_oom();
 	dict->entries[dict->count].value = v;
 	dict->count++;
+
+	/* grow at a 0.75 load factor, and build the index the first time the
+	   dict is big enough to want one */
+	if (dict->count * 4 >= dict->index_cap * 3) {
+		if (dict->count >= OB_DICT_INDEX_MIN)
+			ob_dict_reindex(dict, dict->index_cap ?
+						      dict->index_cap * 2 :
+						      OB_DICT_INDEX_MIN * 2);
+	} else {
+		dict->index[ob_dict_slot(dict, key)] = (uint32_t)dict->count;
+	}
 }
 
 OboeValue ob_dict_get(OboeValue d, const char *key)
 {
 	OboeDict *dict = d.as.dict;
-	for (size_t i = 0; i < dict->count; i++) {
-		if (strcmp(dict->entries[i].key, key) == 0)
-			return dict->entries[i].value;
-	}
-	return ob_null();
+	ptrdiff_t at = ob_dict_find(dict, key);
+	return at >= 0 ? dict->entries[at].value : ob_null();
 }
 
 bool ob_dict_has(OboeValue d, const char *key)
 {
-	OboeDict *dict = d.as.dict;
-	for (size_t i = 0; i < dict->count; i++) {
-		if (strcmp(dict->entries[i].key, key) == 0)
-			return true;
-	}
-	return false;
+	return ob_dict_find(d.as.dict, key) >= 0;
 }
 
 OboeValue ob_index_get(OboeValue container, OboeValue key)
@@ -410,6 +479,55 @@ void ob_write(OboeValue v)
 	printf("%s", s);
 	fflush(stdout);
 	free(s);
+}
+
+/* stderr counterparts. stdout is block-buffered when it isn't a terminal, so a
+   program writing to both has to flush it here or its diagnostics land out of
+   order relative to its output. */
+void ob_eprint(OboeValue v)
+{
+	char *s = ob_to_cstr(v);
+	fflush(stdout);
+	fprintf(stderr, "%s\n", s);
+	free(s);
+}
+
+void ob_ewrite(OboeValue v)
+{
+	char *s = ob_to_cstr(v);
+	fflush(stdout);
+	fputs(s, stderr);
+	fflush(stderr);
+	free(s);
+}
+
+/* ord/chr are byte-oriented, like the rest of the string handling: ord() takes
+   the first byte of a multi-byte character rather than decoding it. */
+OboeValue ob_ord(OboeValue v)
+{
+	if (v.tag != OB_STRING)
+		ob_throw("TypeError",
+			 ob_string("ord() expects a string, got another type"));
+	if (v.as.s[0] == '\0')
+		ob_throw("ValueError", ob_string("ord() got an empty string"));
+	return ob_int((unsigned char)v.as.s[0]);
+}
+
+OboeValue ob_chr(OboeValue v)
+{
+	if (v.tag != OB_INT)
+		ob_throw("TypeError",
+			 ob_string("chr() expects an int, got another type"));
+	if (v.as.i < 0 || v.as.i > 255)
+		ob_throw("ValueError",
+			 ob_string("chr() needs a byte value in 0..255"));
+	/* 0 would produce an empty string rather than a one-byte one, since
+	   strings are NUL-terminated; refuse it instead of lying about length */
+	if (v.as.i == 0)
+		ob_throw("ValueError",
+			 ob_string("chr(0) has no representable string value"));
+	char buf[2] = { (char)v.as.i, '\0' };
+	return ob_string(buf);
 }
 
 OboeValue ob_input(void)
@@ -1437,6 +1555,78 @@ OboeValue ob_std_os_remove(OboeValue path)
 	return ob_bool(ok);
 }
 
+OboeValue ob_std_os_is_dir(OboeValue path)
+{
+	char *p = ob_to_cstr(path);
+	struct stat st;
+	bool ok = stat(p, &st) == 0 && S_ISDIR(st.st_mode);
+	free(p);
+	return ob_bool(ok);
+}
+
+/* mkdir -p: makes every missing directory along the path. An existing directory
+   is success, so this is safe to call on a path that is already there. */
+OboeValue ob_std_os_mkdir(OboeValue path)
+{
+	char *p = ob_to_cstr(path);
+	for (char *s = p + 1; *s; s++) {
+		if (*s != '/')
+			continue;
+		*s = '\0';
+		ob_mkdir_one(p);
+		*s = '/';
+	}
+	bool ok = ob_mkdir_one(p) == 0;
+	if (!ok) {
+		struct stat st;
+		ok = stat(p, &st) == 0 && S_ISDIR(st.st_mode);
+	}
+	free(p);
+	return ob_bool(ok);
+}
+
+/* The entry names in `path`, without "." and "..", sorted by byte order.
+   readdir's own order is whatever the filesystem feels like, and a compiler
+   resolving modules against a directory listing has to be deterministic. */
+OboeValue ob_std_os_listdir(OboeValue path)
+{
+	char *p = ob_to_cstr(path);
+	DIR *dir = opendir(p);
+	if (!dir) {
+		OboeValue msg = ob_string(p);
+		free(p);
+		ob_throw("os.FileNotFoundError", msg);
+	}
+	free(p);
+	OboeValue out = ob_array_new();
+	struct dirent *e;
+	while ((e = readdir(dir))) {
+		if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+			continue;
+		ob_array_push(out, ob_string(e->d_name));
+	}
+	closedir(dir);
+	OboeArray *a = out.as.arr;
+	for (size_t i = 1; i < a->count; i++) {
+		OboeValue key = a->items[i];
+		size_t j = i;
+		while (j > 0 && strcmp(a->items[j - 1].as.s, key.as.s) > 0) {
+			a->items[j] = a->items[j - 1];
+			j--;
+		}
+		a->items[j] = key;
+	}
+	return out;
+}
+
+OboeValue ob_std_os_exit(OboeValue code)
+{
+	if (code.tag != OB_INT)
+		ob_throw("TypeError",
+			 ob_string("os.exit() expects an int status"));
+	exit((int)code.as.i);
+}
+
 OboeValue ob_std_os_getenv(OboeValue name)
 {
 	char *n = ob_to_cstr(name);
@@ -1897,19 +2087,20 @@ OboeValue ob_dict_remove(OboeValue d, OboeValue key)
 {
 	OboeDict *dict = ob_want_dict(d, "remove");
 	char *k = ob_to_cstr(key);
-	for (size_t i = 0; i < dict->count; i++) {
-		if (strcmp(dict->entries[i].key, k) != 0)
-			continue;
-		OboeValue gone = dict->entries[i].value;
-		free(dict->entries[i].key);
-		for (size_t j = i; j + 1 < dict->count; j++)
-			dict->entries[j] = dict->entries[j + 1];
-		dict->count--;
-		free(k);
-		return gone;
-	}
+	ptrdiff_t at = ob_dict_find(dict, k);
 	free(k);
-	return ob_null();
+	if (at < 0)
+		return ob_null();
+	OboeValue gone = dict->entries[at].value;
+	free(dict->entries[at].key);
+	/* closing the gap keeps insertion order, at the cost of every position
+	   in the index past `at`; rebuilding is the same O(n) as the shift */
+	for (size_t j = (size_t)at; j + 1 < dict->count; j++)
+		dict->entries[j] = dict->entries[j + 1];
+	dict->count--;
+	if (dict->index)
+		ob_dict_reindex(dict, dict->index_cap);
+	return gone;
 }
 
 /* ---- polymorphic methods ----

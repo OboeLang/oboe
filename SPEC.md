@@ -269,6 +269,7 @@ switch x {
 - `for (k, v in pairs(x))` binds key/value pairs: the keys of a dict, the indices of an array or string. `for (i, v in ipairs(x))` binds index/value pairs for any iterable. Both need exactly two loop variables, and two loop variables need one of them.
 - `if` / `else if` / `else` with parenthesized conditions.
 - `while` with parenthesized condition.
+- `break` leaves the innermost enclosing loop and `continue` skips to its next iteration. Both work in every loop form. A `case` body is not a loop — `switch` has no fallthrough, so there is nothing there to break out of, and a `break` inside one leaves the loop around the `switch` (outside any loop it is a compile error).
 - `switch`/`case` exists, with each `case` given its own `{ }` block body.
 - Type checking uses the `is` keyword: `if (100 is int) { ... }`.
 - Ternary/if-else shorthand: `cond ? a : b` (right-associative, binds looser than `??`): `var label = x % 2 == 0 ? "even" : "odd"`.
@@ -330,7 +331,9 @@ l.method()
 
 - `print` and `write` take any number of arguments: none prints an empty line, several are joined with spaces (like Python): `print("x =", x)`.
 - `write()` - Print without newline.
+- `eprint()` / `ewrite()` - The same pair, writing to stderr instead. stdout is flushed first, so the two streams stay in order when both go to the same place.
 - `input()` - Pauses execution and waits for user input, returns that input. Same as Python.
+- `ord(s)` - The numeric value of a string's first byte; `chr(n)` is the inverse. Byte-oriented like the rest of the string handling, so `ord` on a multi-byte character gives its first byte. `ord("")` throws `ValueError`, and `chr` throws `ValueError` outside 0..255 — including `chr(0)`, which a NUL-terminated string cannot hold.
 
 ### Built-in stdlib modules
 
@@ -339,7 +342,8 @@ Importing `math`, `random` or `os` works with no file on disk, they're built int
 - `math.abs(n)`, `math.min(a, b)`, `math.max(a, b)`, `math.pow(base, exp)`, `math.sqrt(n)`, `math.floor(n)`, `math.ceil(n)`, `math.round(n)`. Integer arguments get exact integer math (`pow` is integer exponentiation, `sqrt` is the floor square root); as soon as any argument is a float the result is floating point. `floor`/`ceil`/`round` always return an int.
 - `random.seed(n)`, `random.randint(lo, hi)` (inclusive on both ends, like Python), `random.choice(array)` (a deterministic PRNG: the same seed gives the same sequence on every platform.)
 - `os.run(cmd)` runs a command through the shell and returns its exit code; `os.spawn(cmd)` starts it without waiting and returns the pid.
-- `os.read_file(path)` (throws `os.FileNotFoundError`), `os.write_file(path, content)`, `os.append_file(path, content)`, `os.exists(path)`, `os.remove(path)`, `os.getenv(name)` (string, or `null` when unset).
+- `os.read_file(path)` (throws `os.FileNotFoundError`), `os.write_file(path, content)`, `os.append_file(path, content)`, `os.exists(path)`, `os.remove(path)`, `os.getenv(name)` (string, or `null` when unset), `os.exit(status)` (ends the program immediately, skipping any `finally`).
+- `os.is_dir(path)`, `os.mkdir(path)` (recursive, like `mkdir -p`; an existing directory counts as success), `os.listdir(path)` (entry names without `.` and `..`, sorted by byte order so a directory walk is reproducible; throws `os.FileNotFoundError` when the path isn't a readable directory). `os.exists` cannot tell a directory from a file — that is what `os.is_dir` is for.
 - `os.script_file()` is the absolute path of the running script and `os.script_dir()` its directory; `os.project_root()` is the nearest ancestor directory containing a project.jsonc, falling back to `os.script_dir()`. All three are resolved at compile time.
 
 ### Methods on primitives

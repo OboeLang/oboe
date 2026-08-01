@@ -78,10 +78,17 @@ typedef struct {
 	OboeValue value;
 } OboeDictEntry;
 
+/* `entries` stays dense and in insertion order, because that order is
+   observable: `.keys()`, `.values()`, `for (k, v in pairs(d))` and printing all
+   walk it directly. `index` is a side table over it — open-addressed, power of
+   two, storing entry index + 1 so that 0 reads as empty — built only once a dict
+   is large enough for the hash to beat a scan of a small dense array. */
 struct OboeDict {
 	OboeDictEntry *entries;
 	size_t count;
 	size_t capacity;
+	uint32_t *index;
+	size_t index_cap;
 };
 
 /* constructors */
@@ -115,6 +122,13 @@ OboeValue ob_index_set(OboeValue container, OboeValue key, OboeValue value);
 /* io / conversion */
 void ob_print(OboeValue v);
 void ob_write(OboeValue v); /* print without a trailing newline */
+void ob_eprint(OboeValue v); /* the same pair, on stderr */
+void ob_ewrite(OboeValue v);
+/* byte-oriented, like every other string operation here: ord() yields the first
+   byte of a multi-byte character. chr() rejects 0, which a NUL-terminated string
+   cannot represent, and anything outside 0..255. */
+OboeValue ob_ord(OboeValue v);
+OboeValue ob_chr(OboeValue v);
 OboeValue
 ob_input(void); /* reads one line from stdin (newline stripped); null on EOF */
 OboeValue ob_str(OboeValue v);
@@ -134,6 +148,9 @@ OboeValue ob_lt(OboeValue a, OboeValue b);
 OboeValue ob_lte(OboeValue a, OboeValue b);
 OboeValue ob_gt(OboeValue a, OboeValue b);
 OboeValue ob_gte(OboeValue a, OboeValue b);
+/* `and`/`or` are not emitted as these: C would evaluate both arguments, and the
+   operators short-circuit. Codegen inlines `ob_bool(ob_truthy(a) && ...)`
+   instead; these remain as the eager forms, for a caller that wants both sides. */
 OboeValue ob_and(OboeValue a, OboeValue b);
 OboeValue ob_or(OboeValue a, OboeValue b);
 OboeValue ob_not(OboeValue a);
@@ -223,6 +240,13 @@ OboeValue ob_std_os_append_file(OboeValue path, OboeValue content);
 OboeValue ob_std_os_exists(OboeValue path);
 OboeValue ob_std_os_remove(OboeValue path);
 OboeValue ob_std_os_getenv(OboeValue name); /* string, or null when unset */
+OboeValue ob_std_os_exit(OboeValue code); /* does not return */
+OboeValue ob_std_os_is_dir(OboeValue path);
+OboeValue ob_std_os_mkdir(OboeValue path); /* mkdir -p; existing is success */
+/* entry names, no "." or "..", sorted by byte order so a directory walk is
+   reproducible; throws os.FileNotFoundError when the path isn't a readable
+   directory */
+OboeValue ob_std_os_listdir(OboeValue path);
 
 /* range() and array-args entry point */
 OboeValue ob_range(int64_t a, int64_t b);

@@ -107,6 +107,13 @@ static int g_known_func_count = 0;
    freed memory; returns unwind back to the outermost open frame's `prev`. */
 static int g_try_depth = 0;
 
+/* g_try_depth as it stood when the innermost enclosing loop was entered, or -1
+   outside any loop. `break`/`continue` jump out of every try opened since then,
+   so they have to unwind ob_exc_stack the same way a `return` does — but only
+   back to the loop, not out of the whole function. -1 also doubles as the check
+   for a `break` with no loop to break out of. */
+static int g_loop_try_depth = -1;
+
 static void codegen_error(int line, const char *msg);
 static char *fmt(const char *format, ...);
 static bool file_exists(const char *path);
@@ -136,6 +143,10 @@ static const StdMember k_std_os[] = {
 	{ "exists", 1 },
 	{ "remove", 1 },
 	{ "getenv", 1 },
+	{ "exit", 1 },
+	{ "is_dir", 1 },
+	{ "mkdir", 1 },
+	{ "listdir", 1 },
 	/* resolved at compile time — see emit_script_path_builtins */
 	{ "script_file", 0 },
 	{ "script_dir", 0 },
@@ -182,16 +193,47 @@ static void codegen_error(int line, const char *msg)
 	exit(1);
 }
 
-/* escapes a path for embedding in a C string literal */
+/* Escapes an arbitrary byte string for embedding in a C string literal. Control
+   bytes go out as three-digit octal rather than \xNN, because C's hex escape is
+   greedy and would swallow a following hex digit from the text. Bytes above 127
+   pass through untouched, which keeps UTF-8 literals readable in the output. */
 static char *escape_c_string(const char *s)
 {
 	size_t n = strlen(s);
-	char *out = malloc(n * 2 + 1);
+	char *out = malloc(n * 4 + 1);
+	if (!out) {
+		fprintf(stderr, "oboe: out of memory\n");
+		exit(1);
+	}
 	size_t o = 0;
 	for (size_t i = 0; i < n; i++) {
-		if (s[i] == '\\' || s[i] == '"')
+		unsigned char c = (unsigned char)s[i];
+		switch (c) {
+		case '"':
+		case '\\':
 			out[o++] = '\\';
-		out[o++] = s[i];
+			out[o++] = (char)c;
+			break;
+		case '\n':
+			out[o++] = '\\';
+			out[o++] = 'n';
+			break;
+		case '\r':
+			out[o++] = '\\';
+			out[o++] = 'r';
+			break;
+		case '\t':
+			out[o++] = '\\';
+			out[o++] = 't';
+			break;
+		default:
+			if (c < 0x20 || c == 0x7f) {
+				o += (size_t)sprintf(out + o, "\\%03o", c);
+			} else {
+				out[o++] = (char)c;
+			}
+			break;
+		}
 	}
 	out[o] = '\0';
 	return out;
@@ -541,10 +583,30 @@ static const char *infer_class(Expr *e)
 		return lookup_var_class(e->as.ident);
 	}
 	case EXPR_CALL: {
-		if (e->as.call.callee->kind == EXPR_IDENT) {
-			ClassDecl *c = find_class(e->as.call.callee->as.ident);
+		Expr *callee = e->as.call.callee;
+		if (callee->kind == EXPR_IDENT) {
+			/* a constructor call is the class itself */
+			ClassDecl *c = find_class(callee->as.ident);
 			if (c)
 				return c->name;
+			/* otherwise a plain call is worth as much as its declared
+                           return type, which is the only annotation a caller has
+                           to go on for `var n = make_node()` */
+			KnownFunc *kf = find_known_func(callee->as.ident);
+			if (kf && kf->decl->return_type &&
+			    find_class(kf->decl->return_type))
+				return kf->decl->return_type;
+			return NULL;
+		}
+		if (callee->kind == EXPR_FIELD) {
+			const char *base = infer_class(callee->as.field.obj);
+			ClassDecl *bc = base ? find_class(base) : NULL;
+			if (!bc)
+				return NULL;
+			FuncDecl *m;
+			if (find_method_owner(bc, callee->as.field.name, &m) &&
+			    m->return_type && find_class(m->return_type))
+				return m->return_type;
 		}
 		return NULL;
 	}
@@ -614,23 +676,10 @@ static char *gen_string_literal(Expr *e)
 			free(sub);
 			free(sub_str);
 		} else {
-			/* escape the literal for embedding in a C string literal */
-			char escaped[4096];
-			int eo = 0;
-			for (const char *c = p->literal;
-			     *c && eo < (int)sizeof(escaped) - 2; c++) {
-				if (*c == '"' || *c == '\\')
-					escaped[eo++] = '\\';
-				if (*c == '\n') {
-					escaped[eo++] = '\\';
-					escaped[eo++] = 'n';
-					continue;
-				}
-				escaped[eo++] = *c;
-			}
-			escaped[eo] = '\0';
+			char *escaped = escape_c_string(p->literal);
 			off += snprintf(buf + off, sizeof(buf) - off,
 					", ob_string(\"%s\")", escaped);
+			free(escaped);
 		}
 	}
 	off += snprintf(buf + off, sizeof(buf) - off, ")");
@@ -1173,10 +1222,15 @@ static char *gen_expr(Expr *e)
 		char *r = gen_expr(e->as.binary.r);
 		char *op = e->as.binary.op;
 		char *result;
+		/* inlined rather than handed to ob_and/ob_or, whose arguments C
+                   would evaluate both of: `i < n and s.substr(i, 1) == "x"` has
+                   to stop at the bound, and `x != null and x.f()` at the null */
 		if (strcmp(op, "&&") == 0)
-			result = fmt("ob_and(%s, %s)", l, r);
+			result = fmt("ob_bool(ob_truthy(%s) && ob_truthy(%s))",
+				     l, r);
 		else if (strcmp(op, "||") == 0)
-			result = fmt("ob_or(%s, %s)", l, r);
+			result = fmt("ob_bool(ob_truthy(%s) || ob_truthy(%s))",
+				     l, r);
 		else if (strcmp(op, "??") == 0)
 			result = fmt("ob_coalesce(%s, %s)", l, r);
 		else {
@@ -1259,13 +1313,20 @@ static char *gen_expr(Expr *e)
 		/* builtins */
 		if (callee->kind == EXPR_IDENT &&
 		    !var_in_scope(callee->as.ident)) {
-			/* print/write take any number of arguments: zero prints an
-                   empty line, several are joined with spaces (like Python) */
-			if (strcmp(callee->as.ident, "print") == 0 ||
-			    strcmp(callee->as.ident, "write") == 0) {
-				const char *fn = callee->as.ident[0] == 'p' ?
-							 "ob_print" :
-							 "ob_write";
+			/* the print family takes any number of arguments: zero
+                   prints an empty line, several are joined with spaces (like
+                   Python). eprint/ewrite are the same on stderr. */
+			const char *print_fn = NULL;
+			if (strcmp(callee->as.ident, "print") == 0)
+				print_fn = "ob_print";
+			else if (strcmp(callee->as.ident, "write") == 0)
+				print_fn = "ob_write";
+			else if (strcmp(callee->as.ident, "eprint") == 0)
+				print_fn = "ob_eprint";
+			else if (strcmp(callee->as.ident, "ewrite") == 0)
+				print_fn = "ob_ewrite";
+			if (print_fn) {
+				const char *fn = print_fn;
 				int argc = e->as.call.arg_count;
 				if (argc == 0)
 					return fmt(
@@ -1303,6 +1364,14 @@ static char *gen_expr(Expr *e)
 			    e->as.call.arg_count == 1) {
 				char *a = gen_expr(e->as.call.args[0]);
 				char *r = fmt("ob_str(%s)", a);
+				free(a);
+				return r;
+			}
+			if ((strcmp(callee->as.ident, "ord") == 0 ||
+			     strcmp(callee->as.ident, "chr") == 0) &&
+			    e->as.call.arg_count == 1) {
+				char *a = gen_expr(e->as.call.args[0]);
+				char *r = fmt("ob_%s(%s)", callee->as.ident, a);
 				free(a);
 				return r;
 			}
@@ -1563,6 +1632,14 @@ static char *gen_expr(Expr *e)
 					codegen_error(
 						e->line,
 						"range() takes exactly 2 arguments");
+				if (strcmp(callee->as.ident, "ord") == 0)
+					codegen_error(
+						e->line,
+						"ord() takes exactly 1 argument");
+				if (strcmp(callee->as.ident, "chr") == 0)
+					codegen_error(
+						e->line,
+						"chr() takes exactly 1 argument");
 				codegen_error(
 					e->line,
 					fmt("unknown function or class '%s'",
@@ -1793,8 +1870,11 @@ static void gen_stmt(Stmt *s, int indent)
 		fprintf(OUT, "while (ob_truthy(%s)) {\n", cond);
 		free(cond);
 		push_scope();
+		int saved_loop = g_loop_try_depth;
+		g_loop_try_depth = g_try_depth;
 		gen_stmt_list(s->as.while_stmt.body,
 			      s->as.while_stmt.body_count, indent + 4);
+		g_loop_try_depth = saved_loop;
 		pop_scope();
 		ind(indent);
 		fprintf(OUT, "}\n");
@@ -1802,6 +1882,8 @@ static void gen_stmt(Stmt *s, int indent)
 	}
 	case STMT_FOR: {
 		push_scope();
+		int saved_loop = g_loop_try_depth;
+		g_loop_try_depth = g_try_depth;
 		if (s->as.for_stmt.kind == FOR_RANGE) {
 			char *a = gen_expr(s->as.for_stmt.range_a);
 			char *b = gen_expr(s->as.for_stmt.range_b);
@@ -1862,6 +1944,7 @@ static void gen_stmt(Stmt *s, int indent)
 			ind(indent);
 			fprintf(OUT, "} }\n");
 		}
+		g_loop_try_depth = saved_loop;
 		pop_scope();
 		break;
 	}
@@ -1973,6 +2056,24 @@ static void gen_stmt(Stmt *s, int indent)
 		pop_scope();
 		ind(indent);
 		fprintf(OUT, "}\n");
+		break;
+	}
+	case STMT_BREAK:
+	case STMT_CONTINUE: {
+		const char *kw = s->kind == STMT_BREAK ? "break" : "continue";
+		if (g_loop_try_depth < 0)
+			codegen_error(s->line,
+				      fmt("'%s' outside of a loop", kw));
+		ind(indent);
+		/* leaving a try opened inside the loop: drop its frames first, or
+                   the next throw longjmps into a dead C stack slot. __frame_N for
+                   N == the loop's own depth is the outermost one to unwind. */
+		if (g_try_depth > g_loop_try_depth)
+			fprintf(OUT,
+				"{ ob_exc_stack = __frame_%d.prev; %s; }\n",
+				g_loop_try_depth, kw);
+		else
+			fprintf(OUT, "%s;\n", kw);
 		break;
 	}
 	}
@@ -2556,6 +2657,9 @@ static void scan_stmt_list_for_fields(ClassDecl *c, Stmt **body, int count)
 		case STMT_BLOCK:
 			scan_stmt_list_for_fields(c, s->as.block.body,
 						  s->as.block.body_count);
+			break;
+		case STMT_BREAK:
+		case STMT_CONTINUE:
 			break;
 		}
 	}

@@ -1,0 +1,13 @@
+size 1: len=1 lookups=true first=k0 last=k0
+size 7: len=7 lookups=true first=k0 last=k6
+size 8: len=8 lookups=true first=k0 last=k7
+size 9: len=9 lookups=true first=k0 last=k8
+size 100: len=100 lookups=true first=k0 last=k99
+after removals: k1,k2,k4,k5,k6,k7,k8,k9,k10
+still there: 16 100
+gone: false null
+re-added: k1,k2,k4,k5,k6,k7,k8,k9,k10,k3
+value: 999
+overwrite: k1,k2,k4,k5,k6,k7,k8,k9,k10,k3 -1
+pairs matches keys: true
+missing: null false 64

@@ -131,7 +131,9 @@ typedef enum {
 	STMT_SWITCH,
 	STMT_TRY,
 	STMT_THROW,
-	STMT_BLOCK
+	STMT_BLOCK,
+	STMT_BREAK,
+	STMT_CONTINUE
 } StmtKind;
 
 /* what a `for` loop walks: a numeric range, the values of an iterable, or the

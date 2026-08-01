@@ -1,0 +1,132 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// Tokenizer for the mini-Oboe spike. A token is a dict, not a class: the
+// compiler resolves `.field` only on statically-known classes, and dicts side-
+// step that entirely for the heterogeneous data a compiler is made of.
+//
+//     { "kind": "int"|"str"|"ident"|"kw"|"op"|"eof", "text": ..., "line": ... }
+import fail from diag
+
+const var KEYWORDS = ["func", "var", "if", "else", "while", "return", "print",
+                      "break", "continue", "true", "false"]
+
+// three-then-two-then-one so `==` never lexes as two `=`
+const var OPS2 = ["==", "!=", "<=", ">=", "&&", "||"]
+
+func is_digit(str c) {
+    var n = ord(c)
+    return n >= 48 and n <= 57
+}
+
+func is_alpha(str c) {
+    var n = ord(c)
+    return (n >= 97 and n <= 122) or (n >= 65 and n <= 90) or n == 95
+}
+
+func is_alnum(str c) {
+    return is_alpha(c) or is_digit(c)
+}
+
+func is_space(str c) {
+    return c == " " or c == "\t" or c == "\n" or c == "\r"
+}
+
+func token(str kind, str text, int line) {
+    var t = {}
+    t["kind"] = kind
+    t["text"] = text
+    t["line"] = line
+    return t
+}
+
+func lex(str src) {
+    var toks = []
+    var i = 0
+    var line = 1
+    var n = src.len()
+
+    while (i < n) {
+        var c = src.substr(i, 1)
+
+        if (is_space(c)) {
+            if (c == "\n") { line = line + 1 }
+            i = i + 1
+            continue
+        }
+
+        // line comments run to the newline, which the loop above then counts
+        if (c == "/" and i + 1 < n and src.substr(i + 1, 1) == "/") {
+            while (i < n and src.substr(i, 1) != "\n") { i = i + 1 }
+            continue
+        }
+
+        if (is_digit(c)) {
+            var start = i
+            while (i < n and is_digit(src.substr(i, 1))) { i = i + 1 }
+            toks.push(token("int", src.substr(start, i - start), line))
+            continue
+        }
+
+        if (is_alpha(c)) {
+            var start = i
+            while (i < n and is_alnum(src.substr(i, 1))) { i = i + 1 }
+            var word = src.substr(start, i - start)
+            var kind = KEYWORDS.contains(word) ? "kw" : "ident"
+            toks.push(token(kind, word, line))
+            continue
+        }
+
+        if (c == "\"") {
+            i = i + 1
+            var parts = []
+            while (i < n) {
+                var d = src.substr(i, 1)
+                if (d == "\"") { break }
+                if (d == "\\" and i + 1 < n) {
+                    var e = src.substr(i + 1, 1)
+                    if (e == "n") { parts.push("\n") }
+                    else if (e == "t") { parts.push("\t") }
+                    else { parts.push(e) }
+                    i = i + 2
+                    continue
+                }
+                if (d == "\n") { line = line + 1 }
+                parts.push(d)
+                i = i + 1
+            }
+            if (i >= n) { fail(line, "unterminated string") }
+            i = i + 1
+            toks.push(token("str", parts.join(""), line))
+            continue
+        }
+
+        var two = i + 1 < n ? src.substr(i, 2) : ""
+        if (OPS2.contains(two)) {
+            toks.push(token("op", two, line))
+            i = i + 2
+            continue
+        }
+
+        if ("+-*/%<>(){},;=!".contains(c)) {
+            toks.push(token("op", c, line))
+            i = i + 1
+            continue
+        }
+
+        fail(line, "unexpected character '${c}'")
+    }
+
+    toks.push(token("eof", "", line))
+    return toks
+}

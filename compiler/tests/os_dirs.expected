@@ -1,0 +1,12 @@
+made: true
+again: true
+is_dir: true true
+file exists: true
+file is_dir: false
+missing is_dir: false
+listing: a,alpha.oboe,zeta.oboe
+nested: b
+empty: 0
+caught missing dir
+caught file-as-dir
+cleaned: false

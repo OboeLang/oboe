@@ -1,0 +1,8 @@
+while: 3
+range: 18
+first_even: 6
+pairs: a,b
+switch: 0,one,1,two,2
+try: 1,-1,2
+after: still catchable
+nested: 00,10,20

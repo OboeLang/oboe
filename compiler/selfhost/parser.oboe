@@ -1,0 +1,288 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// Recursive-descent parser for the mini-Oboe spike. Nodes are dicts keyed by
+// "kind", mirroring the C AST's tagged union one arm at a time.
+import fail from diag
+
+// the parser's cursor is module-level state rather than a passed-around class,
+// which is what the C parser does with its Parser struct
+var TOKS = []
+var POS = 0
+
+func peek() {
+    return TOKS[POS]
+}
+
+func peek_at(int k) {
+    var i = POS + k
+    return i < TOKS.len() ? TOKS[i] : TOKS[TOKS.len() - 1]
+}
+
+func advance() {
+    var t = TOKS[POS]
+    if (t["kind"] != "eof") { POS = POS + 1 }
+    return t
+}
+
+func at(str kind, str text) {
+    var t = peek()
+    return t["kind"] == kind and t["text"] == text
+}
+
+func accept(str kind, str text) {
+    if (at(kind, text)) {
+        advance()
+        return true
+    }
+    return false
+}
+
+func expect(str kind, str text) {
+    var t = peek()
+    if (t["kind"] != kind or t["text"] != text) {
+        fail(t["line"], "expected '${text}' but found '${t["text"]}'")
+    }
+    return advance()
+}
+
+func node(str kind) {
+    var n = {}
+    n["kind"] = kind
+    return n
+}
+
+// ---- expressions, tightest binding first ----
+
+func parse_primary() {
+    var t = peek()
+    if (t["kind"] == "int") {
+        advance()
+        var n = node("int")
+        n["value"] = t["text"]
+        return n
+    }
+    if (t["kind"] == "str") {
+        advance()
+        var n = node("str")
+        n["value"] = t["text"]
+        return n
+    }
+    if (t["kind"] == "kw" and (t["text"] == "true" or t["text"] == "false")) {
+        advance()
+        var n = node("int")
+        n["value"] = t["text"] == "true" ? "1" : "0"
+        return n
+    }
+    if (accept("op", "(")) {
+        var inner = parse_expr()
+        expect("op", ")")
+        return inner
+    }
+    if (accept("op", "-")) {
+        var n = node("neg")
+        n["operand"] = parse_primary()
+        return n
+    }
+    if (accept("op", "!")) {
+        var n = node("not")
+        n["operand"] = parse_primary()
+        return n
+    }
+    if (t["kind"] == "ident") {
+        advance()
+        if (accept("op", "(")) {
+            var n = node("call")
+            n["name"] = t["text"]
+            n["args"] = parse_args()
+            return n
+        }
+        var n = node("ident")
+        n["name"] = t["text"]
+        return n
+    }
+    fail(t["line"], "expected an expression, found '${t["text"]}'")
+}
+
+func parse_args() {
+    var args = []
+    if (accept("op", ")")) { return args }
+    while (true) {
+        args.push(parse_expr())
+        if (accept("op", ",")) { continue }
+        expect("op", ")")
+        break
+    }
+    return args
+}
+
+func binary(str op, l, r) {
+    var n = node("binary")
+    n["op"] = op
+    n["l"] = l
+    n["r"] = r
+    return n
+}
+
+func parse_level(int level) {
+    // 0: || 1: && 2: comparisons 3: + - 4: * / %
+    if (level > 4) { return parse_primary() }
+    var ops = LEVELS[level]
+    var left = parse_level(level + 1)
+    while (true) {
+        var t = peek()
+        if (t["kind"] != "op" or !ops.contains(t["text"])) { break }
+        advance()
+        left = binary(t["text"], left, parse_level(level + 1))
+    }
+    return left
+}
+
+const var LEVELS = [["||"], ["&&"], ["==", "!=", "<", "<=", ">", ">="],
+                    ["+", "-"], ["*", "/", "%"]]
+
+func parse_expr() {
+    return parse_level(0)
+}
+
+// ---- statements ----
+
+func parse_block() {
+    expect("op", "{")
+    var body = []
+    while (!at("op", "}")) {
+        if (peek()["kind"] == "eof") { fail(peek()["line"], "unclosed block") }
+        body.push(parse_stmt())
+    }
+    expect("op", "}")
+    return body
+}
+
+func parse_stmt() {
+    var t = peek()
+
+    if (at("kw", "var")) {
+        advance()
+        var name = peek()
+        if (name["kind"] != "ident") { fail(name["line"], "expected a variable name") }
+        advance()
+        expect("op", "=")
+        var n = node("let")
+        n["name"] = name["text"]
+        n["init"] = parse_expr()
+        accept("op", ";")
+        return n
+    }
+
+    if (at("kw", "return")) {
+        advance()
+        var n = node("return")
+        n["value"] = at("op", "}") or at("op", ";") ? null : parse_expr()
+        accept("op", ";")
+        return n
+    }
+
+    if (at("kw", "print")) {
+        advance()
+        expect("op", "(")
+        var n = node("print")
+        n["args"] = parse_args()
+        accept("op", ";")
+        return n
+    }
+
+    if (at("kw", "break") or at("kw", "continue")) {
+        advance()
+        accept("op", ";")
+        return node(t["text"])
+    }
+
+    if (at("kw", "if")) {
+        advance()
+        expect("op", "(")
+        var n = node("if")
+        n["cond"] = parse_expr()
+        expect("op", ")")
+        n["then"] = parse_block()
+        n["else"] = []
+        if (accept("kw", "else")) {
+            // `else if` chains without needing a dedicated node kind
+            if (at("kw", "if")) { n["else"] = [parse_stmt()] }
+            else { n["else"] = parse_block() }
+        }
+        return n
+    }
+
+    if (at("kw", "while")) {
+        advance()
+        expect("op", "(")
+        var n = node("while")
+        n["cond"] = parse_expr()
+        expect("op", ")")
+        n["body"] = parse_block()
+        return n
+    }
+
+    // assignment or a bare expression
+    if (t["kind"] == "ident" and peek_at(1)["kind"] == "op"
+        and peek_at(1)["text"] == "=") {
+        advance()
+        advance()
+        var n = node("assign")
+        n["name"] = t["text"]
+        n["value"] = parse_expr()
+        accept("op", ";")
+        return n
+    }
+
+    var n = node("expr")
+    n["expr"] = parse_expr()
+    accept("op", ";")
+    return n
+}
+
+func parse_func() {
+    expect("kw", "func")
+    var name = peek()
+    if (name["kind"] != "ident") { fail(name["line"], "expected a function name") }
+    advance()
+    expect("op", "(")
+    var params = []
+    if (!accept("op", ")")) {
+        while (true) {
+            var p = peek()
+            if (p["kind"] != "ident") { fail(p["line"], "expected a parameter name") }
+            advance()
+            params.push(p["text"])
+            if (accept("op", ",")) { continue }
+            expect("op", ")")
+            break
+        }
+    }
+    var n = node("func")
+    n["name"] = name["text"]
+    n["params"] = params
+    n["body"] = parse_block()
+    n["line"] = name["line"]
+    return n
+}
+
+func parse(array toks) {
+    TOKS = toks
+    POS = 0
+    var decls = []
+    while (peek()["kind"] != "eof") {
+        decls.push(parse_func())
+    }
+    return decls
+}

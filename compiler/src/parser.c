@@ -946,6 +946,12 @@ static Stmt *parse_statement(Parser *p)
 		advance(p);
 		return parse_throw(p);
 	}
+	if (check(p, T_BREAK) || check(p, T_CONTINUE)) {
+		StmtKind k = check(p, T_BREAK) ? STMT_BREAK : STMT_CONTINUE;
+		advance(p);
+		match(p, T_SEMI);
+		return new_stmt(k, line);
+	}
 	if (check(p, T_LBRACE)) {
 		Stmt **body;
 		int count;
@@ -1045,10 +1051,12 @@ static ClassDecl *parse_class(Parser *p)
 				is_private = true;
 		}
 		/* return type may precede `func` for methods */
+		char *mret = NULL;
 		if (check(p, T_IDENT) && peekAt(p, 1)->type == T_FUNC)
-			advance(p);
+			mret = strdup(advance(p)->text);
 		if (check(p, T_FUNC)) {
 			FuncDecl *m = parse_func(p, is_static, is_private);
+			m->return_type = mret;
 			if (mcount == mcap) {
 				mcap = mcap ? mcap * 2 : 8;
 				methods = realloc(methods,
@@ -1104,7 +1112,18 @@ static ClassDecl *parse_class(Parser *p)
 static ImportDecl parse_import(Parser *p)
 {
 	ImportDecl imp = { 0 };
-	if (check(p, T_IDENT) && peekAt(p, 1)->type == T_FROM) {
+	/* `import a, b from mod` is a member list and `import mod [as x]` is not,
+           but one leading identifier looks the same either way: scan the whole
+           comma-separated run and let the `from` behind it decide. */
+	bool is_member_list = false;
+	if (check(p, T_IDENT)) {
+		int k = 1;
+		while (peekAt(p, k)->type == T_COMMA &&
+		       peekAt(p, k + 1)->type == T_IDENT)
+			k += 2;
+		is_member_list = peekAt(p, k)->type == T_FROM;
+	}
+	if (is_member_list) {
 		char **members = NULL;
 		int cap = 0, count = 0;
 		do {

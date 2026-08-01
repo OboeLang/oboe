@@ -1,0 +1,65 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+// a declared return type is enough to resolve member access on the result, so
+// `var v = make()` no longer needs a `Vec v = make()` annotation
+
+class Vec {
+    func init(this, int x, int y) {
+        this.x = x
+        this.y = y
+    }
+
+    func show(this) {
+        return "(${this.x}, ${this.y})"
+    }
+
+    Vec func scaled(this, int k) {
+        return Vec(this.x * k, this.y * k)
+    }
+}
+
+class Box {
+    func init(this, Vec v) {
+        this.v = v
+    }
+
+    Vec func inner(this) {
+        return this.v
+    }
+}
+
+Vec func make(int x, int y) {
+    return Vec(x, y)
+}
+
+Box func boxed(int x, int y) {
+    return Box(make(x, y))
+}
+
+func main(array args) {
+    // free function's return type
+    var a = make(1, 2)
+    print("free:", a.show())
+
+    // method's return type, and chaining off it
+    var b = make(2, 3).scaled(10)
+    print("method:", b.show())
+    print("chain:", make(1, 1).scaled(2).scaled(3).show())
+
+    // through a field whose class comes from a returned value
+    var c = boxed(4, 5)
+    print("nested:", c.inner().show())
+
+    // an inherited method is still found on the returned class
+    print("field:", make(7, 8).x)
+}

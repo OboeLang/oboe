@@ -166,6 +166,44 @@ else
 fi
 rm -rf "$tmp"
 
+# ---- self-hosting spike -------------------------------------------------
+#
+# selfhost/ is a compiler for a small Oboe-like subset, written in Oboe. It is
+# the standing proof that the language can host its own toolchain, and it
+# exercises end to end the pieces the real self-hosted compiler depends on:
+# break/continue in scanning loops, short-circuit and/or, ord() classification,
+# dict-shaped AST nodes, C string escaping and eprint+os.exit diagnostics.
+tmp="$(mktemp -d)"
+if "$OBOE" build selfhost/mini.oboe -o "$tmp/mini" >/dev/null 2>&1 &&
+   "$tmp/mini" selfhost/sample.mini -o "$tmp/sample" >/dev/null 2>&1; then
+    got="$("$tmp/sample" 2>&1)"
+    if [ "$got" = "$(cat selfhost/sample.expected)" ]; then
+        echo "PASS selfhost_mini"
+        pass=$((pass+1))
+    else
+        echo "FAIL selfhost_mini (output mismatch)"
+        diff <(printf '%s\n' "$got") selfhost/sample.expected | sed 's/^/    /'
+        fail=$((fail+1))
+    fi
+else
+    echo "FAIL selfhost_mini (could not build the spike or compile the sample)"
+    fail=$((fail+1))
+fi
+
+# a diagnostic goes to stderr with a non-zero status and no exception wrapping,
+# which is the whole point of eprint + os.exit
+printf 'func main() {\n    var x = 1 +\n}\n' > "$tmp/bad.mini"
+err="$("$tmp/mini" "$tmp/bad.mini" --emit-c 2>&1 >/dev/null)"
+rc=$?
+if [ $rc -ne 0 ] && printf '%s' "$err" | grep -q "error: expected an expression"; then
+    echo "PASS selfhost_mini_diagnostic"
+    pass=$((pass+1))
+else
+    echo "FAIL selfhost_mini_diagnostic (exit $rc): $err"
+    fail=$((fail+1))
+fi
+rm -rf "$tmp"
+
 # ---- katare client ------------------------------------------------------
 #
 # Driven against tests/helpers/katare_stub.c, a scripted server compiled here.

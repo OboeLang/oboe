@@ -1,0 +1,63 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+// dicts big enough to be hash-indexed must behave exactly like small ones:
+// insertion order preserved, removals closing the gap, lookups still correct
+// after the index has been rebuilt underneath them.
+
+func build(int n) {
+    var d = {}
+    for (i in range(0, n)) {
+        d["k${i}"] = i * i
+    }
+    return d
+}
+
+func main(array args) {
+    // straddles the point where the index gets built, and several regrowths
+    for (n in [1, 7, 8, 9, 100]) {
+        var d = build(n)
+        var ok = true
+        for (i in range(0, n)) {
+            if (d["k${i}"] != i * i) { ok = false }
+        }
+        print("size ${n}: len=${str(d.len())} lookups=${str(ok)} first=${str(d.keys()[0])} last=${str(d.keys()[n - 1])}")
+    }
+
+    // insertion order survives the index, and survives removals from the middle
+    var d = build(12)
+    d.remove("k3")
+    d.remove("k0")
+    d.remove("k11")
+    print("after removals:", d.keys().join(","))
+    print("still there:", d["k4"], d["k10"])
+    print("gone:", d.has("k3"), d["k3"])
+
+    // re-adding a removed key appends it at the end, like a fresh insert
+    d["k3"] = 999
+    print("re-added:", d.keys().join(","))
+    print("value:", d["k3"])
+
+    // overwriting keeps the original position
+    d["k4"] = -1
+    print("overwrite:", d.keys().join(","), d["k4"])
+
+    // pairs() walks the same order as keys()
+    var walked = []
+    for (k, v in pairs(d)) { walked.push(k) }
+    print("pairs matches keys:", walked.join(",") == d.keys().join(","))
+
+    // a key absent from a large dict reads as null rather than colliding into
+    // some other entry
+    var big = build(64)
+    print("missing:", big["nope"], big.has("nope"), big.len())
+}

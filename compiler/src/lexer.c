@@ -25,7 +25,8 @@ typedef struct {
 
 static Keyword keywords[] = {
 	{ "let", T_LET },
-	{ "var", T_LET }, /* `var` is the spec spelling; `let` is a legacy alias */
+	{ "var",
+	  T_LET }, /* `var` is the spec spelling; `let` is a legacy alias */
 	{ "const", T_CONST },
 	{ "func", T_FUNC },
 	{ "return", T_RETURN },
@@ -37,6 +38,8 @@ static Keyword keywords[] = {
 	{ "while", T_WHILE },
 	{ "for", T_FOR },
 	{ "in", T_IN },
+	{ "break", T_BREAK },
+	{ "continue", T_CONTINUE },
 	{ "switch", T_SWITCH },
 	{ "case", T_CASE },
 	{ "try", T_TRY },
@@ -173,7 +176,9 @@ static void push_tok(TokBuf *b, Token t)
 }
 
 /* Reads a double-quoted string, honoring `${...}` (kept verbatim in output including the ${ and })
-   and basic escapes \n \t \" \\ . The token text is the decoded content excluding the surrounding quotes. */
+   and the escapes \n \t \r \" \\ . An escape that isn't one of those decodes to
+   the bare character, which is what makes `\$` a literal `$`. The token text is
+   the decoded content excluding the surrounding quotes. */
 static char *read_string_body(const char *src, size_t *pos, size_t len,
 			      int *line)
 {
@@ -190,6 +195,9 @@ static char *read_string_body(const char *src, size_t *pos, size_t len,
 				break;
 			case 't':
 				decoded = '\t';
+				break;
+			case 'r':
+				decoded = '\r';
 				break;
 			case '"':
 				decoded = '"';

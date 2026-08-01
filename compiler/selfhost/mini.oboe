@@ -1,0 +1,90 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// mini-oboe: a compiler for a small Oboe-like subset, written in Oboe, kept as
+// the standing proof that the language can host its own toolchain. It exists to
+// exercise the pieces the real self-hosted compiler leans on -- break/continue
+// in scanning loops, ord() for character classification, dict-shaped AST nodes,
+// eprint+os.exit diagnostics, an array-of-pieces string builder -- end to end,
+// through to a native binary.
+//
+//     oboe run selfhost/mini.oboe <input> [-o <binary>] [--emit-c]
+//
+// The subset: free functions of int parameters, var/assignment, if/else,
+// while with break/continue, return, print of ints and strings, and the usual
+// arithmetic, comparison and logical operators.
+import os
+import lexer
+import parser
+import codegen
+import set_source, fail from diag
+
+func usage() {
+    eprint("usage: mini <input.mini> [-o <output>] [--emit-c]")
+    os.exit(2)
+}
+
+func main(array args) {
+    var input = null
+    var output = null
+    var emit_c = false
+
+    var i = 1
+    while (i < args.len()) {
+        var a = args[i]
+        if (a == "-o") {
+            if (i + 1 >= args.len()) { usage() }
+            output = args[i + 1]
+            i = i + 2
+            continue
+        }
+        if (a == "--emit-c") {
+            emit_c = true
+            i = i + 1
+            continue
+        }
+        if (a.starts_with("-")) { usage() }
+        input = a
+        i = i + 1
+    }
+    if (input == null) { usage() }
+
+    set_source(input)
+    var src = ""
+    try {
+        src = os.read_file(input)
+    } catch (os.FileNotFoundError e) {
+        eprint("mini: cannot read '${input}'")
+        os.exit(1)
+    }
+
+    var c_source = codegen.generate(parser.parse(lexer.lex(src)))
+
+    if (emit_c) {
+        write(c_source)
+        os.exit(0)
+    }
+
+    var stem = input.ends_with(".mini") ? input.substr(0, input.len() - 5) : input
+    var out = output == null ? stem : output
+    var c_path = "${out}.c"
+    os.write_file(c_path, c_source)
+
+    var rc = os.run("cc -O2 -o \"${out}\" \"${c_path}\"")
+    os.remove(c_path)
+    if (rc != 0) {
+        eprint("mini: the C compiler rejected the generated code")
+        os.exit(1)
+    }
+    print("mini: wrote ${out}")
+}

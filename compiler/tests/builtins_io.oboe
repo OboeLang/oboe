@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+// ord/chr, the stderr print family, and os.exit
+import os
+
+func classify(str c) {
+    var n = ord(c)
+    if (n >= 48 and n <= 57) { return "digit" }
+    if (n >= 97 and n <= 122) { return "lower" }
+    if (n >= 65 and n <= 90) { return "upper" }
+    return "other"
+}
+
+func main(array args) {
+    print("ord:", ord("A"), ord("a"), ord("0"), ord("~"))
+    print("chr:", chr(65), chr(122), chr(32) == " ")
+    // ord() is byte-oriented, so a multi-byte character gives its first byte
+    print("utf8:", ord("é"), "é".len())
+    print("roundtrip:", chr(ord("Q")))
+
+    var kinds = []
+    for (c in "aZ3!") { kinds.push(classify(c)) }
+    print("classify:", kinds.join(","))
+
+    // the stderr pair; run_tests merges the two streams, so this also checks
+    // that stdout is flushed first and the lines stay in order
+    ewrite("err")
+    eprint("-line")
+    print("out-line")
+    eprint()
+
+    try {
+        print(ord(""))
+    } catch (ValueError e) {
+        print("empty:", e)
+    }
+    try {
+        print(chr(300))
+    } catch (ValueError e) {
+        print("range:", e)
+    }
+    try {
+        print(ord(7))
+    } catch (TypeError e) {
+        print("type:", e)
+    }
+
+    print("exiting")
+    os.exit(0)
+    print("unreachable")
+}

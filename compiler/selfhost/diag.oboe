@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// Diagnostics. eprint + os.exit is exactly the shape the C compiler's
+// codegen_error() has: message on stderr, non-zero status, no exception
+// machinery wrapped around it.
+import os
+
+var SOURCE_NAME = "<input>"
+
+func set_source(str name) {
+    SOURCE_NAME = name
+}
+
+func fail(int line, str msg) {
+    eprint("${SOURCE_NAME}:${str(line)}: error: ${msg}")
+    os.exit(1)
+}
