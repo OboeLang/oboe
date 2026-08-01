@@ -249,6 +249,56 @@ if "$OBOE" build selfhost/main.oboe -o "$tmp/oboec" >/dev/null 2>&1; then
         echo "FAIL selfhost_lexer_coverage (no corpus file produces: $missing)"
         fail=$((fail+1))
     fi
+
+    # ---- self-hosted parser ---------------------------------------------
+    #
+    # The same gate one stage further on: `oboe dump-ast` against
+    # `oboec --dump-ast`, over the same corpus plus every malformed input in
+    # tests/helpers/parse_errors.txt. The AST dump carries each node's kind,
+    # line and every field of its arm in src/ast.h, so this catches a
+    # mis-shaped tree and not just one that happens to print the same.
+    mkdir -p "$tmp/pe"
+    while IFS="$(printf '\t')" read -r name src; do
+        case "$name" in ''|'#'*) continue ;; esac
+        printf '%s\n' "$src" > "$tmp/pe/$name.oboe"
+    done < tests/helpers/parse_errors.txt
+
+    diffs=""
+    n=0
+    : > "$tmp/kinds"
+    for src in tests/*.oboe tests/helpers/*.oboe selfhost/*.oboe \
+               selfhost/mini/*.oboe "$tmp/pe"/*.oboe; do
+        n=$((n+1))
+        a="$("$OBOE" dump-ast "$src" 2>&1; printf 'rc=%s' "$?")"
+        b="$("$tmp/oboec" --dump-ast "$src" 2>&1; printf 'rc=%s' "$?")"
+        [ "$a" = "$b" ] || diffs="$diffs $src"
+        printf '%s\n' "$a" | grep -oE '\b(EXPR|STMT|DECL|FOR)_[A-Z_]+' \
+            >> "$tmp/kinds" || true
+    done
+    if [ -z "$diffs" ]; then
+        echo "PASS selfhost_parser ($n files)"
+        pass=$((pass+1))
+    else
+        echo "FAIL selfhost_parser (differs:$diffs)"
+        fail=$((fail+1))
+    fi
+
+    # As with the tokens: agreement over kinds the corpus never builds proves
+    # nothing, so every ExprKind, StmtKind, DeclKind and ForIterKind in ast.h
+    # has to appear in one of the dumps above.
+    { sed -n '/^typedef enum {/,/} ExprKind;/p;/^typedef enum {/,/} StmtKind;/p
+              /^typedef enum {/,/} DeclKind;/p' src/ast.h
+      grep 'ForIterKind' src/ast.h
+    } | grep -oE '\b(EXPR|STMT|DECL|FOR)_[A-Z_]+' | sort -u > "$tmp/kwant"
+    sort -u "$tmp/kinds" > "$tmp/kgot"
+    missing="$(comm -23 "$tmp/kwant" "$tmp/kgot" | tr '\n' ' ')"
+    if [ -z "$missing" ]; then
+        echo "PASS selfhost_parser_coverage ($(wc -l < "$tmp/kwant" | tr -d ' ') AST kinds)"
+        pass=$((pass+1))
+    else
+        echo "FAIL selfhost_parser_coverage (no corpus file produces: $missing)"
+        fail=$((fail+1))
+    fi
 else
     echo "FAIL selfhost_lexer (could not build selfhost/main.oboe)"
     fail=$((fail+1))

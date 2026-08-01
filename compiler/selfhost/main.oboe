@@ -13,14 +13,15 @@
 //
 // oboec -- the Oboe-written compiler front end. It is being brought up one
 // stage at a time against the C compiler in src/, each stage gated on emitting
-// bytes identical to its C counterpart. Today it stops after the lexer.
+// bytes identical to its C counterpart. Today it stops after the parser.
 import os
 import lex_all from lexer
-import dump_tokens from dump
+import parse_program from parser
+import dump_tokens, dump_ast from dump
 import fail from diag
 
 func usage() {
-	eprint("usage: oboec --dump-tokens <file>")
+	eprint("usage: oboec --dump-tokens|--dump-ast <file>")
 	os.exit(2)
 }
 
@@ -44,6 +45,11 @@ func main(array args) {
 			i = i + 1
 			continue
 		}
+		if (a == "--dump-ast") {
+			dump = "ast"
+			i = i + 1
+			continue
+		}
 		if (a.starts_with("-")) {
 			usage()
 		}
@@ -54,8 +60,12 @@ func main(array args) {
 		usage()
 	}
 
+	// one write, not one per token or node: the corpus files run to tens of
+	// thousands of either
 	var toks = lex_all(read_source(input))
-	// one write, not one per token: the corpus files run to tens of
-	// thousands of tokens
-	write(dump_tokens(toks))
+	if (dump == "tokens") {
+		write(dump_tokens(toks))
+	} else {
+		write(dump_ast(parse_program(toks, input)))
+	}
 }

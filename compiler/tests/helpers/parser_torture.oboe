@@ -1,0 +1,237 @@
+// Corners of the grammar that the golden tests do not otherwise reach, kept
+// for the selfhost_parser gate to diff the two parsers over. Never run: it is
+// under tests/helpers/, which the suite does not glob, and several lines here
+// are deliberately strange rather than useful.
+//
+// A change that makes this file stop parsing is a real signal -- check which
+// corner moved before editing it.
+
+// declaration forms
+import m
+import m as alias
+import one from m
+import one, two, three from m
+cimport strlen from "libc.so.6"
+
+// every builtin operator, overloaded, plus a custom one
+operator ||> (int a, int b) { return a * 10 + b }
+operator <=> (a, b) { return 0 }
+
+event Empty = event()
+event Loaded = event(str name, int size)
+
+on Empty { }
+on Loaded as e { print(e.name) }
+
+class Bare { }
+
+class Full extends Bare {
+	static int count = 0
+	private const var tag = "t"
+	const str named = "n"
+	var untyped
+	int typed
+	static private const var everything = 1
+
+	func init(this) { }
+	func init(this, int a) { }
+	private static int func helper(int a = 1, int b = 2) { return a }
+	// a parameter named `this` is the one thing allowed to follow a
+	// defaulted parameter without a default of its own
+	func odd(this, int a = 1, this) { return a }
+	func fields(this) {
+		// `var this.x = v` is a field assignment, not a declaration
+		var this.a = 1
+		this.b = 2
+	}
+	operator + (this, Full o) { return o }
+	operator - (this, Full o) { return o }
+	// only a single operator token can follow `operator`, so there is no
+	// spelling of an index overload: `operator []` takes `[` as the symbol
+	// and then fails on `]` where it wants the parameter list
+}
+
+// a top-level statement, with and without a semicolon
+var top = 1;
+var top2 = 2
+
+int func typed_free() { return 0 }
+
+func precedence() {
+	// every level, in one expression each
+	var a = 1 + 2 * 3 % 4 - 5 / 6
+	var b = "ab" x 3
+	var c = 1 << 2 >> 3
+	var d = 1 < 2 <= 3 > 4 >= 5
+	var e = 1 == 2 != 3
+	var f = 1 & 2 ^ 3 | 4
+	var g = 1 ||> 2 <=> 3
+	var h = true and false or true
+	var i = true && false || true
+	var j = null ?? 0
+	var k = true ? 1 : false ? 2 : 3   // right-associative
+	var l = ~1
+	var m = !true
+	var n = -1
+	var o = - -1
+	var p = !!true
+	var q = 1 is int
+	var r = 1 + 2 is int              // `is` binds tighter than comparison
+	// chained assignment is right-associative
+	var s = 0
+	var t = 0
+	s = t = 9
+}
+
+func postfix_chains(d) {
+	d.a.b.c
+	d?.a?.b
+	d.a?.b.c
+	d[0][1][2]
+	d.f()()
+	d.f()[0].g()
+	d[0].f()?.g[1]
+}
+
+func calls() {
+	f()
+	f(1)
+	f(1, 2)
+	f(a = 1)
+	f(1, b = 2)
+	f(a = 1, b = 2)
+	// inside an array literal the same syntax is an assignment expression,
+	// not a by-name argument
+	var arr = [a = 1]
+	var nested = [[1, [2, [3]]], []]
+	var dict = {"k": {"k2": [1]}, "e": {}}
+	var empty_arr = []
+	var empty_dict = {}
+}
+
+func strings() {
+	var plain = "no interpolation"
+	var one = "a${1}b"
+	var edges = "${1}${2}"
+	var only = "${x}"
+	var braces = "${ {"a": 1}["a"] }"
+	var nested = "outer ${ "inner ${1 + 1}" } end"
+	// an unterminated `${` scans past the closing quote for its `}` and so
+	// swallows whatever follows it -- see fail_unterminated_interp
+	var escapes = "\n\t\r\"\\ \$ \q"
+	var dollar_no_brace = "100$ or $x"
+	var empty = ""
+}
+
+func numbers() {
+	var i = 0
+	var big = 9223372036854775807
+	var f1 = 1.0
+	var f2 = 0.1
+	var f3 = 0.30000000000000004
+	var f4 = 3.14159265358979
+	// a '.' only starts a fraction when a digit follows
+	var member = 1.str()
+}
+
+func control() {
+	if (true) { } else if (false) { } else { }
+	if (true) { }
+	while (false) { break }
+	while (false) { continue }
+	for (i in range(0, 1)) { }
+	for (v in [1]) { }
+	for (k, v in pairs({"a": 1})) { }
+	for (i, v in ipairs([1])) { }
+	switch 1 { }
+	switch 1 { case 1 { } case 2 { } }
+	{ var scoped = 1 }
+	try { } catch (Exception e) { }
+	try { } finally { }
+	try { } catch (A a) { } catch (b.c.d.E e) { } finally { }
+	throw ValueError
+	throw ValueError()
+	throw a.b.c.ValueError("msg")
+	return
+}
+
+// Every point at which the parser records a line number, with the token it
+// records split onto a line of its own. Written normally, an operator and its
+// operands share a line and a wrong capture point is invisible; here each one
+// is pinned. Ugly on purpose -- see the note at the top of the file.
+func line_capture() {
+	var add = 1
+		+
+		2
+	var mul = 1
+		*
+		2
+	var rep = "a"
+		x
+		3
+	var shift = 1
+		<<
+		2
+	var cmp = 1
+		<
+		2
+	var eq = 1
+		==
+		2
+	var band = 1
+		&
+		2
+	var bxor = 1
+		^
+		2
+	var bor = 1
+		|
+		2
+	var custom = 1
+		||>
+		2
+	var conj = true
+		and
+		false
+	var disj = true
+		or
+		false
+	var nullish = null
+		??
+		1
+	var typecheck = add
+		is
+		int
+	var tern = true
+		?
+		1
+		:
+		2
+	var neg = -
+		1
+	var not = !
+		true
+	var bnot = ~
+		1
+	var field = line_capture
+		.
+		len
+	var call = line_capture
+		(
+		)
+	var index = [1]
+		[
+		0
+		]
+	var assigned = 0
+	assigned
+		=
+		1
+
+	// a type is only a type when it shares a line with the name, so this is
+	// an untyped `lonely`, not a variable of type `lonely`
+	var lonely
+	add
+}
+
+func empty() { }

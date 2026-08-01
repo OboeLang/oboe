@@ -12,7 +12,9 @@
  * GNU General Public License for more details.
  */
 #include "codegen.h"
+#include "dump.h"
 #include "lexer.h"
+#include "parser.h"
 #include "pkg.h"
 #include "projectedit.h"
 #include "projectjson.h"
@@ -850,39 +852,12 @@ static void cmd_remove(const char *name)
 		printf("oboe: nothing to remove for '%s'.\n", name);
 }
 
-/* ---- dump-tokens ----
-   The gate for the Oboe-written lexer. One line per token, `<TYPE> <line>
-   <text>`, with the lexeme escaped so no token can ever span a line. The
-   selfhost lexer prints the same thing and the suite asserts the two agree
-   byte for byte over the whole corpus. Deliberately absent from the usage
-   line: it is a development gate, not part of the CLI. */
-static void dump_escape(const char *s, FILE *out)
-{
-	for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
-		switch (*p) {
-		case '\\':
-			fputs("\\\\", out);
-			break;
-		case '\n':
-			fputs("\\n", out);
-			break;
-		case '\t':
-			fputs("\\t", out);
-			break;
-		case '\r':
-			fputs("\\r", out);
-			break;
-		default:
-			/* octal, not \xNN: C's hex escape is greedy and would
-			   swallow a following hex digit */
-			if (*p < 0x20 || *p == 0x7f)
-				fprintf(out, "\\%03o", *p);
-			else
-				fputc(*p, out);
-		}
-	}
-}
-
+/* ---- dump-tokens / dump-ast ----
+   The gates for the Oboe-written compiler: selfhost/ prints the same bytes for
+   the same input and the suite diffs the two over the whole corpus. The
+   serializers themselves live in dump.c, next to their twins' definition.
+   Both are deliberately absent from the usage line -- they are development
+   gates, not part of the CLI. */
 static int cmd_dump_tokens(const char *path)
 {
 	char *src = read_whole_file(path);
@@ -892,11 +867,20 @@ static int cmd_dump_tokens(const char *path)
 	}
 	int n = 0;
 	Token *toks = lex_all(src, &n);
-	for (int i = 0; i < n; i++) {
-		printf("%s %d ", token_type_name(toks[i].type), toks[i].line);
-		dump_escape(toks[i].text ? toks[i].text : "", stdout);
-		putchar('\n');
+	dump_tokens(toks, n, stdout);
+	return 0;
+}
+
+static int cmd_dump_ast(const char *path)
+{
+	char *src = read_whole_file(path);
+	if (!src) {
+		fprintf(stderr, "oboe: cannot read '%s'\n", path);
+		return 1;
 	}
+	int n = 0;
+	Token *toks = lex_all(src, &n);
+	dump_ast(parse_program(toks, n, path), stdout);
 	return 0;
 }
 
@@ -991,6 +975,13 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		return cmd_dump_tokens(argv[2]);
+	}
+	if (strcmp(cmd, "dump-ast") == 0) {
+		if (argc < 3) {
+			fprintf(stderr, "oboe: dump-ast needs a file\n");
+			return 1;
+		}
+		return cmd_dump_ast(argv[2]);
 	}
 
 	fprintf(stderr, "oboe: unknown command '%s'\n", cmd);

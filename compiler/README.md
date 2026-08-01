@@ -10,12 +10,18 @@ Produces `bin/oboe`. Run the test suite with `make test`: each `tests/*.oboe` is
 
 ## Self-hosting
 
-`selfhost/` is the compiler currently being rewritten in Oboe, still transpiling to C handing the C to gcc. Only the compiler proper is moving; the CLI, the package manager, the katare client and the vendored wire-format code stay in C, but I'd eventually like to move them to Oboe..
+`selfhost/` is the compiler currently being rewritten in Oboe, still transpiling to C handing the C to gcc. Only the compiler proper is moving; the CLI, the package manager, the katare client and the vendored wire-format code stay in C, but I'd eventually like to move them to Oboe.
 
-- `selfhost/{lexer,dump,diag,main}.oboe` -- `oboec`, the port in progress. The lexer is done; the parser and codegen are not.
+- `selfhost/{lexer,parser,dump,diag,main}.oboe` -- `oboec`, the port in progress. The lexer and parser are done; codegen is not.
 - `selfhost/mini/` -- a compiler for a small Oboe-like subset, written in Oboe. It was the spike that proved the language could host a compiler at all, and it stays as a cheap regression test engine for the features that made that possible (break/continue, short-circuit `and`/`or`, `ord`, dict-shaped AST nodes, `eprint` + `os.exit`).
 
-Each stage is gated on emitting bytes identical to its C counterpart, which is what the hidden `oboe dump-tokens <file>` command is for -- it prints one line per token, and `selfhost_lexer` asserts `oboec --dump-tokens` matches it exactly over every Oboe file in the tree. `selfhost_lexer_coverage` then asserts the corpus actually produces every `TokenType`, so agreement is never vacuous.
+I'm testing this based on the selfhoster emitting bytes identical to its C counterpart, which is what the hidden `oboe dump-tokens <file>` and `oboe dump-ast <file>` commands are for. Both serializers live in `src/dump.c`, next to the definition of the format their twins in `selfhost/dump.oboe` have to reproduce; neither command is in the usage line, since they are development tools rather than part of the CLI.
+
+- `selfhost_lexer`: `oboec --dump-tokens` must match `oboe dump-tokens` byte for byte, exit status included, over every Oboe file in the tree.
+- `selfhost_parser`: the same for `--dump-ast`, over that corpus plus every malformed input in `tests/helpers/parse_errors.txt`, so the diagnostics are compared as closely as the trees are. The dump carries each node's kind, line and every field of its arm in `ast.h`.
+- `selfhost_lexer_coverage` / `selfhost_parser_coverage`: agreement over constructs the corpus never builds proves nothing, so these assert that it produces every `TokenType`, and every `ExprKind`/`StmtKind`/`DeclKind`/`ForIterKind`, respectively. Both derive the expected set from the headers, so adding a kind that nothing exercises fails the suite.
+
+`tests/helpers/parser_torture.oboe` tests the grammar corners. Much of it is deliberately strange, in particular a block of expressions split so that each operator sits on its own line, which is the only way a wrong line-capture point in the parser becomes visible.
 
 ## Usage
 

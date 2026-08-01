@@ -19,3 +19,10 @@ func fail(str msg) {
 	eprint("oboe: " + msg)
 	os.exit(1)
 }
+
+// For a diagnostic that already carries its own `file:line:` prefix, as the
+// parser's do. Printed verbatim, and with the same exit status as fail().
+func die(str msg) {
+	eprint(msg)
+	os.exit(1)
+}

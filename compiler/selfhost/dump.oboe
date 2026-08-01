@@ -22,9 +22,10 @@ func oct3(int n) {
 	return str(n / 64) + str((n / 8) % 8) + str(n % 8)
 }
 
-// Escapes a lexeme so that a token can never span a line of the dump. Bytes
-// over 127 pass through untouched: the dump is compared byte for byte, so
-// there is nothing to gain by spelling out UTF-8.
+// Escapes a value so that it can never span a line of a dump, and so that a
+// quoted AST field ends where its closing quote says it does. Bytes over 127
+// pass through untouched: the dump is compared byte for byte, so there is
+// nothing to gain by spelling out UTF-8.
 func dump_escape(str s) {
 	var out = []
 	var n = s.len()
@@ -40,6 +41,8 @@ func dump_escape(str s) {
 			out.push("\\t")
 		} else if (v == 13) {
 			out.push("\\r")
+		} else if (c == "\"") {
+			out.push("\\\"")
 		} else if (v < 32 or v == 127) {
 			out.push("\\" + oct3(v))
 		} else {
@@ -58,4 +61,330 @@ func dump_tokens(array toks) {
 			 dump_escape(t["text"]) + "\n")
 	}
 	return out.join("")
+}
+
+// ---- the AST ----
+// An indented tree, two spaces per level, one node per line. The shape is
+// specified next to dump_ast in src/dump.c; this half only has to reproduce
+// it. The pieces are collected in an array and joined once at the end, since
+// growing a string in a loop over a whole file's AST is quadratic.
+
+var OUT = []
+
+func emit(str s) {
+	OUT.push(s)
+}
+
+func ind(int depth) {
+	emit("  ".repeat(depth))
+}
+
+func b01(flag) {
+	return flag ? "1" : "0"
+}
+
+func field_str(str key, val) {
+	emit(" " + key + "=")
+	if (val == null) {
+		emit("-")
+	} else {
+		emit("\"" + dump_escape(val) + "\"")
+	}
+}
+
+// str() on a float is already the shortest representation that round-trips,
+// with ".0" kept on whole numbers -- which is exactly what field_double in
+// src/dump.c reimplements, so the two agree without further work.
+func field_double(str key, value) {
+	emit(" " + key + "=" + str(value))
+}
+
+// A labelled list of statements. The label always prints, so an empty else or
+// finally is visible as itself rather than as nothing.
+func dump_body(str label, array body, int depth) {
+	ind(depth)
+	emit(label + "\n")
+	for (s in body) {
+		dump_stmt(s, depth + 1)
+	}
+}
+
+// A labelled optional expression: nothing at all when it is absent.
+func dump_opt(str label, e, int depth) {
+	if (e == null) {
+		return
+	}
+	ind(depth)
+	emit(label + "\n")
+	dump_expr(e, depth + 1)
+}
+
+func dump_params(array params, int depth) {
+	ind(depth)
+	emit("params\n")
+	for (p in params) {
+		ind(depth + 1)
+		emit("param")
+		field_str("name", p["name"])
+		field_str("type", p["type_name"])
+		emit("\n")
+		dump_opt("default", p["default_value"], depth + 2)
+	}
+}
+
+func dump_expr(e, int depth) {
+	ind(depth)
+	var kind = e["kind"]
+	emit(kind + " line=" + str(e["line"]))
+	if (kind == "EXPR_INT") {
+		emit(" value=" + str(e["int_val"]) + "\n")
+	} else if (kind == "EXPR_FLOAT") {
+		field_double("value", e["float_val"])
+		emit("\n")
+	} else if (kind == "EXPR_BOOL") {
+		emit(" value=" + b01(e["bool_val"]) + "\n")
+	} else if (kind == "EXPR_NULL") {
+		emit("\n")
+	} else if (kind == "EXPR_STRING") {
+		emit("\n")
+		for (part in e["str_parts"]) {
+			ind(depth + 1)
+			if (part["is_expr"]) {
+				emit("part expr\n")
+				dump_expr(part["expr"], depth + 2)
+			} else {
+				emit("part lit")
+				field_str("text", part["literal"])
+				emit("\n")
+			}
+		}
+	} else if (kind == "EXPR_IDENT") {
+		field_str("name", e["ident"])
+		emit("\n")
+	} else if (kind == "EXPR_ARRAY") {
+		emit("\n")
+		for (item in e["items"]) {
+			dump_expr(item, depth + 1)
+		}
+	} else if (kind == "EXPR_DICT") {
+		emit("\n")
+		var keys = e["keys"]
+		var values = e["values"]
+		var i = 0
+		while (i < keys.len()) {
+			ind(depth + 1)
+			emit("entry\n")
+			dump_expr(keys[i], depth + 2)
+			dump_expr(values[i], depth + 2)
+			i = i + 1
+		}
+	} else if (kind == "EXPR_BINARY") {
+		field_str("op", e["op"])
+		emit("\n")
+		dump_expr(e["l"], depth + 1)
+		dump_expr(e["r"], depth + 1)
+	} else if (kind == "EXPR_UNARY") {
+		field_str("op", e["op"])
+		emit("\n")
+		dump_expr(e["operand"], depth + 1)
+	} else if (kind == "EXPR_CALL") {
+		emit("\n")
+		ind(depth + 1)
+		emit("callee\n")
+		dump_expr(e["callee"], depth + 2)
+		ind(depth + 1)
+		emit("args\n")
+		var args = e["args"]
+		var names = e["arg_names"]
+		var i = 0
+		while (i < args.len()) {
+			ind(depth + 2)
+			emit("arg")
+			field_str("name", names[i])
+			emit("\n")
+			dump_expr(args[i], depth + 3)
+			i = i + 1
+		}
+	} else if (kind == "EXPR_FIELD" or kind == "EXPR_SAFE_FIELD") {
+		field_str("name", e["name"])
+		emit("\n")
+		dump_expr(e["obj"], depth + 1)
+	} else if (kind == "EXPR_INDEX") {
+		emit("\n")
+		dump_expr(e["arr"], depth + 1)
+		dump_expr(e["idx"], depth + 1)
+	} else if (kind == "EXPR_IS") {
+		field_str("type", e["type_name"])
+		emit("\n")
+		dump_expr(e["value"], depth + 1)
+	} else if (kind == "EXPR_ASSIGN") {
+		emit("\n")
+		dump_expr(e["target"], depth + 1)
+		dump_expr(e["value"], depth + 1)
+	} else if (kind == "EXPR_TERNARY") {
+		emit("\n")
+		dump_expr(e["cond"], depth + 1)
+		dump_expr(e["then_e"], depth + 1)
+		dump_expr(e["else_e"], depth + 1)
+	}
+}
+
+func dump_stmt(s, int depth) {
+	ind(depth)
+	var kind = s["kind"]
+	emit(kind + " line=" + str(s["line"]))
+	if (kind == "STMT_LET") {
+		field_str("name", s["name"])
+		field_str("type", s["type_name"])
+		emit(" const=" + b01(s["is_const"]) + "\n")
+		dump_opt("init", s["init"], depth + 1)
+	} else if (kind == "STMT_EXPR") {
+		emit("\n")
+		dump_opt("expr", s["expr"], depth + 1)
+	} else if (kind == "STMT_RETURN") {
+		emit("\n")
+		dump_opt("value", s["value"], depth + 1)
+	} else if (kind == "STMT_IF") {
+		emit("\n")
+		dump_opt("cond", s["cond"], depth + 1)
+		dump_body("then", s["then_body"], depth + 1)
+		dump_body("else", s["else_body"], depth + 1)
+	} else if (kind == "STMT_WHILE") {
+		emit("\n")
+		dump_opt("cond", s["cond"], depth + 1)
+		dump_body("body", s["body"], depth + 1)
+	} else if (kind == "STMT_FOR") {
+		field_str("var", s["var_name"])
+		field_str("var2", s["var2_name"])
+		emit(" iter=" + s["kind_iter"] + "\n")
+		dump_opt("range_a", s["range_a"], depth + 1)
+		dump_opt("range_b", s["range_b"], depth + 1)
+		dump_opt("iterable", s["iterable"], depth + 1)
+		dump_body("body", s["body"], depth + 1)
+	} else if (kind == "STMT_SWITCH") {
+		emit("\n")
+		dump_opt("subject", s["subject"], depth + 1)
+		ind(depth + 1)
+		emit("cases\n")
+		for (c in s["cases"]) {
+			ind(depth + 2)
+			emit("case\n")
+			dump_opt("value", c["value"], depth + 3)
+			dump_body("body", c["body"], depth + 3)
+		}
+	} else if (kind == "STMT_TRY") {
+		emit("\n")
+		dump_body("body", s["body"], depth + 1)
+		ind(depth + 1)
+		emit("catches\n")
+		for (c in s["catches"]) {
+			ind(depth + 2)
+			emit("catch")
+			field_str("type", c["type_name"])
+			field_str("var", c["var_name"])
+			emit("\n")
+			dump_body("body", c["body"], depth + 3)
+		}
+		dump_body("finally", s["finally_body"], depth + 1)
+	} else if (kind == "STMT_THROW") {
+		field_str("type", s["type_name"])
+		emit("\n")
+		dump_opt("value", s["value"], depth + 1)
+	} else if (kind == "STMT_BLOCK") {
+		emit("\n")
+		dump_body("body", s["body"], depth + 1)
+	} else {
+		// STMT_BREAK / STMT_CONTINUE carry nothing but their line
+		emit("\n")
+	}
+}
+
+func dump_func(str label, f, int depth) {
+	ind(depth)
+	emit(label)
+	field_str("name", f["name"])
+	emit(" line=" + str(f["line"]))
+	field_str("ret", f["return_type"])
+	emit(" static=" + b01(f["is_static"]) + " private=" +
+	     b01(f["is_private"]))
+	field_str("op", f["op_symbol"])
+	emit("\n")
+	dump_params(f["params"], depth + 1)
+	dump_body("body", f["body"], depth + 1)
+}
+
+func dump_class(c, int depth) {
+	ind(depth)
+	emit("DECL_CLASS")
+	field_str("name", c["name"])
+	field_str("parent", c["parent_name"])
+	emit(" line=" + str(c["line"]) + "\n")
+	ind(depth + 1)
+	emit("fields\n")
+	for (f in c["fields"]) {
+		ind(depth + 2)
+		emit("field")
+		field_str("name", f["name"])
+		field_str("type", f["type_name"])
+		emit(" static=" + b01(f["is_static"]) + " private=" +
+		     b01(f["is_private"]) + " const=" + b01(f["is_const"]) +
+		     "\n")
+		dump_opt("init", f["init"], depth + 3)
+	}
+	ind(depth + 1)
+	emit("methods\n")
+	for (m in c["methods"]) {
+		dump_func("method", m, depth + 2)
+	}
+}
+
+func dump_ast(array decls) {
+	OUT = []
+	emit("program\n")
+	for (d in decls) {
+		var kind = d["kind"]
+		if (kind == "DECL_FUNC" or kind == "DECL_OPERATOR") {
+			dump_func(kind, d["func"], 1)
+		} else if (kind == "DECL_CLASS") {
+			dump_class(d["klass"], 1)
+		} else if (kind == "DECL_IMPORT") {
+			ind(1)
+			emit("DECL_IMPORT")
+			field_str("module", d["module"])
+			field_str("alias", d["alias"])
+			emit("\n")
+			ind(2)
+			emit("members\n")
+			for (m in d["members"]) {
+				ind(3)
+				emit("member")
+				field_str("name", m)
+				emit("\n")
+			}
+		} else if (kind == "DECL_STMT") {
+			ind(1)
+			emit("DECL_STMT\n")
+			dump_stmt(d["stmt"], 2)
+		} else if (kind == "DECL_EVENT") {
+			ind(1)
+			emit("DECL_EVENT")
+			field_str("name", d["name"])
+			emit(" line=" + str(d["line"]) + "\n")
+			dump_params(d["params"], 2)
+		} else if (kind == "DECL_ON") {
+			ind(1)
+			emit("DECL_ON")
+			field_str("event", d["event_name"])
+			field_str("var", d["var_name"])
+			emit(" line=" + str(d["line"]) + "\n")
+			dump_body("body", d["body"], 2)
+		} else if (kind == "DECL_CIMPORT") {
+			ind(1)
+			emit("DECL_CIMPORT")
+			field_str("name", d["name"])
+			field_str("lib", d["lib"])
+			emit(" line=" + str(d["line"]) + "\n")
+		}
+	}
+	return OUT.join("")
 }

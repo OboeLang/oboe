@@ -1,0 +1,91 @@
+# Malformed inputs for the selfhost_parser gate: one per line, as
+# `<name><TAB><source>`. The suite writes each to its own file and requires the
+# two parsers to produce the identical diagnostic *and* the identical exit
+# status. Blank lines and lines starting with # are skipped.
+#
+# Between them these reach every parse diagnostic in src/parser.c that can be
+# reached at all. Four cannot, because the test that selects the branch has
+# already established what the expect() re-checks:
+#
+#   "expected '(' after range"      looks_like_call_to() required the '('
+#   "expected '(' " after pairs     likewise
+#   "expected 'from'"               is_member_list required the 'from'
+#   "expected 'func'"               parse_func is only called under check(T_FUNC)
+#   "expected imported member name" the lookahead scan and the re-parse walk
+#                                   the same `IDENT (, IDENT)*` run
+#
+# Keeping them as one line each is deliberate: a parse error's line number is
+# part of what is compared, and a one-line case makes it obvious.
+
+# ---- expressions
+closedelim	func f() { g(1, 2 }
+noexpr	func f() { var x = }
+dotname	func f() { a. = 1 }
+qdotname	func f() { a?.() }
+rparen	func f() { (1 + 2 }
+rbracket	func f() { a[1 }
+dictcolon	func f() { var d = {"a" 1} }
+dictclose	func f() { var d = {"a": 1 }
+istype	func f() { if (x is 3) {} }
+terncolon	func f() { var y = a ? b c }
+
+# ---- interpolation
+emptyinterp	func f() { print("${}") }
+interperr	func f() { print("${ 1 + }") }
+nestinterp	func f() { print("${ "${ ] }" }") }
+unterminterp	func f() { var x = "${x" }
+bareinterp	func f() { var x = "${" }
+
+# ---- declarations and parameters
+typedname	func f() { var 3 = 1 }
+paramlp	func f{ }
+defaultorder	func f(int a = 1, int b) { }
+funcname	func () { }
+opsym	operator ( a, b) { }
+
+# ---- control flow
+iflp	func f() { if x {} }
+whilelp	func f() { while x {} }
+forlp	func f() { for x in y {} }
+loopvar	func f() { for (3 in y) {} }
+loopvar2	func f() { for (k, 3 in pairs(y)) {} }
+forin	func f() { for (k y) {} }
+rangecomma	func f() { for (i in range(1 2)) {} }
+pairsneed2	func f() { for (k in pairs(d)) {} }
+twovars	func f() { for (k, v in d) {} }
+switchbrace	func f() { switch x case 1 {} }
+switchcase	func f() { switch x { 1 {} } }
+switchclose	func f() { switch x { case 1 {}
+blockbrace	func f() print(1)
+blockclose	func f() { print(1)
+
+# ---- exceptions
+catchlp	func f() { try {} catch e) {} }
+catchtype	func f() { try {} catch (3 e) {} }
+catchdot	func f() { try {} catch (os.) {} }
+catchvar	func f() { try {} catch (Error) {} }
+throwtype	func f() { throw 3 }
+# a dot not followed by a name is left alone rather than eaten as part of the
+# dotted exception type, so the error lands on the '.' at the next statement
+throwdot	func f() { throw X.() }
+
+# ---- classes
+classname	class { }
+parentname	class A extends { }
+classbrace	class A ( }
+classmember	class A { 3 }
+classclose	class A { func f(this) { }
+
+# ---- imports and cimports
+importmod	import 3
+importalias	import m as 3
+cimportname	cimport 3 from "l"
+cimportfrom	cimport s "l"
+cimportlib	cimport s from l
+
+# ---- events
+eventname	event = event()
+eventassign	event E event()
+eventctor	event E = 3
+onname	on { }
+onvar	on E as { }

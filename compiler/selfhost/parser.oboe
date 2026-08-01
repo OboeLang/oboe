@@ -1,0 +1,1091 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// The parser, ported from src/parser.c. Every AST node is a dict whose "kind"
+// is the C enum constant's own spelling, and whose remaining keys are the
+// names of the fields in the matching arm of the union in src/ast.h:
+//
+//     { "kind": "EXPR_BINARY", "line": 4, "op": "+", "l": ..., "r": ... }
+//
+// Dicts rather than classes because a class field access has to know its
+// class statically, which an AST walker never does. Absent optional fields
+// are stored as an explicit null, mirroring C's calloc'd structs, so a reader
+// never has to distinguish "unset" from "set to nothing".
+//
+// The two parsers are diffed through selfhost/dump.oboe against src/dump.c --
+// see `oboe dump-ast` and the selfhost_parser test.
+import die from diag
+import lex_all from lexer
+
+class Parser {
+	func init(this, array toks, str filename) {
+		this.toks = toks
+		this.count = toks.len()
+		this.pos = 0
+		this.filename = filename
+	}
+}
+
+// ---- cursor ----
+
+func peek(Parser p) {
+	return p.toks[p.pos]
+}
+
+// Clamped to the last token, which is always T_EOF, so lookahead past the end
+// reads as end-of-file rather than running off the array.
+func peek_at(Parser p, int off) {
+	var i = p.pos + off
+	if (i >= p.count) {
+		i = p.count - 1
+	}
+	return p.toks[i]
+}
+
+func advance(Parser p) {
+	var t = p.toks[p.pos]
+	if (p.pos < p.count - 1) {
+		p.pos = p.pos + 1
+	}
+	return t
+}
+
+func check(Parser p, str t) {
+	return p.toks[p.pos]["type"] == t
+}
+
+func match(Parser p, str t) {
+	if (check(p, t)) {
+		advance(p)
+		return true
+	}
+	return false
+}
+
+// Reports against the token under the cursor, not the one that prompted the
+// call -- parse_operator_decl below depends on that difference.
+func fail(Parser p, str msg) {
+	var t = peek(p)
+	die(p.filename + ":" + str(t["line"]) + ": parse error: " + msg +
+	    " (got '" + t["text"] + "')")
+}
+
+func expect(Parser p, str t, str what) {
+	if (!check(p, t)) {
+		fail(p, what)
+	}
+	return advance(p)
+}
+
+func new_expr(str kind, int line) {
+	return { "kind": kind, "line": line }
+}
+
+func new_stmt(str kind, int line) {
+	return { "kind": kind, "line": line }
+}
+
+// ---- string interpolation ----
+// `${...}` was kept verbatim by the lexer, braces and all; it is lexed and
+// parsed here, as its own little translation unit. The sub-lexer starts its
+// line count at 1, so an interpolated expression's nodes carry a line number
+// relative to the literal rather than to the file. That is what the C parser
+// does too, and the dump pins it.
+func parse_string_literal_parts(Parser p, str raw) {
+	var parts = []
+	var len = raw.len()
+	var i = 0
+	var litstart = 0
+	while (i < len) {
+		if (raw.substr(i, 1) == "$" and i + 1 < len and
+		    raw.substr(i + 1, 1) == "{") {
+			if (i > litstart) {
+				parts.push({ "is_expr": false,
+					     "literal": raw.substr(litstart,
+								   i - litstart),
+					     "expr": null })
+			}
+			var start = i + 2
+			var depth = 1
+			var j = start
+			while (j < len and depth > 0) {
+				var cj = raw.substr(j, 1)
+				if (cj == "{") {
+					depth = depth + 1
+				} else if (cj == "}") {
+					depth = depth - 1
+				}
+				if (depth > 0) {
+					j = j + 1
+				}
+			}
+			var sub = raw.substr(start, j - start)
+			var sp = Parser(lex_all(sub), p.filename)
+			parts.push({ "is_expr": true, "literal": null,
+				     "expr": parse_expression(sp) })
+			i = j + 1
+			litstart = i
+		} else {
+			i = i + 1
+		}
+	}
+	if (i > litstart) {
+		parts.push({ "is_expr": false,
+			     "literal": raw.substr(litstart, i - litstart),
+			     "expr": null })
+	}
+	return parts
+}
+
+// ---- expressions ----
+
+// When want_names is true (a call's argument list, never an array literal), an
+// argument written `name = value` is recorded as a by-name argument. This is
+// why `f(x = 1)` binds the parameter `x` rather than assigning to a variable
+// named x and passing the result -- and why `[x = 1]` does the opposite.
+// Returns { "items": [...], "names": [...] }, the two parallel to each other.
+func parse_arg_list(Parser p, str close, bool want_names) {
+	var items = []
+	var names = []
+	if (!check(p, close)) {
+		var more = true
+		while (more) {
+			var name = null
+			if (want_names and check(p, "T_IDENT") and
+			    peek_at(p, 1)["type"] == "T_ASSIGN") {
+				name = advance(p)["text"]
+				advance(p) // '='
+			}
+			names.push(name)
+			items.push(parse_expression(p))
+			more = match(p, "T_COMMA")
+		}
+	}
+	expect(p, close, "expected closing delimiter")
+	return { "items": items, "names": names }
+}
+
+func parse_primary(Parser p) {
+	var t = peek(p)
+	var line = t["line"]
+	if (match(p, "T_INT")) {
+		var e = new_expr("EXPR_INT", line)
+		e["int_val"] = t["text"].to_int()
+		return e
+	}
+	if (match(p, "T_FLOAT")) {
+		var e = new_expr("EXPR_FLOAT", line)
+		e["float_val"] = t["text"].to_float()
+		return e
+	}
+	if (match(p, "T_TRUE")) {
+		var e = new_expr("EXPR_BOOL", line)
+		e["bool_val"] = true
+		return e
+	}
+	if (match(p, "T_FALSE")) {
+		var e = new_expr("EXPR_BOOL", line)
+		e["bool_val"] = false
+		return e
+	}
+	if (match(p, "T_NULL")) {
+		return new_expr("EXPR_NULL", line)
+	}
+	if (check(p, "T_STRING")) {
+		var tok = advance(p)
+		var e = new_expr("EXPR_STRING", line)
+		e["str_parts"] = parse_string_literal_parts(p, tok["text"])
+		return e
+	}
+	if (check(p, "T_IDENT")) {
+		var tok = advance(p)
+		var e = new_expr("EXPR_IDENT", line)
+		e["ident"] = tok["text"]
+		return e
+	}
+	if (match(p, "T_LPAREN")) {
+		var e = parse_expression(p)
+		expect(p, "T_RPAREN", "expected ')'")
+		return e
+	}
+	if (match(p, "T_LBRACKET")) {
+		var got = parse_arg_list(p, "T_RBRACKET", false)
+		var e = new_expr("EXPR_ARRAY", line)
+		e["items"] = got["items"]
+		return e
+	}
+	if (match(p, "T_LBRACE")) {
+		var keys = []
+		var values = []
+		if (!check(p, "T_RBRACE")) {
+			var more = true
+			while (more) {
+				keys.push(parse_expression(p))
+				expect(p, "T_COLON",
+				       "expected ':' in dict literal")
+				values.push(parse_expression(p))
+				more = match(p, "T_COMMA")
+			}
+		}
+		expect(p, "T_RBRACE", "expected '}'")
+		var e = new_expr("EXPR_DICT", line)
+		e["keys"] = keys
+		e["values"] = values
+		return e
+	}
+	fail(p, "expected expression")
+	return null
+}
+
+func parse_postfix(Parser p) {
+	var e = parse_primary(p)
+	while (true) {
+		var line = peek(p)["line"]
+		if (match(p, "T_DOT")) {
+			var name = expect(p, "T_IDENT",
+					  "expected member name after '.'")
+			var f = new_expr("EXPR_FIELD", line)
+			f["obj"] = e
+			f["name"] = name["text"]
+			e = f
+		} else if (match(p, "T_QDOT")) {
+			var name = expect(p, "T_IDENT",
+					  "expected member name after '?.'")
+			var f = new_expr("EXPR_SAFE_FIELD", line)
+			f["obj"] = e
+			f["name"] = name["text"]
+			e = f
+		} else if (match(p, "T_LPAREN")) {
+			var got = parse_arg_list(p, "T_RPAREN", true)
+			var c = new_expr("EXPR_CALL", line)
+			c["callee"] = e
+			c["args"] = got["items"]
+			c["arg_names"] = got["names"]
+			e = c
+		} else if (match(p, "T_LBRACKET")) {
+			var idx = parse_expression(p)
+			expect(p, "T_RBRACKET", "expected ']'")
+			var ix = new_expr("EXPR_INDEX", line)
+			ix["arr"] = e
+			ix["idx"] = idx
+			e = ix
+		} else {
+			break
+		}
+	}
+	return e
+}
+
+func parse_unary(Parser p) {
+	var line = peek(p)["line"]
+	var op = ""
+	if (check(p, "T_NOT")) {
+		op = "!"
+	} else if (check(p, "T_MINUS")) {
+		op = "-"
+	} else if (check(p, "T_TILDE")) {
+		op = "~"
+	}
+	if (op == "") {
+		return parse_postfix(p)
+	}
+	advance(p)
+	var e = new_expr("EXPR_UNARY", line)
+	e["op"] = op
+	e["operand"] = parse_unary(p)
+	return e
+}
+
+// One left-associative binary level. parser.c spells this as a function taking
+// the next-tighter level as a function pointer; Oboe has no function pointers,
+// so each level below calls its own successor and hands the loop the token
+// types it accepts, paired with the operator text to record.
+func binary_op_here(Parser p, array types, array ops) {
+	var i = 0
+	while (i < types.len()) {
+		if (check(p, types[i])) {
+			return ops[i]
+		}
+		i = i + 1
+	}
+	return ""
+}
+
+// multiplicative, and the `x` repetition operator, share precedence
+func parse_term(Parser p) {
+	var e = parse_unary(p)
+	while (true) {
+		var line = peek(p)["line"]
+		var op = binary_op_here(p, ["T_STAR", "T_SLASH", "T_PERCENT"],
+					["*", "/", "%"])
+		if (op == "" and check(p, "T_IDENT") and
+		    peek(p)["text"] == "x") {
+			op = "x"
+		}
+		if (op == "") {
+			break
+		}
+		advance(p)
+		var b = new_expr("EXPR_BINARY", line)
+		b["op"] = op
+		b["l"] = e
+		b["r"] = parse_unary(p)
+		e = b
+	}
+	return e
+}
+
+func parse_additive(Parser p) {
+	var e = parse_term(p)
+	while (true) {
+		var line = peek(p)["line"]
+		var op = binary_op_here(p, ["T_PLUS", "T_MINUS"], ["+", "-"])
+		if (op == "") {
+			break
+		}
+		advance(p)
+		var b = new_expr("EXPR_BINARY", line)
+		b["op"] = op
+		b["l"] = e
+		b["r"] = parse_term(p)
+		e = b
+	}
+	return e
+}
+
+// Bitwise operators follow C's precedence: shifts sit between additive and
+// comparison, and `&`, `^`, `|` sit between equality and the user-declared
+// operators, tightest first. All are left-associative.
+func parse_shift(Parser p) {
+	var e = parse_additive(p)
+	while (true) {
+		var line = peek(p)["line"]
+		var op = binary_op_here(p, ["T_SHL", "T_SHR"], ["<<", ">>"])
+		if (op == "") {
+			break
+		}
+		advance(p)
+		var b = new_expr("EXPR_BINARY", line)
+		b["op"] = op
+		b["l"] = e
+		b["r"] = parse_additive(p)
+		e = b
+	}
+	return e
+}
+
+func parse_is(Parser p) {
+	var e = parse_shift(p)
+	if (match(p, "T_IS")) {
+		var line = peek(p)["line"]
+		var name = expect(p, "T_IDENT", "expected type name after 'is'")
+		var ie = new_expr("EXPR_IS", line)
+		ie["value"] = e
+		ie["type_name"] = name["text"]
+		e = ie
+	}
+	return e
+}
+
+func parse_comparison(Parser p) {
+	var e = parse_is(p)
+	while (true) {
+		var line = peek(p)["line"]
+		var op = binary_op_here(p, ["T_LT", "T_LTE", "T_GT", "T_GTE"],
+					["<", "<=", ">", ">="])
+		if (op == "") {
+			break
+		}
+		advance(p)
+		var b = new_expr("EXPR_BINARY", line)
+		b["op"] = op
+		b["l"] = e
+		b["r"] = parse_is(p)
+		e = b
+	}
+	return e
+}
+
+func parse_equality(Parser p) {
+	var e = parse_comparison(p)
+	while (true) {
+		var line = peek(p)["line"]
+		var op = binary_op_here(p, ["T_EQ", "T_NEQ"], ["==", "!="])
+		if (op == "") {
+			break
+		}
+		advance(p)
+		var b = new_expr("EXPR_BINARY", line)
+		b["op"] = op
+		b["l"] = e
+		b["r"] = parse_comparison(p)
+		e = b
+	}
+	return e
+}
+
+func parse_bitand(Parser p) {
+	var e = parse_equality(p)
+	while (true) {
+		var line = peek(p)["line"]
+		var op = binary_op_here(p, ["T_AMP"], ["&"])
+		if (op == "") {
+			break
+		}
+		advance(p)
+		var b = new_expr("EXPR_BINARY", line)
+		b["op"] = op
+		b["l"] = e
+		b["r"] = parse_equality(p)
+		e = b
+	}
+	return e
+}
+
+func parse_bitxor(Parser p) {
+	var e = parse_bitand(p)
+	while (true) {
+		var line = peek(p)["line"]
+		var op = binary_op_here(p, ["T_CARET"], ["^"])
+		if (op == "") {
+			break
+		}
+		advance(p)
+		var b = new_expr("EXPR_BINARY", line)
+		b["op"] = op
+		b["l"] = e
+		b["r"] = parse_bitand(p)
+		e = b
+	}
+	return e
+}
+
+func parse_bitor(Parser p) {
+	var e = parse_bitxor(p)
+	while (true) {
+		var line = peek(p)["line"]
+		var op = binary_op_here(p, ["T_PIPE"], ["|"])
+		if (op == "") {
+			break
+		}
+		advance(p)
+		var b = new_expr("EXPR_BINARY", line)
+		b["op"] = op
+		b["l"] = e
+		b["r"] = parse_bitxor(p)
+		e = b
+	}
+	return e
+}
+
+// user-declared operators (`operator ||> (...)`) bind looser than the bitwise
+// operators and tighter than `and`, left-associative
+func parse_custom_op(Parser p) {
+	var e = parse_bitor(p)
+	while (check(p, "T_CUSTOMOP")) {
+		var line = peek(p)["line"]
+		var op = advance(p)
+		var b = new_expr("EXPR_BINARY", line)
+		b["op"] = op["text"]
+		b["l"] = e
+		b["r"] = parse_bitor(p)
+		e = b
+	}
+	return e
+}
+
+func parse_and(Parser p) {
+	var e = parse_custom_op(p)
+	while (check(p, "T_ANDAND") or check(p, "T_AND")) {
+		var line = peek(p)["line"]
+		advance(p)
+		var b = new_expr("EXPR_BINARY", line)
+		b["op"] = "&&"
+		b["l"] = e
+		b["r"] = parse_custom_op(p)
+		e = b
+	}
+	return e
+}
+
+func parse_or(Parser p) {
+	var e = parse_and(p)
+	while (check(p, "T_OROR") or check(p, "T_OR")) {
+		var line = peek(p)["line"]
+		advance(p)
+		var b = new_expr("EXPR_BINARY", line)
+		b["op"] = "||"
+		b["l"] = e
+		b["r"] = parse_and(p)
+		e = b
+	}
+	return e
+}
+
+func parse_nullish(Parser p) {
+	var e = parse_or(p)
+	while (check(p, "T_QQ")) {
+		var line = peek(p)["line"]
+		advance(p)
+		var b = new_expr("EXPR_BINARY", line)
+		b["op"] = "??"
+		b["l"] = e
+		b["r"] = parse_or(p)
+		e = b
+	}
+	return e
+}
+
+// `cond ? a : b`, right-associative, binds looser than ??
+func parse_ternary(Parser p) {
+	var e = parse_nullish(p)
+	if (match(p, "T_QUESTION")) {
+		var line = peek(p)["line"]
+		var then_e = parse_ternary(p)
+		expect(p, "T_COLON", "expected ':' in ternary expression")
+		var t = new_expr("EXPR_TERNARY", line)
+		t["cond"] = e
+		t["then_e"] = then_e
+		t["else_e"] = parse_ternary(p)
+		return t
+	}
+	return e
+}
+
+func parse_assignment(Parser p) {
+	var e = parse_ternary(p)
+	if (match(p, "T_ASSIGN")) {
+		var line = peek(p)["line"]
+		var a = new_expr("EXPR_ASSIGN", line)
+		a["target"] = e
+		a["value"] = parse_assignment(p)
+		return a
+	}
+	return e
+}
+
+func parse_expression(Parser p) {
+	return parse_assignment(p)
+}
+
+// ---- types / params ----
+
+// Consumes an optional type name followed by an identifier: `[type] name`.
+// Used for let/const/params/fields. Because both type and name are bare
+// identifiers, a type is present only when two identifiers appear back to back
+// *on the same line* -- otherwise an uninitialized `var x` would swallow the
+// leading identifier of the next statement as its name.
+// Returns { "type": <str or null>, "name": <str> }.
+func parse_typed_name(Parser p) {
+	var first = expect(p, "T_IDENT", "expected name")
+	if (check(p, "T_IDENT") and peek(p)["line"] == first["line"]) {
+		var second = advance(p)
+		return { "type": first["text"], "name": second["text"] }
+	}
+	return { "type": null, "name": first["text"] }
+}
+
+// `(int x, str name = "Jade")` -- a parameter may carry a default. Requiring
+// defaults to come last keeps positional calls unambiguous: everything before
+// the first default must be supplied by position or by name.
+func parse_params(Parser p) {
+	expect(p, "T_LPAREN", "expected '('")
+	var params = []
+	var seen_default = false
+	if (!check(p, "T_RPAREN")) {
+		var more = true
+		while (more) {
+			var tn = parse_typed_name(p)
+			var param = { "type_name": tn["type"],
+				      "name": tn["name"],
+				      "default_value": null }
+			if (match(p, "T_ASSIGN")) {
+				param["default_value"] = parse_expression(p)
+				seen_default = true
+			} else if (seen_default and tn["name"] != "this") {
+				fail(p,
+				     "a parameter without a default cannot follow one with a default")
+			}
+			params.push(param)
+			more = match(p, "T_COMMA")
+		}
+	}
+	expect(p, "T_RPAREN", "expected ')'")
+	return params
+}
+
+// ---- statements ----
+
+func parse_let(Parser p, bool is_const) {
+	var line = peek(p)["line"]
+	// `const var x` / `const let x` -- the keyword is optional filler
+	match(p, "T_LET")
+	var tn = parse_typed_name(p)
+	var init = null
+	if (match(p, "T_ASSIGN")) {
+		init = parse_expression(p)
+	}
+	match(p, "T_SEMI")
+	var s = new_stmt("STMT_LET", line)
+	s["name"] = tn["name"]
+	s["type_name"] = tn["type"]
+	s["is_const"] = is_const
+	s["init"] = init
+	return s
+}
+
+func parse_if(Parser p) {
+	var line = peek(p)["line"]
+	expect(p, "T_LPAREN", "expected '(' after if")
+	var cond = parse_expression(p)
+	expect(p, "T_RPAREN", "expected ')'")
+	var then_body = parse_block(p)
+	var else_body = []
+	if (match(p, "T_ELSE")) {
+		if (check(p, "T_IF")) {
+			advance(p)
+			else_body = [parse_if(p)]
+		} else {
+			else_body = parse_block(p)
+		}
+	}
+	var s = new_stmt("STMT_IF", line)
+	s["cond"] = cond
+	s["then_body"] = then_body
+	s["else_body"] = else_body
+	return s
+}
+
+func parse_while(Parser p) {
+	var line = peek(p)["line"]
+	expect(p, "T_LPAREN", "expected '(' after while")
+	var cond = parse_expression(p)
+	expect(p, "T_RPAREN", "expected ')'")
+	var s = new_stmt("STMT_WHILE", line)
+	s["cond"] = cond
+	s["body"] = parse_block(p)
+	return s
+}
+
+// `range(...)`, `pairs(...)` and `ipairs(...)` are recognized here as loop
+// syntax rather than as real functions, the way `range` always has been.
+func looks_like_call_to(Parser p, str name) {
+	return check(p, "T_IDENT") and peek(p)["text"] == name and
+	       peek_at(p, 1)["type"] == "T_LPAREN"
+}
+
+func parse_for(Parser p) {
+	var line = peek(p)["line"]
+	expect(p, "T_LPAREN", "expected '(' after for")
+	var loop_var = expect(p, "T_IDENT", "expected loop variable")
+	var s = new_stmt("STMT_FOR", line)
+	s["var_name"] = loop_var["text"]
+	s["var2_name"] = null
+	s["range_a"] = null
+	s["range_b"] = null
+	s["iterable"] = null
+	if (match(p, "T_COMMA")) {
+		var var2 = expect(p, "T_IDENT", "expected second loop variable")
+		s["var2_name"] = var2["text"]
+	}
+	expect(p, "T_IN", "expected 'in' in for loop")
+	if (looks_like_call_to(p, "range")) {
+		advance(p) // 'range' ident
+		expect(p, "T_LPAREN", "expected '(' after range")
+		s["kind_iter"] = "FOR_RANGE"
+		s["range_a"] = parse_expression(p)
+		expect(p, "T_COMMA", "expected ',' in range()")
+		s["range_b"] = parse_expression(p)
+		expect(p, "T_RPAREN", "expected ')'")
+	} else if (looks_like_call_to(p, "pairs") or
+		   looks_like_call_to(p, "ipairs")) {
+		var indexed = peek(p)["text"].substr(0, 1) == "i"
+		advance(p)
+		expect(p, "T_LPAREN", "expected '('")
+		s["kind_iter"] = indexed ? "FOR_IPAIRS" : "FOR_PAIRS"
+		s["iterable"] = parse_expression(p)
+		expect(p, "T_RPAREN", "expected ')'")
+	} else {
+		s["kind_iter"] = "FOR_ITER"
+		s["iterable"] = parse_expression(p)
+	}
+	var is_pairs = s["kind_iter"] == "FOR_PAIRS" or
+		       s["kind_iter"] == "FOR_IPAIRS"
+	if (is_pairs and s["var2_name"] == null) {
+		fail(p,
+		     "pairs()/ipairs() need two loop variables, as in `for (k, v in pairs(d))`")
+	}
+	if (!is_pairs and s["var2_name"] != null) {
+		fail(p, "two loop variables require pairs() or ipairs()")
+	}
+	expect(p, "T_RPAREN", "expected ')'")
+	s["body"] = parse_block(p)
+	return s
+}
+
+func parse_switch(Parser p) {
+	var line = peek(p)["line"]
+	var subject = parse_expression(p)
+	expect(p, "T_LBRACE", "expected '{' after switch subject")
+	var cases = []
+	while (!check(p, "T_RBRACE") and !check(p, "T_EOF")) {
+		expect(p, "T_CASE", "expected 'case'")
+		var val = parse_expression(p)
+		cases.push({ "value": val, "body": parse_block(p) })
+	}
+	expect(p, "T_RBRACE", "expected '}' to close switch")
+	var s = new_stmt("STMT_SWITCH", line)
+	s["subject"] = subject
+	s["cases"] = cases
+	return s
+}
+
+func parse_try(Parser p) {
+	var line = peek(p)["line"]
+	var body = parse_block(p)
+	var catches = []
+	while (match(p, "T_CATCH")) {
+		expect(p, "T_LPAREN", "expected '(' after catch")
+		var type_name = expect(p, "T_IDENT", "expected exception type")
+		// parser.c builds this in a char[256] and would smash the stack
+		// on a longer dotted name; nothing in reach comes close
+		var full_type = type_name["text"]
+		while (match(p, "T_DOT")) {
+			var more = expect(p, "T_IDENT",
+					  "expected identifier after '.'")
+			full_type = full_type + "." + more["text"]
+		}
+		var var_name = expect(p, "T_IDENT",
+				      "expected exception variable name")
+		expect(p, "T_RPAREN", "expected ')'")
+		catches.push({ "type_name": full_type,
+			       "var_name": var_name["text"],
+			       "body": parse_block(p) })
+	}
+	var finally_body = []
+	if (match(p, "T_FINALLY")) {
+		finally_body = parse_block(p)
+	}
+	var s = new_stmt("STMT_TRY", line)
+	s["body"] = body
+	s["catches"] = catches
+	s["finally_body"] = finally_body
+	return s
+}
+
+func parse_throw(Parser p) {
+	var line = peek(p)["line"]
+	var type_name = expect(p, "T_IDENT",
+			       "expected exception type after throw")
+	// dotted exception types (`throw os.FileNotFoundError(...)`), same as catch
+	var full_type = type_name["text"]
+	while (check(p, "T_DOT") and peek_at(p, 1)["type"] == "T_IDENT") {
+		advance(p)
+		full_type = full_type + "." + advance(p)["text"]
+	}
+	var value = null
+	if (match(p, "T_LPAREN")) {
+		if (!check(p, "T_RPAREN")) {
+			value = parse_expression(p)
+		}
+		expect(p, "T_RPAREN", "expected ')'")
+	}
+	match(p, "T_SEMI")
+	var s = new_stmt("STMT_THROW", line)
+	s["type_name"] = full_type
+	s["value"] = value
+	return s
+}
+
+func parse_statement(Parser p) {
+	var line = peek(p)["line"]
+	// `var this.x = v` inside a method is field assignment, not a declaration
+	if (check(p, "T_LET") and peek_at(p, 1)["type"] == "T_IDENT" and
+	    peek_at(p, 2)["type"] == "T_DOT") {
+		advance(p)
+		var e = parse_expression(p)
+		match(p, "T_SEMI")
+		var s = new_stmt("STMT_EXPR", line)
+		s["expr"] = e
+		return s
+	}
+	if (match(p, "T_LET")) {
+		return parse_let(p, false)
+	}
+	if (match(p, "T_CONST")) {
+		return parse_let(p, true)
+	}
+	// explicitly typed declaration without keyword: `int x = 1`
+	if (check(p, "T_IDENT") and peek_at(p, 1)["type"] == "T_IDENT" and
+	    peek_at(p, 2)["type"] == "T_ASSIGN") {
+		return parse_let(p, false)
+	}
+	if (match(p, "T_RETURN")) {
+		var value = null
+		if (!check(p, "T_RBRACE") and !check(p, "T_SEMI")) {
+			value = parse_expression(p)
+		}
+		match(p, "T_SEMI")
+		var s = new_stmt("STMT_RETURN", line)
+		s["value"] = value
+		return s
+	}
+	if (check(p, "T_IF")) {
+		advance(p)
+		return parse_if(p)
+	}
+	if (check(p, "T_WHILE")) {
+		advance(p)
+		return parse_while(p)
+	}
+	if (check(p, "T_FOR")) {
+		advance(p)
+		return parse_for(p)
+	}
+	if (check(p, "T_SWITCH")) {
+		advance(p)
+		return parse_switch(p)
+	}
+	if (check(p, "T_TRY")) {
+		advance(p)
+		return parse_try(p)
+	}
+	if (check(p, "T_THROW")) {
+		advance(p)
+		return parse_throw(p)
+	}
+	if (check(p, "T_BREAK") or check(p, "T_CONTINUE")) {
+		var k = check(p, "T_BREAK") ? "STMT_BREAK" : "STMT_CONTINUE"
+		advance(p)
+		match(p, "T_SEMI")
+		return new_stmt(k, line)
+	}
+	if (check(p, "T_LBRACE")) {
+		var s = new_stmt("STMT_BLOCK", line)
+		s["body"] = parse_block(p)
+		return s
+	}
+	var e = parse_expression(p)
+	match(p, "T_SEMI")
+	var s = new_stmt("STMT_EXPR", line)
+	s["expr"] = e
+	return s
+}
+
+func parse_block(Parser p) {
+	expect(p, "T_LBRACE", "expected '{'")
+	var items = []
+	while (!check(p, "T_RBRACE") and !check(p, "T_EOF")) {
+		items.push(parse_statement(p))
+	}
+	expect(p, "T_RBRACE", "expected '}'")
+	return items
+}
+
+// ---- top-level declarations ----
+
+func parse_func(Parser p, bool is_static, bool is_private) {
+	var line = peek(p)["line"]
+	// `[ReturnType] func name(params) { body }` -- the return type precedes
+	// `func`, so it is the caller that has it; this always starts out null.
+	expect(p, "T_FUNC", "expected 'func'")
+	var name = expect(p, "T_IDENT", "expected function name")
+	var params = parse_params(p)
+	return { "name": name["text"], "return_type": null, "params": params,
+		 "is_static": is_static, "is_private": is_private,
+		 "op_symbol": null, "body": parse_block(p), "line": line }
+}
+
+// `operator <sym> (params) { body }` -- the T_OPERATOR keyword has already been
+// consumed. The symbol is either a T_CUSTOMOP token or any builtin operator
+// token (for class overloads like `operator + (this, Vector2 other)`).
+func parse_operator_decl(Parser p) {
+	var line = peek(p)["line"]
+	var sym = advance(p)
+	if (sym["text"] == "" or sym["type"] == "T_LPAREN") {
+		fail(p, "expected an operator symbol after 'operator'")
+	}
+	var params = parse_params(p)
+	return { "name": "operator", "return_type": null, "params": params,
+		 "is_static": false, "is_private": false,
+		 "op_symbol": sym["text"], "body": parse_block(p),
+		 "line": line }
+}
+
+func parse_class(Parser p) {
+	var line = peek(p)["line"]
+	var name = expect(p, "T_IDENT", "expected class name")
+	var parent_name = null
+	if (match(p, "T_EXTENDS")) {
+		var pn = expect(p, "T_IDENT", "expected parent class name")
+		parent_name = pn["text"]
+	}
+	expect(p, "T_LBRACE", "expected '{' to start class body")
+	var fields = []
+	var methods = []
+	while (!check(p, "T_RBRACE") and !check(p, "T_EOF")) {
+		var is_static = false
+		var is_private = false
+		while (check(p, "T_STATIC") or check(p, "T_PRIVATE")) {
+			if (match(p, "T_STATIC")) {
+				is_static = true
+			} else if (match(p, "T_PRIVATE")) {
+				is_private = true
+			}
+		}
+		// return type may precede `func` for methods
+		var mret = null
+		if (check(p, "T_IDENT") and peek_at(p, 1)["type"] == "T_FUNC") {
+			mret = advance(p)["text"]
+		}
+		if (check(p, "T_FUNC")) {
+			var m = parse_func(p, is_static, is_private)
+			m["return_type"] = mret
+			methods.push(m)
+		} else if (check(p, "T_OPERATOR")) {
+			advance(p)
+			methods.push(parse_operator_decl(p))
+		} else if (check(p, "T_CONST") or check(p, "T_LET") or
+			   (check(p, "T_IDENT") and
+			    peek_at(p, 1)["type"] == "T_IDENT")) {
+			// `const [var|type] name`, `var name`, or keywordless
+			// `type name`
+			var is_const = match(p, "T_CONST")
+			match(p, "T_LET")
+			var tn = parse_typed_name(p)
+			var init = null
+			if (match(p, "T_ASSIGN")) {
+				init = parse_expression(p)
+			}
+			match(p, "T_SEMI")
+			fields.push({ "type_name": tn["type"],
+				      "name": tn["name"],
+				      "is_static": is_static,
+				      "is_private": is_private,
+				      "is_const": is_const, "init": init })
+		} else {
+			fail(p,
+			     "expected field or method declaration in class body")
+		}
+	}
+	expect(p, "T_RBRACE", "expected '}' to close class")
+	return { "name": name["text"], "parent_name": parent_name,
+		 "fields": fields, "methods": methods, "line": line }
+}
+
+func parse_import(Parser p) {
+	// `import a, b from mod` is a member list and `import mod [as x]` is not,
+	// but one leading identifier looks the same either way: scan the whole
+	// comma-separated run and let the `from` behind it decide.
+	var is_member_list = false
+	if (check(p, "T_IDENT")) {
+		var k = 1
+		while (peek_at(p, k)["type"] == "T_COMMA" and
+		       peek_at(p, k + 1)["type"] == "T_IDENT") {
+			k = k + 2
+		}
+		is_member_list = peek_at(p, k)["type"] == "T_FROM"
+	}
+	var imp = { "module": null, "alias": null, "members": [] }
+	if (is_member_list) {
+		var more = true
+		while (more) {
+			var m = expect(p, "T_IDENT",
+				       "expected imported member name")
+			imp["members"].push(m["text"])
+			more = match(p, "T_COMMA")
+		}
+		expect(p, "T_FROM", "expected 'from'")
+		imp["module"] = expect(p, "T_IDENT",
+				       "expected module name")["text"]
+	} else {
+		imp["module"] = expect(p, "T_IDENT",
+				       "expected module name")["text"]
+		if (match(p, "T_AS")) {
+			var alias = expect(p, "T_IDENT",
+					   "expected alias after 'as'")
+			imp["alias"] = alias["text"]
+		}
+	}
+	match(p, "T_SEMI")
+	return imp
+}
+
+func parse_program(array tokens, str filename) {
+	var p = Parser(tokens, filename)
+	var decls = []
+	while (!check(p, "T_EOF")) {
+		var d = {}
+		if (match(p, "T_IMPORT")) {
+			d = parse_import(p)
+			d["kind"] = "DECL_IMPORT"
+		} else if (match(p, "T_CIMPORT")) {
+			// FFI: `cimport symbol from "library.so"`
+			var name = expect(p, "T_IDENT",
+					  "expected C symbol name after cimport")
+			d["kind"] = "DECL_CIMPORT"
+			d["name"] = name["text"]
+			d["line"] = name["line"]
+			expect(p, "T_FROM", "expected 'from' in cimport")
+			var lib = expect(p, "T_STRING",
+					 "expected a library path string in cimport")
+			d["lib"] = lib["text"]
+			match(p, "T_SEMI")
+		} else if (match(p, "T_OPERATOR")) {
+			d["kind"] = "DECL_OPERATOR"
+			d["func"] = parse_operator_decl(p)
+		} else if (match(p, "T_EVENT")) {
+			// `event MyEvent = event(payload params)`
+			var name = expect(p, "T_IDENT", "expected event name")
+			d["kind"] = "DECL_EVENT"
+			d["name"] = name["text"]
+			d["line"] = name["line"]
+			expect(p, "T_ASSIGN", "expected '=' in event declaration")
+			expect(p, "T_EVENT", "expected event(...) constructor")
+			d["params"] = parse_params(p)
+			match(p, "T_SEMI")
+		} else if (match(p, "T_ON")) {
+			// `on MyEvent [as e] { body }`
+			var ev = expect(p, "T_IDENT",
+					"expected event name after 'on'")
+			d["kind"] = "DECL_ON"
+			d["event_name"] = ev["text"]
+			d["line"] = ev["line"]
+			d["var_name"] = null
+			if (match(p, "T_AS")) {
+				var v = expect(p, "T_IDENT",
+					       "expected variable name after 'as'")
+				d["var_name"] = v["text"]
+			}
+			d["body"] = parse_block(p)
+		} else if (check(p, "T_CLASS")) {
+			advance(p)
+			d["kind"] = "DECL_CLASS"
+			d["klass"] = parse_class(p)
+		} else if (check(p, "T_FUNC")) {
+			d["kind"] = "DECL_FUNC"
+			d["func"] = parse_func(p, false, false)
+		} else if (check(p, "T_IDENT") and
+			   peek_at(p, 1)["type"] == "T_FUNC") {
+			var ret = advance(p)
+			d["kind"] = "DECL_FUNC"
+			d["func"] = parse_func(p, false, false)
+			d["func"]["return_type"] = ret["text"]
+		} else {
+			d["kind"] = "DECL_STMT"
+			d["stmt"] = parse_statement(p)
+		}
+		decls.push(d)
+	}
+	return decls
+}
