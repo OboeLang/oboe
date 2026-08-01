@@ -13,6 +13,7 @@
  */
 #include "codegen.h"
 #include "lexer.h"
+#include "numfmt.h"
 #include "parser.h"
 #include <stdlib.h>
 #include <string.h>
@@ -147,6 +148,7 @@ static const StdMember k_std_os[] = {
 	{ "is_dir", 1 },
 	{ "mkdir", 1 },
 	{ "listdir", 1 },
+	{ "realpath", 1 },
 	/* resolved at compile time — see emit_script_path_builtins */
 	{ "script_file", 0 },
 	{ "script_dir", 0 },
@@ -645,14 +647,76 @@ static const char *infer_class(Expr *e)
 
 /* ============================= expressions ============================= */
 
+/* Sized from the formatted length rather than into a fixed buffer: every
+   generated expression is built by nesting these, so any ceiling here is a
+   ceiling on expression size that truncates into C that will not compile. */
 static char *fmt(const char *format, ...)
 {
-	va_list ap;
+	va_list ap, ap2;
 	va_start(ap, format);
-	char buf[4096];
-	vsnprintf(buf, sizeof buf, format, ap);
+	va_copy(ap2, ap);
+	int n = vsnprintf(NULL, 0, format, ap);
 	va_end(ap);
-	return strdup(buf);
+	char *out = malloc((size_t)n + 1);
+	if (!out) {
+		fprintf(stderr, "oboe: out of memory\n");
+		exit(1);
+	}
+	vsnprintf(out, (size_t)n + 1, format, ap2);
+	va_end(ap2);
+	return out;
+}
+
+/* ---- growable output string ----
+   The same problem as fmt's, for the places that accumulate a list of pieces
+   (a call's arguments, an array literal's items) instead of formatting once. */
+typedef struct {
+	char *s;
+	size_t len, cap;
+} Buf;
+
+static void buf_add(Buf *b, const char *s)
+{
+	size_t n = strlen(s);
+	if (b->len + n + 1 > b->cap) {
+		size_t want = b->cap ? b->cap : 128;
+		while (b->len + n + 1 > want)
+			want *= 2;
+		b->s = realloc(b->s, want);
+		if (!b->s) {
+			fprintf(stderr, "oboe: out of memory\n");
+			exit(1);
+		}
+		b->cap = want;
+	}
+	memcpy(b->s + b->len, s, n + 1);
+	b->len += n;
+}
+
+static void buf_addf(Buf *b, const char *format, ...)
+{
+	va_list ap, ap2;
+	va_start(ap, format);
+	va_copy(ap2, ap);
+	int n = vsnprintf(NULL, 0, format, ap);
+	va_end(ap);
+	char *piece = malloc((size_t)n + 1);
+	if (!piece) {
+		fprintf(stderr, "oboe: out of memory\n");
+		exit(1);
+	}
+	vsnprintf(piece, (size_t)n + 1, format, ap2);
+	va_end(ap2);
+	buf_add(b, piece);
+	free(piece);
+}
+
+/* the accumulated string, ownership handed to the caller */
+static char *buf_take(Buf *b)
+{
+	if (!b->s)
+		return strdup("");
+	return b->s;
 }
 
 static char *gen_string_literal(Expr *e)
@@ -663,27 +727,22 @@ static char *gen_string_literal(Expr *e)
 		count++;
 	if (count == 0)
 		return strdup("ob_string(\"\")");
-	char buf[8192];
-	int off = snprintf(buf, sizeof buf, "ob_interpolate(%d", count);
+	Buf b = { 0 };
+	buf_addf(&b, "ob_interpolate(%d", count);
 	for (StringPart *p = parts; p; p = p->next) {
 		if (p->is_expr) {
 			char *sub = gen_expr(p->expr);
-			char *sub_str;
 			/* ensure every interpolated part is coerced to a string value */
-			sub_str = fmt("ob_str(%s)", sub);
-			off += snprintf(buf + off, sizeof(buf) - off, ", %s",
-					sub_str);
+			buf_addf(&b, ", ob_str(%s)", sub);
 			free(sub);
-			free(sub_str);
 		} else {
 			char *escaped = escape_c_string(p->literal);
-			off += snprintf(buf + off, sizeof(buf) - off,
-					", ob_string(\"%s\")", escaped);
+			buf_addf(&b, ", ob_string(\"%s\")", escaped);
 			free(escaped);
 		}
 	}
-	off += snprintf(buf + off, sizeof(buf) - off, ")");
-	return strdup(buf);
+	buf_add(&b, ")");
+	return buf_take(&b);
 }
 
 /* ---- numeric type annotations ----
@@ -1157,8 +1216,14 @@ static char *gen_expr(Expr *e)
 	switch (e->kind) {
 	case EXPR_INT:
 		return fmt("ob_int(%lldLL)", e->as.int_val);
-	case EXPR_FLOAT:
-		return fmt("ob_float(%.17g)", e->as.float_val);
+	case EXPR_FLOAT: {
+		/* the shortest round-tripping spelling rather than a blanket
+		   %.17g: it loses nothing, keeps the emitted C readable, and is
+		   the one form the Oboe-written compiler can reach with str() */
+		char buf[64];
+		ob_double_text(e->as.float_val, buf, sizeof buf);
+		return fmt("ob_float(%s)", buf);
+	}
 	case EXPR_BOOL:
 		return fmt("ob_bool(%s)", e->as.bool_val ? "true" : "false");
 	case EXPR_NULL:
@@ -1188,34 +1253,29 @@ static char *gen_expr(Expr *e)
 		}
 		return strdup(lookup_var_cname(e->as.ident));
 	case EXPR_ARRAY: {
-		char buf[8192];
-		int off = snprintf(buf, sizeof buf,
-				   "({ OboeValue __a = ob_array_new();");
+		Buf b = { 0 };
+		buf_add(&b, "({ OboeValue __a = ob_array_new();");
 		for (int i = 0; i < e->as.array_lit.count; i++) {
 			char *item = gen_expr(e->as.array_lit.items[i]);
-			off += snprintf(buf + off, sizeof(buf) - off,
-					" ob_array_push(__a, %s);", item);
+			buf_addf(&b, " ob_array_push(__a, %s);", item);
 			free(item);
 		}
-		off += snprintf(buf + off, sizeof(buf) - off, " __a; })");
-		return strdup(buf);
+		buf_add(&b, " __a; })");
+		return buf_take(&b);
 	}
 	case EXPR_DICT: {
-		char buf[8192];
-		int off = snprintf(buf, sizeof buf,
-				   "({ OboeValue __d = ob_dict_new();");
+		Buf b = { 0 };
+		buf_add(&b, "({ OboeValue __d = ob_dict_new();");
 		for (int i = 0; i < e->as.dict_lit.count; i++) {
 			char *key = gen_expr(e->as.dict_lit.keys[i]);
 			char *val = gen_expr(e->as.dict_lit.values[i]);
-			off += snprintf(
-				buf + off, sizeof(buf) - off,
-				" ob_dict_set(__d, ob_to_cstr(%s), %s);", key,
-				val);
+			buf_addf(&b, " ob_dict_set(__d, ob_to_cstr(%s), %s);",
+				 key, val);
 			free(key);
 			free(val);
 		}
-		off += snprintf(buf + off, sizeof(buf) - off, " __d; })");
-		return strdup(buf);
+		buf_add(&b, " __d; })");
+		return buf_take(&b);
 	}
 	case EXPR_BINARY: {
 		char *l = gen_expr(e->as.binary.l);
@@ -1339,22 +1399,18 @@ static char *gen_expr(Expr *e)
 					free(a);
 					return r;
 				}
-				char buf[8192];
-				int off = snprintf(buf, sizeof buf,
-						   "(%s(ob_interpolate(%d", fn,
-						   argc * 2 - 1);
+				Buf b = { 0 };
+				buf_addf(&b, "(%s(ob_interpolate(%d", fn,
+					 argc * 2 - 1);
 				for (int i = 0; i < argc; i++) {
 					char *a = gen_expr(e->as.call.args[i]);
-					off += snprintf(
-						buf + off, sizeof(buf) - off,
-						"%s, %s",
-						i ? ", ob_string(\" \")" : "",
-						a);
+					buf_addf(&b, "%s, %s",
+						 i ? ", ob_string(\" \")" : "",
+						 a);
 					free(a);
 				}
-				snprintf(buf + off, sizeof(buf) - off,
-					 ")), ob_null())");
-				return strdup(buf);
+				buf_add(&b, ")), ob_null())");
+				return buf_take(&b);
 			}
 			if (strcmp(callee->as.ident, "input") == 0 &&
 			    e->as.call.arg_count == 0) {
@@ -1416,26 +1472,21 @@ static char *gen_expr(Expr *e)
 						e->line,
 						"no ancestor constructor matches this argument count");
 				FuncDecl *ctor = find_init_decl(owner, chosen);
-				char buf[4096];
-				int off = snprintf(buf, sizeof buf,
-						   "({ %s__init_%d((%s*)this",
-						   owner->name, chosen,
-						   owner->name);
+				Buf b = { 0 };
+				buf_addf(&b, "({ %s__init_%d((%s*)this",
+					 owner->name, chosen, owner->name);
 				int bound_count;
 				Expr **bound = bind_call_args(ctor, "super", e,
 							      &bound_count);
 				for (int i = 0; i < bound_count; i++) {
 					char *a = gen_bound_arg(ctor, i,
 								bound[i]);
-					off += snprintf(buf + off,
-							sizeof(buf) - off,
-							", %s", a);
+					buf_addf(&b, ", %s", a);
 					free(a);
 				}
 				free(bound);
-				off += snprintf(buf + off, sizeof(buf) - off,
-						"); ob_null(); })");
-				return strdup(buf);
+				buf_add(&b, "); ob_null(); })");
+				return buf_take(&b);
 			}
 			/* constructor call */
 			ClassDecl *c = find_class(callee->as.ident);
@@ -1446,8 +1497,7 @@ static char *gen_expr(Expr *e)
 					if (strcmp(c->methods[i]->name,
 						   "init") == 0)
 						init_count++;
-				char buf[4096];
-				int off;
+				Buf b = { 0 };
 				FuncDecl *ctor = NULL;
 				if (init_count > 0) {
 					int chosen = find_init_index(c, argc);
@@ -1456,9 +1506,8 @@ static char *gen_expr(Expr *e)
 							e->line,
 							"no matching constructor overload for this argument count");
 					ctor = find_init_decl(c, chosen);
-					off = snprintf(buf, sizeof buf,
-						       "%s__new_%d(", c->name,
-						       chosen);
+					buf_addf(&b, "%s__new_%d(", c->name,
+						 chosen);
 				} else {
 					/* no init here: inherit the nearest ancestor's constructors */
 					ClassDecl *owner = find_init_owner(c);
@@ -1471,20 +1520,15 @@ static char *gen_expr(Expr *e)
 								"no matching constructor overload for this argument count");
 						ctor = find_init_decl(owner,
 								      chosen);
-						off = snprintf(
-							buf, sizeof buf,
-							"%s__new_inh_%d(",
-							c->name, chosen);
+						buf_addf(&b, "%s__new_inh_%d(",
+							 c->name, chosen);
 					} else if (argc == 0) {
-						off = snprintf(
-							buf, sizeof buf,
-							"%s__new_default(",
-							c->name);
+						buf_addf(&b, "%s__new_default(",
+							 c->name);
 					} else {
 						codegen_error(
 							e->line,
 							"no matching constructor overload for this argument count");
-						off = 0;
 					}
 				}
 				if (ctor) {
@@ -1494,37 +1538,28 @@ static char *gen_expr(Expr *e)
 					for (int i = 0; i < bound_count; i++) {
 						char *a = gen_bound_arg(
 							ctor, i, bound[i]);
-						off += snprintf(
-							buf + off,
-							sizeof(buf) - off,
-							"%s%s", i ? ", " : "",
-							a);
+						buf_addf(&b, "%s%s",
+							 i ? ", " : "", a);
 						free(a);
 					}
 					free(bound);
 				}
-				off += snprintf(buf + off, sizeof(buf) - off,
-						")");
-				return strdup(buf);
+				buf_add(&b, ")");
+				return buf_take(&b);
 			}
 			/* cimport FFI binding */
 			FfiBinding *ffi = find_ffi(callee->as.ident);
 			if (ffi) {
-				char buf[4096];
-				int off = snprintf(buf, sizeof buf,
-						   "ob_ffi_call(__ffi_%s, %d",
-						   ffi->name,
-						   e->as.call.arg_count);
+				Buf b = { 0 };
+				buf_addf(&b, "ob_ffi_call(__ffi_%s, %d",
+					 ffi->name, e->as.call.arg_count);
 				for (int i = 0; i < e->as.call.arg_count; i++) {
 					char *a = gen_expr(e->as.call.args[i]);
-					off += snprintf(buf + off,
-							sizeof(buf) - off,
-							", %s", a);
+					buf_addf(&b, ", %s", a);
 					free(a);
 				}
-				off += snprintf(buf + off, sizeof(buf) - off,
-						")");
-				return strdup(buf);
+				buf_add(&b, ")");
+				return buf_take(&b);
 			}
 			/* direct `from` import binding */
 			for (int i = 0; i < g_import_direct_count; i++) {
@@ -1532,8 +1567,7 @@ static char *gen_expr(Expr *e)
 					   callee->as.ident) == 0 &&
 				    strcmp(g_import_directs[i].owner,
 					   g_current_prefix) == 0) {
-					char buf[4096];
-					int off;
+					Buf b = { 0 };
 					if (module_is_builtin(
 						    g_import_directs[i].module)) {
 						const StdMember *sm =
@@ -1549,31 +1583,23 @@ static char *gen_expr(Expr *e)
 								fmt("'%s' takes %d argument(s)",
 								    sm->name,
 								    sm->arity));
-						off = snprintf(
-							buf, sizeof buf,
-							"ob_std_%s_%s(",
-							g_import_directs[i]
-								.module,
-							callee->as.ident);
+						buf_addf(&b, "ob_std_%s_%s(",
+							 g_import_directs[i]
+								 .module,
+							 callee->as.ident);
 						for (int i2 = 0;
 						     i2 < e->as.call.arg_count;
 						     i2++) {
 							char *a = gen_expr(
 								e->as.call.args
 									[i2]);
-							off += snprintf(
-								buf + off,
-								sizeof(buf) -
-									off,
-								"%s%s",
-								i2 ? ", " : "",
-								a);
+							buf_addf(&b, "%s%s",
+								 i2 ? ", " : "",
+								 a);
 							free(a);
 						}
-						off += snprintf(
-							buf + off,
-							sizeof(buf) - off, ")");
-						return strdup(buf);
+						buf_add(&b, ")");
+						return buf_take(&b);
 					}
 					/* a module's own function: bind against its declaration
                            so defaults and named arguments work across imports */
@@ -1590,10 +1616,9 @@ static char *gen_expr(Expr *e)
 							    g_import_directs[i]
 								    .module,
 							    callee->as.ident));
-					off = snprintf(
-						buf, sizeof buf, "%s__%s(",
-						g_import_directs[i].module,
-						callee->as.ident);
+					buf_addf(&b, "%s__%s(",
+						 g_import_directs[i].module,
+						 callee->as.ident);
 					int bound_count;
 					Expr **bound = bind_call_args(
 						mkf->decl, callee->as.ident, e,
@@ -1603,17 +1628,13 @@ static char *gen_expr(Expr *e)
 						char *a = gen_bound_arg(
 							mkf->decl, i2,
 							bound[i2]);
-						off += snprintf(
-							buf + off,
-							sizeof(buf) - off,
-							"%s%s", i2 ? ", " : "",
-							a);
+						buf_addf(&b, "%s%s",
+							 i2 ? ", " : "", a);
 						free(a);
 					}
-					off += snprintf(buf + off,
-							sizeof(buf) - off, ")");
+					buf_add(&b, ")");
 					free(bound);
-					return strdup(buf);
+					return buf_take(&b);
 				}
 			}
 			/* plain function call */
@@ -1645,27 +1666,25 @@ static char *gen_expr(Expr *e)
 					fmt("unknown function or class '%s'",
 					    callee->as.ident));
 			}
-			char buf[4096];
-			char fname[512];
-			if (kf->prefix[0] == '\0' &&
-			    strcmp(callee->as.ident, "main") == 0)
-				snprintf(fname, sizeof fname, "oboe_user_main");
-			else
-				snprintf(fname, sizeof fname, "%s%s",
-					 kf->prefix, callee->as.ident);
+			char *fname = (kf->prefix[0] == '\0' &&
+				       strcmp(callee->as.ident, "main") == 0) ?
+					      strdup("oboe_user_main") :
+					      fmt("%s%s", kf->prefix,
+						  callee->as.ident);
 			int bound_count;
 			Expr **bound = bind_call_args(
 				kf->decl, callee->as.ident, e, &bound_count);
-			int off = snprintf(buf, sizeof buf, "%s(", fname);
+			Buf b = { 0 };
+			buf_addf(&b, "%s(", fname);
+			free(fname);
 			for (int i = 0; i < bound_count; i++) {
 				char *a = gen_bound_arg(kf->decl, i, bound[i]);
-				off += snprintf(buf + off, sizeof(buf) - off,
-						"%s%s", i ? ", " : "", a);
+				buf_addf(&b, "%s%s", i ? ", " : "", a);
 				free(a);
 			}
-			off += snprintf(buf + off, sizeof(buf) - off, ")");
+			buf_add(&b, ")");
 			free(bound);
-			return strdup(buf);
+			return buf_take(&b);
 		}
 		if (callee->kind == EXPR_FIELD) {
 			/* arity check for builtin stdlib calls (module.member(...)) */
@@ -1704,13 +1723,10 @@ static char *gen_expr(Expr *e)
 			char *callee_code = gen_member_access_ex(
 				callee, true, false, &first_arg, &target,
 				e->as.call.arg_count);
-			char args_buf[4096];
-			args_buf[0] = '\0';
-			int aoff = 0;
+			Buf args = { 0 };
 			bool first = true;
 			if (first_arg) {
-				aoff += snprintf(args_buf, sizeof args_buf,
-						 "%s", first_arg);
+				buf_add(&args, first_arg);
 				first = false;
 				free(first_arg);
 			}
@@ -1730,18 +1746,16 @@ static char *gen_expr(Expr *e)
 				char *a = target ? gen_bound_arg(target, i,
 								 emit_args[i]) :
 						   gen_expr(emit_args[i]);
-				aoff += snprintf(args_buf + aoff,
-						 sizeof(args_buf) - aoff,
-						 "%s%s", first ? "" : ", ", a);
+				buf_addf(&args, "%s%s", first ? "" : ", ", a);
 				first = false;
 				free(a);
 			}
 			free(bound);
-			char final_buf[8192];
-			snprintf(final_buf, sizeof final_buf, "%s%s)",
-				 callee_code, args_buf);
+			char *args_code = buf_take(&args);
+			char *result = fmt("%s%s)", callee_code, args_code);
+			free(args_code);
 			free(callee_code);
-			return strdup(final_buf);
+			return result;
 		}
 		codegen_error(e->line, "unsupported call expression");
 		return NULL;

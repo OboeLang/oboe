@@ -21,17 +21,28 @@
 #include <math.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <limits.h>
 #ifdef _WIN32
 #include <windows.h>
 #include <process.h>
 #include <direct.h>
 /* the CRT's mkdir takes no mode; POSIX's does */
 #define ob_mkdir_one(p) _mkdir(p)
+/* _fullpath is the CRT's realpath: same "resolve into this buffer, NULL on
+   failure" contract, and it is the only one there is on Windows */
+#define ob_realpath(p, buf) _fullpath((buf), (p), PATH_MAX)
 #else
 #include <unistd.h>
 #include <sys/wait.h>
 #include <dlfcn.h>
 #define ob_mkdir_one(p) mkdir(p, 0755)
+#define ob_realpath(p, buf) realpath((p), (buf))
+#endif
+
+/* POSIX lets PATH_MAX be undefined when the limit is not fixed; 4096 is what
+   the compiler's own path buffers already assume. */
+#ifndef PATH_MAX
+#define PATH_MAX 4096
 #endif
 
 OboeExceptionFrame *ob_exc_stack = NULL;
@@ -1594,6 +1605,19 @@ OboeValue ob_std_os_remove(OboeValue path)
 	bool ok = remove(p) == 0;
 	free(p);
 	return ob_bool(ok);
+}
+
+/* The canonical absolute path, symlinks and all resolved, or null when the
+   path cannot be resolved (it does not exist, or a component is not a
+   directory). A compiler that embeds a source path into what it emits needs
+   one spelling of that path regardless of how the caller wrote it. */
+OboeValue ob_std_os_realpath(OboeValue path)
+{
+	char *p = ob_to_cstr(path);
+	char buf[PATH_MAX];
+	char *got = ob_realpath(p, buf);
+	free(p);
+	return got ? ob_string(got) : ob_null();
 }
 
 OboeValue ob_std_os_is_dir(OboeValue path)

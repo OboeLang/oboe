@@ -299,6 +299,94 @@ if "$OBOE" build selfhost/main.oboe -o "$tmp/oboec" >/dev/null 2>&1; then
         echo "FAIL selfhost_parser_coverage (no corpus file produces: $missing)"
         fail=$((fail+1))
     fi
+
+    # ---- self-hosted codegen ---------------------------------------------
+    #
+    # The last stage, and the strictest: the C handed to gcc must be identical,
+    # byte for byte, between `oboe emit-c` and `oboec --emit-c`. That covers
+    # module resolution and the whole unit graph too, since a wrong import order
+    # renumbers __oboe_toplevel_N.
+    #
+    # stdout and stderr are compared separately rather than merged: a codegen
+    # error can fire partway through emission, and the two compilers reach the
+    # combined stream in a different order (C's stdout is block-buffered and
+    # flushed at exit, Oboe's eprint flushes stdout first). Both must still
+    # produce the same C, the same diagnostic and the same status.
+    mkdir -p "$tmp/ce"
+    while IFS="$(printf '\t')" read -r name src; do
+        case "$name" in ''|'#'*) continue ;; esac
+        printf '%s\n' "$src" > "$tmp/ce/$name.oboe"
+    done < tests/helpers/codegen_errors.txt
+
+    # A project tree, built here rather than committed: the third and last
+    # module-search root is the *project's* .oboe/libraries, which only comes
+    # into play for a file in a subdirectory, and os.project_root() only differs
+    # from the script's own directory when a project.jsonc sits above it.
+    # Neither can be a fixture in the repo, because .gitignore excludes .oboe/.
+    # app.oboe imports one module from each root, so the two are told apart.
+    mkdir -p "$tmp/proj/.oboe/libraries" "$tmp/proj/sub"
+    printf '{ "project": { "name": "p", "entry": "sub/app.oboe" } }\n' \
+        > "$tmp/proj/project.jsonc"
+    printf 'func shout(str s) { return s.upper() }\n' \
+        > "$tmp/proj/.oboe/libraries/holler.oboe"
+    printf 'func near() { return "sibling" }\n' > "$tmp/proj/sub/nextdoor.oboe"
+    printf 'import shout from holler\nimport near from nextdoor\nimport os\nfunc main(array args) {\nprint(shout("hi"), near(), os.project_root())\n}\n' \
+        > "$tmp/proj/sub/app.oboe"
+
+    diffs=""
+    n=0
+    : > "$tmp/emitted"
+    for src in tests/*.oboe tests/helpers/*.oboe selfhost/*.oboe \
+               selfhost/mini/*.oboe "$tmp/ce"/*.oboe \
+               "$tmp/proj/sub/app.oboe"; do
+        n=$((n+1))
+        "$OBOE" emit-c "$src" > "$tmp/a.out" 2> "$tmp/a.err"; ra=$?
+        "$tmp/oboec" --emit-c "$src" > "$tmp/b.out" 2> "$tmp/b.err"; rb=$?
+        if ! cmp -s "$tmp/a.out" "$tmp/b.out" ||
+           ! cmp -s "$tmp/a.err" "$tmp/b.err" || [ "$ra" != "$rb" ]; then
+            diffs="$diffs $src"
+        fi
+        cat "$tmp/a.out" >> "$tmp/emitted"
+    done
+
+    # Once more by bare filename, from the file's own directory: that is the
+    # only way dirname() is asked about a path with no '/' in it, and it has to
+    # answer "." on both sides.
+    abs_oboe="$PWD/$OBOE"
+    n=$((n+1))
+    ( cd "$tmp/proj/sub" && "$abs_oboe" emit-c app.oboe ) \
+        > "$tmp/a.out" 2> "$tmp/a.err"; ra=$?
+    ( cd "$tmp/proj/sub" && "$tmp/oboec" --emit-c app.oboe ) \
+        > "$tmp/b.out" 2> "$tmp/b.err"; rb=$?
+    if ! cmp -s "$tmp/a.out" "$tmp/b.out" ||
+       ! cmp -s "$tmp/a.err" "$tmp/b.err" || [ "$ra" != "$rb" ]; then
+        diffs="$diffs app.oboe(bare)"
+    fi
+
+    if [ -z "$diffs" ]; then
+        echo "PASS selfhost_codegen ($n files)"
+        pass=$((pass+1))
+    else
+        echo "FAIL selfhost_codegen (differs:$diffs)"
+        fail=$((fail+1))
+    fi
+
+    # Same argument as the token and AST coverage: agreement on emissions the
+    # corpus never asks for proves nothing. Every runtime entry point named in
+    # a string literal in src/codegen.c -- every operator fallback, every
+    # primitive method, every coercion and type check -- has to appear in the C
+    # the corpus generated.
+    grep -oE '"[^"]*"' src/codegen.c | grep -oE '\bob_[a-z_0-9]+' |
+        sort -u > "$tmp/cwant"
+    grep -oE '\bob_[a-z_0-9]+' "$tmp/emitted" | sort -u > "$tmp/cgot"
+    missing="$(comm -23 "$tmp/cwant" "$tmp/cgot" | tr '\n' ' ')"
+    if [ -z "$missing" ]; then
+        echo "PASS selfhost_codegen_coverage ($(wc -l < "$tmp/cwant" | tr -d ' ') runtime entry points)"
+        pass=$((pass+1))
+    else
+        echo "FAIL selfhost_codegen_coverage (nothing emits: $missing)"
+        fail=$((fail+1))
+    fi
 else
     echo "FAIL selfhost_lexer (could not build selfhost/main.oboe)"
     fail=$((fail+1))

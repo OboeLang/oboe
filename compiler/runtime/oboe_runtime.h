@@ -258,6 +258,8 @@ OboeValue ob_std_os_exists(OboeValue path);
 OboeValue ob_std_os_remove(OboeValue path);
 OboeValue ob_std_os_getenv(OboeValue name); /* string, or null when unset */
 OboeValue ob_std_os_exit(OboeValue code); /* does not return */
+OboeValue
+ob_std_os_realpath(OboeValue path); /* canonical absolute path, or null */
 OboeValue ob_std_os_is_dir(OboeValue path);
 OboeValue ob_std_os_mkdir(OboeValue path); /* mkdir -p; existing is success */
 /* entry names, no "." or "..", sorted by byte order so a directory walk is

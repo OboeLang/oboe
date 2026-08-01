@@ -1,5 +1,8 @@
 {
     "project": {
+        // a commented-out key the scanner has to keep ignoring: it matches
+        // before the real one, so a comment-blind reader imports the wrong name
+        // "name": "not-this-one",
         "name": "shapes",
         "version": "1.0.0",
         "entry": "src/shapes.oboe"

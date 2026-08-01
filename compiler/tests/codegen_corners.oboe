@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// Corners of code generation that the feature tests do not reach, each of
+// which is invisible unless the program is shaped a particular way.
+
+// The pre-scan that finds imported files early works on the source text with
+// comments and string bodies blanked out. Without that blanking this string
+// would pull _counter into the unit list *ahead of* the real import below,
+// renumbering every unit after it. It has to come first to be visible at all:
+// a spurious unit appended at the end is unreferenced and emits nothing.
+var scan_bait = "import _counter"
+
+import _modstatic
+
+// A child declared *before* its parent. Two orderings depend on it: the
+// parent's struct has to be emitted first (the child embeds it by value), and
+// the parent's fields have to be inferred first, or `this.tag` here would open
+// a second slot shadowing the inherited one.
+class Child extends Base {
+	func init(this) {
+		super()
+		this.tag = "child"
+	}
+}
+
+class Base {
+	func init(this) {
+		this.tag = "base"
+	}
+}
+
+// Constructor overloads are chosen by argument count. An exact match wins over
+// an earlier overload whose defaults merely *allow* that count, so Over() is
+// the second one, not the first with a = 7.
+class Over {
+	func init(this, int a = 7) {
+		this.what = "one:" + str(a)
+	}
+	func init(this) {
+		this.what = "zero"
+	}
+}
+
+func main(array args) {
+	print(Child().tag)
+	print(Base().tag)
+	print(Over().what)
+	print(Over(3).what)
+	print(Registry.total)
+	print(scan_bait)
+}

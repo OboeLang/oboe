@@ -9,4 +9,7 @@ nested: b
 empty: 0
 caught missing dir
 caught file-as-dir
+realpath: true
+realpath absolute: true
+realpath missing: null
 cleaned: false

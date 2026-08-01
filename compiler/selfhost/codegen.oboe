@@ -1,0 +1,3261 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// Code generation, ported from src/codegen.c and kept in that file's order so
+// the two stay diffable. It consumes the dict AST that parser.oboe builds and
+// writes the same C bytes src/codegen.c does -- which is the whole gate: see
+// `oboe emit-c` and the selfhost_codegen test.
+//
+// Three shapes differ from the C, none of them visible in the output:
+//
+//   * C's out-parameters become returned dicts, since Oboe has none.
+//   * C's fixed `char buf[4096]` accumulators become arrays joined at the end.
+//     The C grew the same unbounded behaviour during this port; a ceiling
+//     there is a ceiling on expression size that truncates into invalid C.
+//   * Output is collected in OUT and written once, because ob_write flushes on
+//     every call. codegen_error flushes what has been emitted so far before it
+//     complains, which is what the C's stdio buffer does for it at exit.
+import os
+import die, fail from diag
+import lex_all, prescan_ops from lexer
+import parse_program from parser
+import HOST_OS from hostos
+
+// ============================= symbol tables =============================
+
+var CLASSES = []
+var CLASS_EMITTED = []
+
+// directory of the file being compiled, for resolving imports
+var SOURCE_DIR = null
+
+// import bindings are scoped to the importing unit (owner = its prefix), so
+// one file's aliases don't leak into another's name resolution.
+// Each is { "local_name":, "module":, "owner": }.
+var IMPORT_ALIASES = []
+var IMPORT_DIRECTS = []
+
+// top-level `operator <sym> (a, b)`: { "symbol":, "cfunc":, "decl":, "prefix": }
+var USER_OPS = []
+
+// class `operator <sym> (this, other)` overloads, for registration in static
+// init and for knowing a symbol is meaningful even without a top-level
+// definition: { "cls":, "symbol":, "cfunc":, "decl": }
+var CLASS_OPS = []
+
+// events and their `on` handlers
+var EVENTS = []   // { "decl":, "cls": }
+var HANDLERS = [] // { "decl":, "cfunc":, "prefix": }
+
+// cimport FFI bindings: { "name":, "lib": }
+var FFI = []
+
+// every declared function, so calls to unknown names are Oboe compile errors
+// instead of C errors; prefix is "" for main-file functions, "module__" for
+// module functions (letting a module function call a sibling by bare name)
+var KNOWN_FUNCS = [] // { "name":, "prefix":, "decl": }
+
+// how many `try` frames are lexically open at the statement being generated.
+// A `return` out of a try body would otherwise leave the pushed frames on
+// ob_exc_stack after their C stack slots die, so the next throw longjmps into
+// freed memory; returns unwind back to the outermost open frame's `prev`.
+var TRY_DEPTH = 0
+
+// TRY_DEPTH as it stood when the innermost enclosing loop was entered, or -1
+// outside any loop. `break`/`continue` jump out of every try opened since then,
+// so they have to unwind ob_exc_stack the same way a `return` does -- but only
+// back to the loop, not out of the whole function. -1 also doubles as the check
+// for a `break` with no loop to break out of.
+var LOOP_TRY_DEPTH = -1
+
+// built-in standard-library modules (import math / random / os): resolved to
+// runtime-implemented functions when no module file of that name exists.
+// The value is the member's arity.
+var STD_MATH = { "abs": 1, "min": 2, "max": 2, "pow": 2, "sqrt": 1,
+		 "floor": 1, "ceil": 1, "round": 1 }
+var STD_RANDOM = { "seed": 1, "randint": 2, "choice": 1 }
+var STD_OS = { "run": 1, "spawn": 1, "read_file": 1, "write_file": 2,
+	       "append_file": 2, "exists": 1, "remove": 1, "getenv": 1,
+	       "exit": 1, "is_dir": 1, "mkdir": 1, "listdir": 1,
+	       "realpath": 1,
+	       // resolved at compile time -- see emit_script_path_builtins
+	       "script_file": 0, "script_dir": 0, "project_root": 0 }
+
+func std_module_members(str module) {
+	if (module == "math") {
+		return STD_MATH
+	}
+	if (module == "random") {
+		return STD_RANDOM
+	}
+	if (module == "os") {
+		return STD_OS
+	}
+	return null
+}
+
+// The arity of a built-in stdlib member. Errors when the module has no such
+// member; the C returns the whole table row, but its name is the member's own.
+func std_member_lookup(str module, str member, int line) {
+	var tbl = std_module_members(module)
+	if (tbl != null and tbl.has(member)) {
+		return tbl[member]
+	}
+	codegen_error(line, "'" + module + "' has no member '" + member + "'")
+	return 0
+}
+
+// Emitted C, one piece per fprintf in the C. ob_write flushes every call, so
+// this is joined and written once rather than streamed.
+var OUT = []
+
+// Where a *partial* emission goes when codegen_error cuts things short: the
+// same place the finished C would have gone, which is the file for
+// `oboec -o out.c` and stdout for `--emit-c`. The C never has to decide -- it
+// holds a FILE* either way and stdio flushes it at exit.
+var OUT_PATH = null
+
+func codegen_set_output_path(path) {
+	OUT_PATH = path
+}
+
+func emit(str s) {
+	OUT.push(s)
+}
+
+func flush_out() {
+	if (OUT_PATH != null) {
+		os.write_file(OUT_PATH, OUT.join(""))
+	} else {
+		write(OUT.join(""))
+	}
+	OUT = []
+}
+
+// File whose declarations are currently being scanned or emitted, so a codegen
+// error can name it the way the parser already names its own. Set per unit at
+// every phase that can report an error.
+var CURRENT_FILE = null
+
+func codegen_error(int line, str msg) {
+	// whatever was emitted before the error still belongs on stdout: the C
+	// has already written it into stdio's buffer by this point, and exit
+	// flushes it
+	flush_out()
+	var where = CURRENT_FILE ?? "<input>"
+	die(where + ":" + str(line) + ": error: " + msg)
+}
+
+// ---- byte helpers ----
+// -1 past the end, so a scan can look ahead without a bounds test at every
+// use; ord() on the empty string would throw.
+func byte_of(str s, int i) {
+	if (i < 0 or i >= s.len()) {
+		return -1
+	}
+	return ord(s.substr(i, 1))
+}
+
+// Three octal digits. C's \xNN is greedy and would swallow a following hex
+// digit from the text, so control bytes go out in octal at a fixed width.
+func oct3(int n) {
+	return str(n / 64) + str((n / 8) % 8) + str(n % 8)
+}
+
+// Escapes an arbitrary byte string for embedding in a C string literal. Bytes
+// above 127 pass through untouched, which keeps UTF-8 literals readable in the
+// output.
+func escape_c_string(str s) {
+	var out = []
+	var n = s.len()
+	var i = 0
+	while (i < n) {
+		var ch = s.substr(i, 1)
+		var c = ord(ch)
+		if (c == 34 or c == 92) {
+			out.push("\\" + ch)
+		} else if (c == 10) {
+			out.push("\\n")
+		} else if (c == 13) {
+			out.push("\\r")
+		} else if (c == 9) {
+			out.push("\\t")
+		} else if (c < 32 or c == 127) {
+			out.push("\\" + oct3(c))
+		} else {
+			out.push(ch)
+		}
+		i = i + 1
+	}
+	return out.join("")
+}
+
+// ---- paths ----
+
+// POSIX dirname. The C calls libc's, which is allowed to answer out of static
+// storage that the next call overwrites, so it copies the result immediately;
+// nothing here has to.
+func path_dirname(str p) {
+	var n = p.len()
+	while (n > 0 and p.substr(n - 1, 1) == "/") {
+		n = n - 1
+	}
+	if (n == 0) {
+		return p.len() > 0 ? "/" : "."
+	}
+	var i = n
+	while (i > 0 and p.substr(i - 1, 1) != "/") {
+		i = i - 1
+	}
+	if (i == 0) {
+		return "."
+	}
+	while (i > 0 and p.substr(i - 1, 1) == "/") {
+		i = i - 1
+	}
+	if (i == 0) {
+		return "/"
+	}
+	return p.substr(0, i)
+}
+
+func file_exists(str path) {
+	return os.exists(path)
+}
+
+// project.jsonc is the current name; project.json is kept as a fallback for
+// projects written before the rename. Returns the found path, or null when
+// `folder` holds neither.
+func find_project_json_in(str folder) {
+	var p = folder + "/project.jsonc"
+	if (file_exists(p)) {
+		return p
+	}
+	p = folder + "/project.json"
+	return file_exists(p) ? p : null
+}
+
+// os.script_file(), os.script_dir() and os.project_root() answer questions the
+// compiler already knows, so they are emitted as constant-returning functions
+// named exactly as the ordinary stdlib call path expects (`ob_std_os_<name>`)
+// rather than being resolved in the runtime, which has no idea where its
+// program's source lived. project_root is the nearest ancestor directory of the
+// script holding a project.json, falling back to the script's own directory.
+func walk_to_project_root(str dir) {
+	var root = dir
+	while (true) {
+		if (find_project_json_in(root) != null) {
+			break
+		}
+		var parent = path_dirname(root)
+		if (parent == root) {
+			root = dir
+			break
+		}
+		root = parent
+	}
+	return root
+}
+
+func emit_script_path_builtins(str main_path) {
+	var abs = os.realpath(main_path) ?? main_path
+	var dir = path_dirname(abs)
+	var root = walk_to_project_root(dir)
+	emit("static OboeValue ob_std_os_script_file(void) { return ob_string(\"" +
+	     escape_c_string(abs) + "\"); }\n")
+	emit("static OboeValue ob_std_os_script_dir(void) { return ob_string(\"" +
+	     escape_c_string(dir) + "\"); }\n")
+	emit("static OboeValue ob_std_os_project_root(void) { return ob_string(\"" +
+	     escape_c_string(root) + "\"); }\n\n")
+}
+
+// ============================= class lookup =============================
+
+func find_class(name) {
+	if (name == null) {
+		return null
+	}
+	for (c in CLASSES) {
+		if (c["name"] == name) {
+			return c
+		}
+	}
+	return null
+}
+
+func find_field_local(c, str name) {
+	for (f in c["fields"]) {
+		if (f["name"] == name) {
+			return f
+		}
+	}
+	return null
+}
+
+func find_method_local(c, str name) {
+	for (m in c["methods"]) {
+		if (m["name"] == name and name != "init") {
+			return m
+		}
+	}
+	return null
+}
+
+// { "owner": <class>, "field": <field> }, or null. The C hands the field back
+// through an out-parameter.
+func find_field_owner(c, str name) {
+	var cur = c
+	while (cur != null) {
+		var f = find_field_local(cur, name)
+		if (f != null) {
+			return { "owner": cur, "field": f }
+		}
+		cur = cur["parent_name"] != null ?
+			      find_class(cur["parent_name"]) : null
+	}
+	return null
+}
+
+// { "owner": <class>, "method": <func> }, or null
+func find_method_owner(c, str name) {
+	var cur = c
+	while (cur != null) {
+		var m = find_method_local(cur, name)
+		if (m != null) {
+			return { "owner": cur, "method": m }
+		}
+		cur = cur["parent_name"] != null ?
+			      find_class(cur["parent_name"]) : null
+	}
+	return null
+}
+
+// nearest class at-or-above `c` that declares at least one `init`
+func find_init_owner(c) {
+	var cur = c
+	while (cur != null) {
+		for (m in cur["methods"]) {
+			if (m["name"] == "init") {
+				return cur
+			}
+		}
+		cur = cur["parent_name"] != null ?
+			      find_class(cur["parent_name"]) : null
+	}
+	return null
+}
+
+// The init overload on `c` callable with `argc` arguments, or -1. An exact
+// parameter-count match wins; otherwise the first overload whose defaults let
+// it accept `argc` arguments does. Selection is still by count alone, never by
+// argument type.
+func find_init_index(c, int argc) {
+	var idx = 0
+	var fallback = -1
+	for (m in c["methods"]) {
+		if (m["name"] != "init") {
+			continue
+		}
+		var total = 0
+		var required = 0
+		for (p in m["params"]) {
+			if (p["name"] == "this") {
+				continue
+			}
+			total = total + 1
+			if (p["default_value"] == null) {
+				required = required + 1
+			}
+		}
+		if (total == argc) {
+			return idx
+		}
+		if (fallback < 0 and argc >= required and argc <= total) {
+			fallback = idx
+		}
+		idx = idx + 1
+	}
+	return fallback
+}
+
+// the declaration behind the index find_init_index returned
+func find_init_decl(c, int index) {
+	var idx = 0
+	for (m in c["methods"]) {
+		if (m["name"] != "init") {
+			continue
+		}
+		if (idx == index) {
+			return m
+		}
+		idx = idx + 1
+	}
+	return null
+}
+
+func find_user_op(str sym) {
+	for (u in USER_OPS) {
+		if (u["symbol"] == sym) {
+			return u
+		}
+	}
+	return null
+}
+
+func class_op_exists(str sym) {
+	for (o in CLASS_OPS) {
+		if (o["symbol"] == sym) {
+			return true
+		}
+	}
+	return false
+}
+
+func find_event(str name) {
+	for (e in EVENTS) {
+		if (e["decl"]["name"] == name) {
+			return e
+		}
+	}
+	return null
+}
+
+func find_ffi(str name) {
+	for (f in FFI) {
+		if (f["name"] == name) {
+			return f
+		}
+	}
+	return null
+}
+
+// prefix of the compilation unit currently being generated: "" for the main
+// file, "module__" while emitting a module's bodies. Bare calls only resolve
+// to functions of the same unit.
+var CURRENT_PREFIX = ""
+
+func find_known_func_in(str name, str prefix) {
+	for (k in KNOWN_FUNCS) {
+		if (k["name"] == name and k["prefix"] == prefix) {
+			return k
+		}
+	}
+	return null
+}
+
+func find_known_func(str name) {
+	return find_known_func_in(name, CURRENT_PREFIX)
+}
+
+func register_funcs(array decls, str prefix) {
+	for (d in decls) {
+		if (d["kind"] != "DECL_FUNC") {
+			continue
+		}
+		KNOWN_FUNCS.push({ "name": d["func"]["name"],
+				   "prefix": prefix, "decl": d["func"] })
+	}
+}
+
+// ===================== scopes: variable -> static class type =====================
+
+// prim_type is the declared primitive type name, kept so that assigning to an
+// already-declared `int8 x` re-applies the same coercion the declaration did.
+// A scope is an array of entries searched from the newest, which is what the C's
+// prepend-and-walk linked list amounts to.
+var SCOPES = []
+
+func push_scope() {
+	SCOPES.push([])
+}
+
+func pop_scope() {
+	SCOPES.pop()
+}
+
+// c_name is the generated C identifier when it differs from the Oboe name
+// (module-level variables are prefixed globals); null means they match
+func define_var_full(str name, class_name, c_name, prim_type) {
+	SCOPES[SCOPES.len() - 1].push({ "name": name,
+					"class_name": class_name,
+					"c_name": c_name,
+					"prim_type": prim_type })
+}
+
+func define_var_c(str name, class_name, c_name) {
+	define_var_full(name, class_name, c_name, null)
+}
+
+func define_var(str name, class_name) {
+	define_var_full(name, class_name, null, null)
+}
+
+func lookup_entry(str name) {
+	var si = SCOPES.len() - 1
+	while (si >= 0) {
+		var entries = SCOPES[si]
+		var ei = entries.len() - 1
+		while (ei >= 0) {
+			if (entries[ei]["name"] == name) {
+				return entries[ei]
+			}
+			ei = ei - 1
+		}
+		si = si - 1
+	}
+	return null
+}
+
+func lookup_var_prim(str name) {
+	var e = lookup_entry(name)
+	return e == null ? null : e["prim_type"]
+}
+
+func lookup_var_cname(str name) {
+	var e = lookup_entry(name)
+	if (e == null) {
+		return name
+	}
+	return e["c_name"] ?? e["name"]
+}
+
+func var_in_scope(str name) {
+	return lookup_entry(name) != null
+}
+
+func lookup_var_class(str name) {
+	var e = lookup_entry(name)
+	return e == null ? null : e["class_name"]
+}
+
+// class name while generating a method body, else null
+var CURRENT_CLASS = null
+
+func ind(int n) {
+	emit(" ".repeat(n))
+}
+
+// the static class name of an expression, or null if not a known class instance
+func infer_class(e) {
+	if (e == null) {
+		return null
+	}
+	var k = e["kind"]
+	if (k == "EXPR_IDENT") {
+		if (e["ident"] == "this") {
+			return CURRENT_CLASS
+		}
+		return lookup_var_class(e["ident"])
+	}
+	if (k == "EXPR_CALL") {
+		var callee = e["callee"]
+		if (callee["kind"] == "EXPR_IDENT") {
+			// a constructor call is the class itself
+			var c = find_class(callee["ident"])
+			if (c != null) {
+				return c["name"]
+			}
+			// otherwise a plain call is worth as much as its declared
+			// return type, which is the only annotation a caller has
+			// to go on for `var n = make_node()`
+			var kf = find_known_func(callee["ident"])
+			if (kf != null and kf["decl"]["return_type"] != null and
+			    find_class(kf["decl"]["return_type"]) != null) {
+				return kf["decl"]["return_type"]
+			}
+			return null
+		}
+		if (callee["kind"] == "EXPR_FIELD") {
+			var base = infer_class(callee["obj"])
+			var bc = base != null ? find_class(base) : null
+			if (bc == null) {
+				return null
+			}
+			var got = find_method_owner(bc, callee["name"])
+			if (got != null and got["method"]["return_type"] != null and
+			    find_class(got["method"]["return_type"]) != null) {
+				return got["method"]["return_type"]
+			}
+		}
+		return null
+	}
+	if (k == "EXPR_FIELD") {
+		var base_class = infer_class(e["obj"])
+		if (base_class == null) {
+			return null
+		}
+		var bc = find_class(base_class)
+		if (bc == null) {
+			return null
+		}
+		var got = find_field_owner(bc, e["name"])
+		if (got != null) {
+			return find_class(got["field"]["type_name"]) != null ?
+				       got["field"]["type_name"] : null
+		}
+		return null
+	}
+	if (k == "EXPR_BINARY") {
+		// an overloaded operator conventionally returns an instance of the
+		// left operand's class (e.g. Vector2 + Vector2 -> Vector2)
+		var lc = infer_class(e["l"])
+		if (lc == null) {
+			return null
+		}
+		var c = find_class(lc)
+		while (c != null) {
+			for (o in CLASS_OPS) {
+				if (o["cls"] == c and o["symbol"] == e["op"]) {
+					return lc
+				}
+			}
+			c = c["parent_name"] != null ?
+				    find_class(c["parent_name"]) : null
+		}
+		return null
+	}
+	return null
+}
+
+// ============================= expressions =============================
+
+func gen_string_literal(e) {
+	var parts = e["str_parts"]
+	var count = parts.len()
+	if (count == 0) {
+		return "ob_string(\"\")"
+	}
+	var b = ["ob_interpolate(" + str(count)]
+	for (p in parts) {
+		if (p["is_expr"]) {
+			// ensure every interpolated part is coerced to a string value
+			b.push(", ob_str(" + gen_expr(p["expr"]) + ")")
+		} else {
+			b.push(", ob_string(\"" +
+			       escape_c_string(p["literal"]) + "\")")
+		}
+	}
+	b.push(")")
+	return b.join("")
+}
+
+// ---- numeric type annotations ----
+// These are the one place a declared type is enforced: storing into a variable,
+// parameter or field annotated with one of them coerces the value (wrapping
+// sized ints, rounding float32). Every other annotation stays decorative.
+//
+// `int` is the unsized default -- 64-bit signed storage that doesn't wrap on its
+// own -- while int8/int16/int32/int64 and the unsigned spellings are genuinely
+// that wide. `float` and `float64` are the same 64-bit type; `float32` differs
+// only in rounding its stores through single precision.
+var NUMERIC_TYPES = {
+	"int": { "width": 0, "is_unsigned": false, "is_float": false },
+	"int8": { "width": 8, "is_unsigned": false, "is_float": false },
+	"int16": { "width": 16, "is_unsigned": false, "is_float": false },
+	"int32": { "width": 32, "is_unsigned": false, "is_float": false },
+	"int64": { "width": 64, "is_unsigned": false, "is_float": false },
+	"uint": { "width": 64, "is_unsigned": true, "is_float": false },
+	"uint8": { "width": 8, "is_unsigned": true, "is_float": false },
+	"uint16": { "width": 16, "is_unsigned": true, "is_float": false },
+	"uint32": { "width": 32, "is_unsigned": true, "is_float": false },
+	"uint64": { "width": 64, "is_unsigned": true, "is_float": false },
+	"float": { "width": 64, "is_unsigned": false, "is_float": true },
+	"float32": { "width": 32, "is_unsigned": false, "is_float": true },
+	"float64": { "width": 64, "is_unsigned": false, "is_float": true }
+}
+
+func numeric_type(name) {
+	if (name == null) {
+		return null
+	}
+	return NUMERIC_TYPES.has(name) ? NUMERIC_TYPES[name] : null
+}
+
+// wraps `code` in the coercion for `type_name`, or returns it untouched when
+// the type isn't a numeric one (or is the unsized `int`, which never wraps)
+func apply_numeric_coercion(type_name, str code) {
+	var t = numeric_type(type_name)
+	if (t == null) {
+		return code
+	}
+	if (t["is_float"]) {
+		return "ob_coerce_float(" + code + ", " + str(t["width"]) + ")"
+	}
+	if (t["width"] == 0) {
+		return code // plain `int`: nothing to enforce
+	}
+	return "ob_coerce_int(" + code + ", " + str(t["width"]) + ", " +
+	       (t["is_unsigned"] ? "true" : "false") + ")"
+}
+
+// full boolean C expression for `value is <type_name>`, or null when the name
+// isn't a builtin type (in which case it's a class name)
+func gen_builtin_type_check(str type_name, str value) {
+	if (type_name == "bool") {
+		return "ob_is_bool(" + value + ")"
+	}
+	if (type_name == "string") {
+		return "ob_is_string(" + value + ")"
+	}
+	if (type_name == "array") {
+		return "ob_is_array(" + value + ")"
+	}
+	if (type_name == "dict") {
+		return "ob_is_dict(" + value + ")"
+	}
+	if (type_name == "null") {
+		return "ob_is_null(" + value + ")"
+	}
+	var t = numeric_type(type_name)
+	if (t == null) {
+		return null
+	}
+	if (t["is_float"]) {
+		return "ob_is_float(" + value + ")"
+	}
+	if (t["width"] == 0) {
+		return "ob_is_int(" + value + ")"
+	}
+	// a sized int check asks whether the value fits the range, not how it was
+	// declared, so `200 is int8` is false
+	return "ob_is_int_width(" + value + ", " + str(t["width"]) + ", " +
+	       (t["is_unsigned"] ? "true" : "false") + ")"
+}
+
+// ---- methods on primitives ----
+// The spec says primitives have methods, but the compiler only tracks class
+// types, never primitive ones -- so a method whose receiver's class can't be
+// inferred is looked up here and compiled to a runtime call that takes the
+// receiver as its first argument and tag-checks it. A name shared by several
+// receiver types (`len`, `contains`, ...) therefore maps to a single
+// polymorphic runtime function. A user class's own method always wins: this
+// table is only consulted once class resolution has come up empty.
+var BUILTIN_METHODS = {
+	// any receiver
+	"str": { "arity": 0, "cfunc": "ob_m_str" },
+	// shared across receiver types
+	"len": { "arity": 0, "cfunc": "ob_m_len" },
+	"contains": { "arity": 1, "cfunc": "ob_m_contains" },
+	"index_of": { "arity": 1, "cfunc": "ob_m_index_of" },
+	"reverse": { "arity": 0, "cfunc": "ob_m_reverse" },
+	"slice": { "arity": 2, "cfunc": "ob_m_slice" },
+	// strings
+	"upper": { "arity": 0, "cfunc": "ob_str_upper" },
+	"lower": { "arity": 0, "cfunc": "ob_str_lower" },
+	"trim": { "arity": 0, "cfunc": "ob_str_trim" },
+	"split": { "arity": 1, "cfunc": "ob_str_split" },
+	"starts_with": { "arity": 1, "cfunc": "ob_str_starts_with" },
+	"ends_with": { "arity": 1, "cfunc": "ob_str_ends_with" },
+	"replace": { "arity": 2, "cfunc": "ob_str_replace" },
+	"substr": { "arity": 2, "cfunc": "ob_str_substr" },
+	"repeat": { "arity": 1, "cfunc": "ob_str_repeat" },
+	"to_int": { "arity": 0, "cfunc": "ob_str_to_int" },
+	"to_float": { "arity": 0, "cfunc": "ob_str_to_float" },
+	// arrays
+	"push": { "arity": 1, "cfunc": "ob_arr_push" },
+	"pop": { "arity": 0, "cfunc": "ob_arr_pop" },
+	"insert": { "arity": 2, "cfunc": "ob_arr_insert" },
+	"remove_at": { "arity": 1, "cfunc": "ob_arr_remove_at" },
+	"join": { "arity": 1, "cfunc": "ob_arr_join" },
+	// dicts
+	"keys": { "arity": 0, "cfunc": "ob_dict_keys" },
+	"values": { "arity": 0, "cfunc": "ob_dict_values" },
+	"has": { "arity": 1, "cfunc": "ob_dict_has_m" },
+	"remove": { "arity": 1, "cfunc": "ob_dict_remove" }
+}
+
+func find_builtin_method(str name) {
+	return BUILTIN_METHODS.has(name) ? BUILTIN_METHODS[name] : null
+}
+
+// Resolves `obj.name` (field read, method-call callee, or static access) into
+// a C expression. `for_call` indicates the result will be immediately invoked
+// with args (needed to know whether to look up a field or a method); when so,
+// the "code" is returned still open (ending in an unclosed '(') and, for
+// instance methods, "first_arg" carries the receiver pointer expression that
+// the caller must splice in as the method's first argument. "decl" carries the
+// resolved declaration so the caller can bind defaults and named arguments
+// against it; it stays null for calls with no Oboe-level declaration (built-in
+// stdlib members and primitive methods).
+func gen_member_access_ex(field_expr, bool for_call, bool safe, int argc) {
+	var obj = field_expr["obj"]
+	var name = field_expr["name"]
+	var line = field_expr["line"]
+
+	// static access: ClassName.member, where ClassName isn't shadowed by a
+	// variable
+	if (obj["kind"] == "EXPR_IDENT" and !var_in_scope(obj["ident"])) {
+		var sc = find_class(obj["ident"])
+		if (sc != null) {
+			if (for_call) {
+				var sm = null
+				for (m in sc["methods"]) {
+					if (m["name"] == name) {
+						sm = m
+					}
+				}
+				return { "code": sc["name"] + "__" + name + "(",
+					 "first_arg": null, "decl": sm }
+			}
+			return { "code": sc["name"] + "__" + name,
+				 "first_arg": null, "decl": null }
+		}
+		// module-qualified access, e.g. `alias.member` or `module.member`
+		for (ia in IMPORT_ALIASES) {
+			if (ia["local_name"] != obj["ident"] or
+			    ia["owner"] != CURRENT_PREFIX) {
+				continue
+			}
+			var mod = ia["module"]
+			if (module_is_builtin(mod)) {
+				std_member_lookup(mod, name, line)
+				if (!for_call) {
+					codegen_error(line,
+						      "this standard-library member is a function; call it")
+				}
+				return { "code": "ob_std_" + mod + "_" + name +
+						 "(",
+					 "first_arg": null, "decl": null }
+			}
+			if (for_call) {
+				var mkf = find_known_func_in(name, mod + "__")
+				return { "code": mod + "__" + name + "(",
+					 "first_arg": null,
+					 "decl": mkf != null ? mkf["decl"] :
+							       null }
+			}
+			return { "code": mod + "__" + name, "first_arg": null,
+				 "decl": null }
+		}
+	}
+
+	// `super.member` starts resolution at the parent class, on the same `this`
+	if (obj["kind"] == "EXPR_IDENT" and obj["ident"] == "super" and
+	    !var_in_scope(obj["ident"])) {
+		if (CURRENT_CLASS == null) {
+			codegen_error(line, "'super' used outside a class")
+		}
+		var cc = find_class(CURRENT_CLASS)
+		var parent = (cc != null and cc["parent_name"] != null) ?
+				     find_class(cc["parent_name"]) : null
+		if (parent == null) {
+			codegen_error(line,
+				      "'super' used in a class with no parent")
+		}
+		if (for_call) {
+			var got = find_method_owner(parent, name)
+			if (got == null) {
+				codegen_error(line,
+					      "no such method on the parent class (or its ancestors)")
+			}
+			var owner = got["owner"]
+			if (got["method"]["is_private"] and
+			    CURRENT_CLASS != owner["name"]) {
+				codegen_error(line, "method is private")
+			}
+			return { "code": owner["name"] + "__" + name + "(",
+				 "first_arg": "((" + owner["name"] +
+					      "*)(this))",
+				 "decl": got["method"] }
+		}
+		var fgot = find_field_owner(parent, name)
+		if (fgot == null) {
+			codegen_error(line,
+				      "no such field on the parent class (or its ancestors)")
+		}
+		return { "code": "((" + fgot["owner"]["name"] +
+				 "*)(this))->" + name,
+			 "first_arg": null, "decl": null }
+	}
+
+	var is_this = obj["kind"] == "EXPR_IDENT" and obj["ident"] == "this"
+	var base_class = infer_class(obj)
+	var obj_code = is_this ? null : gen_expr(obj)
+
+	if (base_class == null and for_call and !is_this) {
+		// not a known class: a method on a primitive, dispatched at runtime
+		var bm = find_builtin_method(name)
+		if (bm != null) {
+			if (argc >= 0 and argc != bm["arity"]) {
+				codegen_error(line,
+					      "'" + name + "' takes " +
+						      str(bm["arity"]) +
+						      " argument(s), got " +
+						      str(argc))
+			}
+			return { "code": bm["cfunc"] + "(",
+				 "first_arg": obj_code, "decl": null }
+		}
+	}
+	if (base_class == null) {
+		codegen_error(line,
+			      "cannot resolve the static type of this expression for member access (compile-time dispatch requires a known class)")
+	}
+	var bc = find_class(base_class)
+
+	if (for_call) {
+		var got = find_method_owner(bc, name)
+		if (got == null) {
+			codegen_error(line,
+				      "no such method on this class (or its ancestors)")
+		}
+		var owner = got["owner"]
+		if (got["method"]["is_private"] and
+		    (CURRENT_CLASS == null or CURRENT_CLASS != owner["name"])) {
+			codegen_error(line, "method is private")
+		}
+		var ptr = is_this ? "((" + owner["name"] + "*)(this))" :
+				    "((" + owner["name"] + "*)((" + obj_code +
+					    ").as.obj))"
+		return { "code": owner["name"] + "__" + name + "(",
+			 "first_arg": ptr, "decl": got["method"] }
+	}
+
+	var fgot2 = find_field_owner(bc, name)
+	if (fgot2 == null) {
+		codegen_error(line,
+			      "no such field on this class (or its ancestors)")
+	}
+	var fowner = fgot2["owner"]
+	if (fgot2["field"]["is_private"] and
+	    (CURRENT_CLASS == null or CURRENT_CLASS != fowner["name"])) {
+		codegen_error(line, "field is private")
+	}
+	var fptr = is_this ? "((" + fowner["name"] + "*)(this))" :
+			     "((" + fowner["name"] + "*)((" + obj_code +
+				     ").as.obj))"
+	var access = fptr + "->" + name
+	if (safe and !is_this) {
+		access = "(ob_is_null(" + obj_code + ") ? ob_null() : " +
+			 access + ")"
+	}
+	return { "code": access, "first_arg": null, "decl": null }
+}
+
+func gen_member_access(field_expr, bool for_call, bool safe) {
+	return gen_member_access_ex(field_expr, for_call, safe, -1)["code"]
+}
+
+// the declared primitive type of an assignment target, for re-coercion; null
+// when the target has no numeric annotation
+func assign_target_prim_type(target) {
+	if (target["kind"] == "EXPR_IDENT") {
+		return lookup_var_prim(target["ident"])
+	}
+	if (target["kind"] == "EXPR_FIELD") {
+		var bc = find_class(infer_class(target["obj"]))
+		if (bc == null) {
+			return null
+		}
+		var got = find_field_owner(bc, target["name"])
+		if (got != null) {
+			return got["field"]["type_name"]
+		}
+	}
+	return null
+}
+
+// a C lvalue string for simple (non-index) assignment targets
+func gen_assign_target_lvalue(target) {
+	if (target["kind"] == "EXPR_IDENT") {
+		if (!var_in_scope(target["ident"])) {
+			codegen_error(target["line"],
+				      "undefined variable '" +
+					      target["ident"] + "'")
+		}
+		return lookup_var_cname(target["ident"])
+	}
+	if (target["kind"] == "EXPR_FIELD") {
+		return gen_member_access(target, false, false)
+	}
+	codegen_error(target["line"], "invalid assignment target")
+	return null
+}
+
+// ---- argument binding ----
+// The generated C is positional, but every call site already knows which
+// declaration it targets, so defaults and `name = value` arguments are resolved
+// here rather than by emitting per-function thunks. Returns the arguments in
+// parameter order, with each omitted optional parameter's default expression
+// spliced in. `this` parameters are skipped: the receiver is supplied by the
+// method-call path, not by the argument list.
+func param_count_of(f) {
+	var total = 0
+	var required = 0
+	for (p in f["params"]) {
+		if (p["name"] == "this") {
+			continue
+		}
+		total = total + 1
+		if (p["default_value"] == null) {
+			required = required + 1
+		}
+	}
+	return { "total": total, "required": required }
+}
+
+func bind_call_args(f, str fname, call) {
+	var args = call["args"]
+	var names = call["arg_names"]
+	var argc = args.len()
+	var line = call["line"]
+
+	var total = param_count_of(f)["total"]
+	var params = []
+	for (p in f["params"]) {
+		if (p["name"] != "this") {
+			params.push(p)
+		}
+	}
+
+	var bound = []
+	var j = 0
+	while (j < total) {
+		bound.push(null)
+		j = j + 1
+	}
+	var pos = 0
+	var seen_named = false
+	var i = 0
+	while (i < argc) {
+		var name = names[i]
+		if (name == null) {
+			if (seen_named) {
+				codegen_error(line,
+					      "positional argument after a named argument in call to '" +
+						      fname + "'")
+			}
+			if (pos >= total) {
+				codegen_error(line,
+					      "too many arguments to '" + fname +
+						      "' (expected at most " +
+						      str(total) + ", got " +
+						      str(argc) + ")")
+			}
+			bound[pos] = args[i]
+			pos = pos + 1
+			i = i + 1
+			continue
+		}
+		seen_named = true
+		var idx = -1
+		var k = 0
+		while (k < total) {
+			if (params[k]["name"] == name) {
+				idx = k
+				break
+			}
+			k = k + 1
+		}
+		if (idx < 0) {
+			codegen_error(line,
+				      "unknown parameter name '" + name +
+					      "' in call to '" + fname + "'")
+		}
+		if (bound[idx] != null) {
+			codegen_error(line,
+				      "argument '" + name +
+					      "' given twice in call to '" +
+					      fname + "'")
+		}
+		bound[idx] = args[i]
+		i = i + 1
+	}
+	j = 0
+	while (j < total) {
+		if (bound[j] == null) {
+			if (params[j]["default_value"] == null) {
+				codegen_error(line,
+					      "missing required argument '" +
+						      params[j]["name"] +
+						      "' in call to '" + fname +
+						      "'")
+			}
+			bound[j] = params[j]["default_value"]
+		}
+		j = j + 1
+	}
+	return bound
+}
+
+// a bound argument, coerced to the parameter's declared numeric type
+func gen_bound_arg(f, int idx, arg) {
+	var seen = 0
+	for (p in f["params"]) {
+		if (p["name"] == "this") {
+			continue
+		}
+		if (seen != idx) {
+			seen = seen + 1
+			continue
+		}
+		return apply_numeric_coercion(p["type_name"], gen_expr(arg))
+	}
+	return gen_expr(arg)
+}
+
+// the C function behind a builtin binary operator, or null when the symbol is
+// user-declared
+var BINOP_FALLBACKS = { "+": "ob_add", "-": "ob_sub", "*": "ob_mul",
+			"/": "ob_div", "%": "ob_mod", "==": "ob_eq",
+			"!=": "ob_neq", "<": "ob_lt", "<=": "ob_lte",
+			">": "ob_gt", ">=": "ob_gte", "&": "ob_band",
+			"|": "ob_bor", "^": "ob_bxor", "<<": "ob_shl",
+			">>": "ob_shr", "x": "ob_repeat" }
+
+// the print family takes any number of arguments: zero prints an empty line,
+// several are joined with spaces (like Python). eprint/ewrite are the same on
+// stderr.
+var PRINT_FUNCS = { "print": "ob_print", "write": "ob_write",
+		    "eprint": "ob_eprint", "ewrite": "ob_ewrite" }
+
+func gen_call_ident(e) {
+	var callee = e["callee"]
+	var ident = callee["ident"]
+	var argc = e["args"].len()
+
+	if (PRINT_FUNCS.has(ident)) {
+		var fn = PRINT_FUNCS[ident]
+		if (argc == 0) {
+			return "(" + fn + "(ob_string(\"\")), ob_null())"
+		}
+		if (argc == 1) {
+			return "(" + fn + "(" + gen_expr(e["args"][0]) +
+			       "), ob_null())"
+		}
+		var b = ["(" + fn + "(ob_interpolate(" + str(argc * 2 - 1)]
+		var i = 0
+		while (i < argc) {
+			b.push((i != 0 ? ", ob_string(\" \")" : "") + ", " +
+			       gen_expr(e["args"][i]))
+			i = i + 1
+		}
+		b.push(")), ob_null())")
+		return b.join("")
+	}
+	if (ident == "input" and argc == 0) {
+		return "ob_input()"
+	}
+	if (ident == "str" and argc == 1) {
+		return "ob_str(" + gen_expr(e["args"][0]) + ")"
+	}
+	if ((ident == "ord" or ident == "chr") and argc == 1) {
+		return "ob_" + ident + "(" + gen_expr(e["args"][0]) + ")"
+	}
+	if (ident == "range" and argc == 2) {
+		return "ob_range((" + gen_expr(e["args"][0]) + ").as.i, (" +
+		       gen_expr(e["args"][1]) + ").as.i)"
+	}
+	// `super(...)` chains to the nearest ancestor constructor
+	if (ident == "super") {
+		if (CURRENT_CLASS == null) {
+			codegen_error(e["line"], "'super' used outside a class")
+		}
+		var cc = find_class(CURRENT_CLASS)
+		var parent = (cc != null and cc["parent_name"] != null) ?
+				     find_class(cc["parent_name"]) : null
+		if (parent == null) {
+			codegen_error(e["line"],
+				      "'super' used in a class with no parent")
+		}
+		var owner = find_init_owner(parent)
+		if (owner == null) {
+			// ancestors only have the implicit no-arg, no-op constructor
+			if (argc != 0) {
+				codegen_error(e["line"],
+					      "no ancestor constructor matches this argument count")
+			}
+			return "ob_null()"
+		}
+		var chosen = find_init_index(owner, argc)
+		if (chosen < 0) {
+			codegen_error(e["line"],
+				      "no ancestor constructor matches this argument count")
+		}
+		var ctor = find_init_decl(owner, chosen)
+		var sb = ["({ " + owner["name"] + "__init_" + str(chosen) +
+			  "((" + owner["name"] + "*)this"]
+		var bound = bind_call_args(ctor, "super", e)
+		var bi = 0
+		while (bi < bound.len()) {
+			sb.push(", " + gen_bound_arg(ctor, bi, bound[bi]))
+			bi = bi + 1
+		}
+		sb.push("); ob_null(); })")
+		return sb.join("")
+	}
+	// constructor call
+	var c = find_class(ident)
+	if (c != null) {
+		var init_count = 0
+		for (m in c["methods"]) {
+			if (m["name"] == "init") {
+				init_count = init_count + 1
+			}
+		}
+		var cb = []
+		var ctor = null
+		if (init_count > 0) {
+			var chosen = find_init_index(c, argc)
+			if (chosen < 0) {
+				codegen_error(e["line"],
+					      "no matching constructor overload for this argument count")
+			}
+			ctor = find_init_decl(c, chosen)
+			cb.push(c["name"] + "__new_" + str(chosen) + "(")
+		} else {
+			// no init here: inherit the nearest ancestor's constructors
+			var owner = find_init_owner(c)
+			if (owner != null) {
+				var ichosen = find_init_index(owner, argc)
+				if (ichosen < 0) {
+					codegen_error(e["line"],
+						      "no matching constructor overload for this argument count")
+				}
+				ctor = find_init_decl(owner, ichosen)
+				cb.push(c["name"] + "__new_inh_" + str(ichosen) +
+					"(")
+			} else if (argc == 0) {
+				cb.push(c["name"] + "__new_default(")
+			} else {
+				codegen_error(e["line"],
+					      "no matching constructor overload for this argument count")
+			}
+		}
+		if (ctor != null) {
+			var cbound = bind_call_args(ctor, c["name"], e)
+			var ci = 0
+			while (ci < cbound.len()) {
+				cb.push((ci != 0 ? ", " : "") +
+					gen_bound_arg(ctor, ci, cbound[ci]))
+				ci = ci + 1
+			}
+		}
+		cb.push(")")
+		return cb.join("")
+	}
+	// cimport FFI binding
+	var ffi = find_ffi(ident)
+	if (ffi != null) {
+		var fb = ["ob_ffi_call(__ffi_" + ffi["name"] + ", " + str(argc)]
+		var fi = 0
+		while (fi < argc) {
+			fb.push(", " + gen_expr(e["args"][fi]))
+			fi = fi + 1
+		}
+		fb.push(")")
+		return fb.join("")
+	}
+	// direct `from` import binding
+	for (idr in IMPORT_DIRECTS) {
+		if (idr["local_name"] != ident or
+		    idr["owner"] != CURRENT_PREFIX) {
+			continue
+		}
+		var db = []
+		if (module_is_builtin(idr["module"])) {
+			var arity = std_member_lookup(idr["module"], ident,
+						      e["line"])
+			if (arity != argc) {
+				codegen_error(e["line"],
+					      "'" + ident + "' takes " +
+						      str(arity) +
+						      " argument(s)")
+			}
+			db.push("ob_std_" + idr["module"] + "_" + ident + "(")
+			var si = 0
+			while (si < argc) {
+				db.push((si != 0 ? ", " : "") +
+					gen_expr(e["args"][si]))
+				si = si + 1
+			}
+			db.push(")")
+			return db.join("")
+		}
+		// a module's own function: bind against its declaration so
+		// defaults and named arguments work across imports
+		var mkf = find_known_func_in(ident, idr["module"] + "__")
+		if (mkf == null) {
+			codegen_error(e["line"],
+				      "'" + idr["module"] +
+					      "' has no function '" + ident +
+					      "'")
+		}
+		db.push(idr["module"] + "__" + ident + "(")
+		var mbound = bind_call_args(mkf["decl"], ident, e)
+		var mi = 0
+		while (mi < mbound.len()) {
+			db.push((mi != 0 ? ", " : "") +
+				gen_bound_arg(mkf["decl"], mi, mbound[mi]))
+			mi = mi + 1
+		}
+		db.push(")")
+		return db.join("")
+	}
+	// plain function call
+	var kf = find_known_func(ident)
+	if (kf == null) {
+		// a builtin name that fell through means the arity was wrong
+		if (ident == "input") {
+			codegen_error(e["line"], "input() takes no arguments")
+		}
+		if (ident == "str") {
+			codegen_error(e["line"],
+				      "str() takes exactly 1 argument")
+		}
+		if (ident == "range") {
+			codegen_error(e["line"],
+				      "range() takes exactly 2 arguments")
+		}
+		if (ident == "ord") {
+			codegen_error(e["line"],
+				      "ord() takes exactly 1 argument")
+		}
+		if (ident == "chr") {
+			codegen_error(e["line"],
+				      "chr() takes exactly 1 argument")
+		}
+		codegen_error(e["line"],
+			      "unknown function or class '" + ident + "'")
+	}
+	var fname = (kf["prefix"] == "" and ident == "main") ?
+			    "oboe_user_main" : kf["prefix"] + ident
+	var kbound = bind_call_args(kf["decl"], ident, e)
+	var kb = [fname + "("]
+	var ki = 0
+	while (ki < kbound.len()) {
+		kb.push((ki != 0 ? ", " : "") +
+			gen_bound_arg(kf["decl"], ki, kbound[ki]))
+		ki = ki + 1
+	}
+	kb.push(")")
+	return kb.join("")
+}
+
+func gen_call_field(e) {
+	var callee = e["callee"]
+	var argc = e["args"].len()
+	// arity check for builtin stdlib calls (module.member(...))
+	var mobj = callee["obj"]
+	if (mobj["kind"] == "EXPR_IDENT" and !var_in_scope(mobj["ident"])) {
+		for (ia in IMPORT_ALIASES) {
+			if (ia["local_name"] == mobj["ident"] and
+			    ia["owner"] == CURRENT_PREFIX and
+			    module_is_builtin(ia["module"])) {
+				var arity = std_member_lookup(ia["module"],
+							      callee["name"],
+							      e["line"])
+				if (arity != argc) {
+					codegen_error(e["line"],
+						      "'" + ia["module"] + "." +
+							      callee["name"] +
+							      "' takes " +
+							      str(arity) +
+							      " argument(s)")
+				}
+			}
+		}
+	}
+	var got = gen_member_access_ex(callee, true, false, argc)
+	var target = got["decl"]
+	var args = []
+	var first = true
+	if (got["first_arg"] != null) {
+		args.push(got["first_arg"])
+		first = false
+	}
+	// target is null for calls with no Oboe declaration to bind against
+	// (stdlib members, primitive methods); those keep their arguments
+	// exactly as written
+	var emit_args = e["args"]
+	if (target != null) {
+		emit_args = bind_call_args(target, callee["name"], e)
+	}
+	var i = 0
+	while (i < emit_args.len()) {
+		var a = target != null ?
+				gen_bound_arg(target, i, emit_args[i]) :
+				gen_expr(emit_args[i])
+		args.push((first ? "" : ", ") + a)
+		first = false
+		i = i + 1
+	}
+	return got["code"] + args.join("") + ")"
+}
+
+func gen_expr(e) {
+	var k = e["kind"]
+	if (k == "EXPR_INT") {
+		return "ob_int(" + str(e["int_val"]) + "LL)"
+	}
+	if (k == "EXPR_FLOAT") {
+		return "ob_float(" + str(e["float_val"]) + ")"
+	}
+	if (k == "EXPR_BOOL") {
+		return "ob_bool(" + (e["bool_val"] ? "true" : "false") + ")"
+	}
+	if (k == "EXPR_NULL") {
+		return "ob_null()"
+	}
+	if (k == "EXPR_STRING") {
+		return gen_string_literal(e)
+	}
+	if (k == "EXPR_IDENT") {
+		if (!var_in_scope(e["ident"])) {
+			// `import x from mod` also binds module-level variables
+			for (idr in IMPORT_DIRECTS) {
+				if (idr["local_name"] != e["ident"] or
+				    idr["owner"] != CURRENT_PREFIX) {
+					continue
+				}
+				if (module_is_builtin(idr["module"])) {
+					codegen_error(e["line"],
+						      "this standard-library member is a function; call it")
+				}
+				return idr["module"] + "__" + e["ident"]
+			}
+			codegen_error(e["line"],
+				      "undefined variable '" + e["ident"] + "'")
+		}
+		return lookup_var_cname(e["ident"])
+	}
+	if (k == "EXPR_ARRAY") {
+		var ab = ["({ OboeValue __a = ob_array_new();"]
+		for (item in e["items"]) {
+			ab.push(" ob_array_push(__a, " + gen_expr(item) + ");")
+		}
+		ab.push(" __a; })")
+		return ab.join("")
+	}
+	if (k == "EXPR_DICT") {
+		var db = ["({ OboeValue __d = ob_dict_new();"]
+		var i = 0
+		while (i < e["keys"].len()) {
+			db.push(" ob_dict_set(__d, ob_to_cstr(" +
+				gen_expr(e["keys"][i]) + "), " +
+				gen_expr(e["values"][i]) + ");")
+			i = i + 1
+		}
+		db.push(" __d; })")
+		return db.join("")
+	}
+	if (k == "EXPR_BINARY") {
+		var l = gen_expr(e["l"])
+		var r = gen_expr(e["r"])
+		var op = e["op"]
+		// inlined rather than handed to ob_and/ob_or, whose arguments C
+		// would evaluate both of: `i < n and s.substr(i, 1) == "x"` has
+		// to stop at the bound, and `x != null and x.f()` at the null
+		if (op == "&&") {
+			return "ob_bool(ob_truthy(" + l + ") && ob_truthy(" + r +
+			       "))"
+		}
+		if (op == "||") {
+			return "ob_bool(ob_truthy(" + l + ") || ob_truthy(" + r +
+			       "))"
+		}
+		if (op == "??") {
+			return "ob_coalesce(" + l + ", " + r + ")"
+		}
+		var fallback = BINOP_FALLBACKS.has(op) ? BINOP_FALLBACKS[op] :
+							 null
+		if (fallback == null) {
+			// user-declared operator: dispatch through the overload
+			// registry, falling back to the top-level definition
+			var uo = find_user_op(op)
+			if (uo != null) {
+				fallback = uo["cfunc"]
+			} else if (class_op_exists(op)) {
+				fallback = "ob_op_missing"
+			}
+		}
+		if (fallback == null) {
+			codegen_error(e["line"], "unknown binary operator")
+		}
+		return "ob_binop(\"" + op + "\", " + l + ", " + r + ", " +
+		       fallback + ")"
+	}
+	if (k == "EXPR_UNARY") {
+		var v = gen_expr(e["operand"])
+		var fn = e["op"] == "!" ? "ob_not" :
+					  (e["op"] == "~" ? "ob_bnot" : "ob_neg")
+		return fn + "(" + v + ")"
+	}
+	if (k == "EXPR_IS") {
+		var v = gen_expr(e["value"])
+		var check = gen_builtin_type_check(e["type_name"], v)
+		if (check != null) {
+			return "ob_bool(" + check + ")"
+		}
+		return "ob_bool(ob_is_object_of(" + v + ", &" +
+		       e["type_name"] + "__classinfo))"
+	}
+	if (k == "EXPR_INDEX") {
+		return "ob_index_get(" + gen_expr(e["arr"]) + ", " +
+		       gen_expr(e["idx"]) + ")"
+	}
+	if (k == "EXPR_FIELD") {
+		return gen_member_access(e, false, false)
+	}
+	if (k == "EXPR_SAFE_FIELD") {
+		return gen_member_access(e, false, true)
+	}
+	if (k == "EXPR_CALL") {
+		var callee = e["callee"]
+		if (callee["kind"] == "EXPR_IDENT" and
+		    !var_in_scope(callee["ident"])) {
+			return gen_call_ident(e)
+		}
+		if (callee["kind"] == "EXPR_FIELD") {
+			return gen_call_field(e)
+		}
+		codegen_error(e["line"], "unsupported call expression")
+		return null
+	}
+	if (k == "EXPR_TERNARY") {
+		return "(ob_truthy(" + gen_expr(e["cond"]) + ") ? (" +
+		       gen_expr(e["then_e"]) + ") : (" +
+		       gen_expr(e["else_e"]) + "))"
+	}
+	if (k == "EXPR_ASSIGN") {
+		var target = e["target"]
+		if (target["kind"] == "EXPR_INDEX") {
+			return "ob_index_set(" + gen_expr(target["arr"]) + ", " +
+			       gen_expr(target["idx"]) + ", " +
+			       gen_expr(e["value"]) + ")"
+		}
+		var lvalue = gen_assign_target_lvalue(target)
+		var val = gen_expr(e["value"])
+		// re-apply the target's declared numeric type, so `int8 x` keeps
+		// wrapping on every later assignment, not just its declaration
+		val = apply_numeric_coercion(assign_target_prim_type(target),
+					     val)
+		return "(" + lvalue + " = " + val + ")"
+	}
+	codegen_error(e["line"], "unknown expression kind")
+	return null
+}
+
+// ============================= statements =============================
+
+func gen_stmt(s, int indent) {
+	var k = s["kind"]
+	if (k == "STMT_LET") {
+		var class_type = null
+		if (s["type_name"] != null and
+		    find_class(s["type_name"]) != null) {
+			class_type = s["type_name"]
+		} else if (s["init"] != null) {
+			class_type = infer_class(s["init"])
+		}
+		define_var_full(s["name"], class_type, null, s["type_name"])
+		var init = "ob_null()"
+		if (s["init"] != null) {
+			init = apply_numeric_coercion(s["type_name"],
+						      gen_expr(s["init"]))
+		}
+		ind(indent)
+		emit((s["is_const"] ? "const " : "") + "OboeValue " +
+		     s["name"] + " = " + init + ";\n")
+		return null
+	}
+	if (k == "STMT_EXPR") {
+		var code = gen_expr(s["expr"])
+		ind(indent)
+		emit("(void)(" + code + ");\n")
+		return null
+	}
+	if (k == "STMT_RETURN") {
+		ind(indent)
+		// returning from inside a try must drop every frame this function
+		// pushed; the value is computed first so a throw in the returned
+		// expression is still caught by the try it sits in
+		if (TRY_DEPTH > 0) {
+			if (s["value"] != null) {
+				emit("{ OboeValue __ret = " +
+				     gen_expr(s["value"]) +
+				     "; ob_exc_stack = __frame_0.prev; return __ret; }\n")
+			} else {
+				emit("{ ob_exc_stack = __frame_0.prev; return ob_null(); }\n")
+			}
+		} else if (s["value"] != null) {
+			emit("return " + gen_expr(s["value"]) + ";\n")
+		} else {
+			emit("return ob_null();\n")
+		}
+		return null
+	}
+	if (k == "STMT_IF") {
+		var cond = gen_expr(s["cond"])
+		ind(indent)
+		emit("if (ob_truthy(" + cond + ")) {\n")
+		push_scope()
+		gen_stmt_list(s["then_body"], indent + 4)
+		pop_scope()
+		ind(indent)
+		emit("}\n")
+		if (s["else_body"].len() > 0) {
+			ind(indent)
+			emit("else {\n")
+			push_scope()
+			gen_stmt_list(s["else_body"], indent + 4)
+			pop_scope()
+			ind(indent)
+			emit("}\n")
+		}
+		return null
+	}
+	if (k == "STMT_WHILE") {
+		var cond = gen_expr(s["cond"])
+		ind(indent)
+		emit("while (ob_truthy(" + cond + ")) {\n")
+		push_scope()
+		var saved_loop = LOOP_TRY_DEPTH
+		LOOP_TRY_DEPTH = TRY_DEPTH
+		gen_stmt_list(s["body"], indent + 4)
+		LOOP_TRY_DEPTH = saved_loop
+		pop_scope()
+		ind(indent)
+		emit("}\n")
+		return null
+	}
+	if (k == "STMT_FOR") {
+		push_scope()
+		var saved_loop = LOOP_TRY_DEPTH
+		LOOP_TRY_DEPTH = TRY_DEPTH
+		if (s["kind_iter"] == "FOR_RANGE") {
+			var a = gen_expr(s["range_a"])
+			var b = gen_expr(s["range_b"])
+			ind(indent)
+			emit("for (int64_t __i = (" + a + ").as.i, __end = (" +
+			     b + ").as.i; __i < __end; __i++) {\n")
+			ind(indent + 4)
+			emit("OboeValue " + s["var_name"] +
+			     " = ob_int(__i);\n")
+			define_var(s["var_name"], null)
+			gen_stmt_list(s["body"], indent + 4)
+			ind(indent)
+			emit("}\n")
+		} else {
+			// One loop shape for arrays, dicts and strings: ob_iter_*
+			// does the tag dispatch, so `for (c in "abc")` and
+			// `for (k, v in pairs(d))` are the same emission with
+			// different bindings. ipairs keys are always the index,
+			// which is what ob_iter_key already returns for arrays
+			// and strings.
+			var iter = gen_expr(s["iterable"])
+			ind(indent)
+			emit("{ OboeValue __it = " + iter +
+			     "; int64_t __n = ob_iter_len(__it);\n")
+			ind(indent)
+			emit("for (int64_t __i = 0; __i < __n; __i++) {\n")
+			if (s["var2_name"] != null) {
+				ind(indent + 4)
+				if (s["kind_iter"] == "FOR_IPAIRS") {
+					emit("OboeValue " + s["var_name"] +
+					     " = ob_int(__i);\n")
+				} else {
+					emit("OboeValue " + s["var_name"] +
+					     " = ob_iter_key(__it, __i);\n")
+				}
+				ind(indent + 4)
+				emit("OboeValue " + s["var2_name"] +
+				     " = ob_iter_value(__it, __i);\n")
+				define_var(s["var_name"], null)
+				define_var(s["var2_name"], null)
+			} else {
+				ind(indent + 4)
+				emit("OboeValue " + s["var_name"] +
+				     " = ob_iter_value(__it, __i);\n")
+				define_var(s["var_name"], null)
+			}
+			gen_stmt_list(s["body"], indent + 4)
+			ind(indent)
+			emit("} }\n")
+		}
+		LOOP_TRY_DEPTH = saved_loop
+		pop_scope()
+		return null
+	}
+	if (k == "STMT_SWITCH") {
+		ind(indent)
+		var subj = gen_expr(s["subject"])
+		emit("{ OboeValue __subj = " + subj + ";\n")
+		var first = true
+		for (c in s["cases"]) {
+			var val = gen_expr(c["value"])
+			ind(indent)
+			emit((first ? "if" : "else if") +
+			     " (ob_truthy(ob_eq(__subj, " + val + "))) {\n")
+			first = false
+			push_scope()
+			gen_stmt_list(c["body"], indent + 4)
+			pop_scope()
+			ind(indent)
+			emit("}\n")
+		}
+		ind(indent)
+		emit("}\n")
+		return null
+	}
+	if (k == "STMT_TRY") {
+		// An unmatched exception must still run `finally` before
+		// propagating, so the rethrow is deferred via a flag until after
+		// the finally body.
+		// Frames are suffixed with their nesting depth so a nested try
+		// doesn't shadow an enclosing one, and so `return` can name the
+		// outermost frame to unwind to (see TRY_DEPTH).
+		var depth = TRY_DEPTH
+		var d = str(depth)
+		ind(indent)
+		emit("{ OboeExceptionFrame __frame_" + d + "; __frame_" + d +
+		     ".prev = ob_exc_stack; ob_exc_stack = &__frame_" + d +
+		     ";\n")
+		ind(indent)
+		emit("bool __rethrow_" + d + " = false;\n")
+		ind(indent)
+		emit("if (setjmp(__frame_" + d + ".buf) == 0) {\n")
+		push_scope()
+		TRY_DEPTH = TRY_DEPTH + 1
+		gen_stmt_list(s["body"], indent + 4)
+		TRY_DEPTH = TRY_DEPTH - 1
+		pop_scope()
+		ind(indent + 4)
+		emit("ob_exc_stack = __frame_" + d + ".prev;\n")
+		ind(indent)
+		emit("} else {\n")
+		var first = true
+		for (c in s["catches"]) {
+			ind(indent + 4)
+			emit((first ? "if" : "else if") +
+			     " (ob_exception_matches(\"" + c["type_name"] +
+			     "\")) {\n")
+			first = false
+			ind(indent + 8)
+			emit("OboeValue " + c["var_name"] +
+			     " = ob_current_exception;\n")
+			push_scope()
+			define_var(c["var_name"], null)
+			TRY_DEPTH = TRY_DEPTH + 1
+			gen_stmt_list(c["body"], indent + 8)
+			TRY_DEPTH = TRY_DEPTH - 1
+			pop_scope()
+			ind(indent + 4)
+			emit("}\n")
+		}
+		ind(indent + 4)
+		if (s["catches"].len() > 0) {
+			emit("else { __rethrow_" + d + " = true; }\n")
+		} else {
+			emit("__rethrow_" + d + " = true;\n")
+		}
+		ind(indent)
+		emit("}\n")
+		if (s["finally_body"].len() > 0) {
+			push_scope()
+			TRY_DEPTH = TRY_DEPTH + 1
+			gen_stmt_list(s["finally_body"], indent)
+			TRY_DEPTH = TRY_DEPTH - 1
+			pop_scope()
+		}
+		ind(indent)
+		emit("if (__rethrow_" + d +
+		     ") ob_throw(ob_current_exception_type, ob_current_exception);\n")
+		ind(indent)
+		emit("}\n")
+		return null
+	}
+	if (k == "STMT_THROW") {
+		var val = s["value"] != null ? gen_expr(s["value"]) :
+					       "ob_null()"
+		ind(indent)
+		emit("ob_throw(\"" + s["type_name"] + "\", " + val + ");\n")
+		return null
+	}
+	if (k == "STMT_BLOCK") {
+		ind(indent)
+		emit("{\n")
+		push_scope()
+		gen_stmt_list(s["body"], indent + 4)
+		pop_scope()
+		ind(indent)
+		emit("}\n")
+		return null
+	}
+	if (k == "STMT_BREAK" or k == "STMT_CONTINUE") {
+		var kw = k == "STMT_BREAK" ? "break" : "continue"
+		if (LOOP_TRY_DEPTH < 0) {
+			codegen_error(s["line"], "'" + kw + "' outside of a loop")
+		}
+		ind(indent)
+		// leaving a try opened inside the loop: drop its frames first, or
+		// the next throw longjmps into a dead C stack slot. __frame_N for
+		// N == the loop's own depth is the outermost one to unwind.
+		if (TRY_DEPTH > LOOP_TRY_DEPTH) {
+			emit("{ ob_exc_stack = __frame_" + str(LOOP_TRY_DEPTH) +
+			     ".prev; " + kw + "; }\n")
+		} else {
+			emit(kw + ";\n")
+		}
+		return null
+	}
+	return null
+}
+
+func gen_stmt_list(array body, int indent) {
+	for (s in body) {
+		gen_stmt(s, indent)
+	}
+}
+
+// ===================== functions / classes =====================
+
+func gen_param_list(owner, array params, bool skip_this) {
+	var first = true
+	if (owner != null and skip_this) {
+		emit(owner["name"] + "* this")
+		first = false
+	}
+	for (p in params) {
+		if (p["name"] == "this") {
+			continue
+		}
+		if (!first) {
+			emit(", ")
+		}
+		emit("OboeValue " + p["name"])
+		first = false
+	}
+}
+
+// Binds a function's parameters in the current scope and, for any carrying a
+// numeric type annotation, emits the coercion at entry -- so a declared `int8 n`
+// parameter is already wrapped by the time the body runs.
+func bind_params(array params, bool skip_this) {
+	for (p in params) {
+		if (skip_this and p["name"] == "this") {
+			continue
+		}
+		var pc = (p["type_name"] != null and
+			  find_class(p["type_name"]) != null) ?
+				 p["type_name"] : null
+		define_var_full(p["name"], pc, null, p["type_name"])
+		var coerced = apply_numeric_coercion(p["type_name"], p["name"])
+		if (coerced != p["name"]) {
+			emit("    " + p["name"] + " = " + coerced + ";\n")
+		}
+	}
+}
+
+func has_this_param(f) {
+	for (p in f["params"]) {
+		if (p["name"] == "this") {
+			return true
+		}
+	}
+	return false
+}
+
+func gen_func_def(prefix, owner, f) {
+	var is_method = owner != null
+	var has_this = has_this_param(f)
+
+	var fname_prefix = prefix ?? ""
+	var fname = (!is_method and prefix == null and f["name"] == "main") ?
+			    "oboe_user_main" : f["name"]
+	emit("OboeValue " + fname_prefix + (is_method ? "__" : "") + fname +
+	     "(")
+	gen_param_list((is_method and has_this) ? owner : null, f["params"],
+		       has_this)
+	emit(") {\n")
+
+	push_scope()
+	if (is_method and has_this) {
+		define_var("this", owner["name"])
+	}
+	bind_params(f["params"], true)
+	var saved_class = CURRENT_CLASS
+	CURRENT_CLASS = is_method ? owner["name"] : null
+	gen_stmt_list(f["body"], 4)
+	CURRENT_CLASS = saved_class
+	pop_scope()
+
+	emit("    return ob_null();\n")
+	emit("}\n\n")
+}
+
+// Forward prototypes so definition order (and mutual recursion) never matters
+// in the generated C. Signatures must mirror gen_func_def/gen_class exactly.
+func emit_func_prototype(prefix, owner, f) {
+	var is_method = owner != null
+	var has_this = has_this_param(f)
+	var fname_prefix = prefix ?? ""
+	var fname = (!is_method and prefix == null and f["name"] == "main") ?
+			    "oboe_user_main" : f["name"]
+	emit("OboeValue " + fname_prefix + (is_method ? "__" : "") + fname +
+	     "(")
+	gen_param_list((is_method and has_this) ? owner : null, f["params"],
+		       has_this)
+	emit(");\n")
+}
+
+// `OboeValue a, OboeValue b`, or `void` when a constructor wrapper takes none
+func emit_ctor_params(array params, bool void_when_empty) {
+	var first = true
+	for (p in params) {
+		if (p["name"] == "this") {
+			continue
+		}
+		if (!first) {
+			emit(", ")
+		}
+		emit("OboeValue " + p["name"])
+		first = false
+	}
+	if (first and void_when_empty) {
+		emit("void")
+	}
+	return first
+}
+
+func emit_class_predecls(c) {
+	for (fd in c["fields"]) {
+		if (fd["is_static"]) {
+			emit("static OboeValue " + c["name"] + "__" +
+			     fd["name"] + ";\n")
+		}
+	}
+	var init_count = 0
+	var idx = 0
+	for (m in c["methods"]) {
+		if (m["name"] == "init") {
+			init_count = init_count + 1
+		}
+	}
+	if (init_count == 0) {
+		var owner = find_init_owner(c)
+		if (owner == null) {
+			emit("OboeValue " + c["name"] +
+			     "__new_default(void);\n")
+		} else {
+			// inherited constructors: one wrapper per ancestor init
+			// overload
+			var inh = 0
+			for (m in owner["methods"]) {
+				if (m["name"] != "init") {
+					continue
+				}
+				emit("OboeValue " + c["name"] + "__new_inh_" +
+				     str(inh) + "(")
+				emit_ctor_params(m["params"], true)
+				emit(");\n")
+				inh = inh + 1
+			}
+		}
+	}
+	for (m in c["methods"]) {
+		if (m["op_symbol"] != null) {
+			for (o in CLASS_OPS) {
+				if (o["decl"] == m) {
+					emit("static OboeValue " + o["cfunc"] +
+					     "(OboeValue __self, OboeValue __rhs);\n")
+				}
+			}
+			continue
+		}
+		if (m["name"] == "init") {
+			emit("void " + c["name"] + "__init_" + str(idx) + "(" +
+			     c["name"] + " *this")
+			for (p in m["params"]) {
+				if (p["name"] == "this") {
+					continue
+				}
+				emit(", OboeValue " + p["name"])
+			}
+			emit(");\n")
+			emit("OboeValue " + c["name"] + "__new_" + str(idx) +
+			     "(")
+			emit_ctor_params(m["params"], false)
+			emit(");\n")
+			idx = idx + 1
+		} else if (m["is_static"]) {
+			emit("OboeValue " + c["name"] + "__" + m["name"] + "(")
+			var first = true
+			for (p in m["params"]) {
+				if (!first) {
+					emit(", ")
+				}
+				emit("OboeValue " + p["name"])
+				first = false
+			}
+			emit(");\n")
+		} else {
+			emit_func_prototype(c["name"], c, m)
+		}
+	}
+}
+
+func class_index(c) {
+	var i = 0
+	while (i < CLASSES.len()) {
+		if (CLASSES[i] == c) {
+			return i
+		}
+		i = i + 1
+	}
+	return -1
+}
+
+func emit_class_struct(c, int idx) {
+	if (CLASS_EMITTED[idx]) {
+		return null
+	}
+	var parent = c["parent_name"] != null ? find_class(c["parent_name"]) :
+						null
+	if (parent != null) {
+		var pi = 0
+		while (pi < CLASSES.len()) {
+			if (CLASSES[pi] == parent) {
+				emit_class_struct(parent, pi)
+			}
+			pi = pi + 1
+		}
+	}
+	emit("typedef struct " + c["name"] + " " + c["name"] + ";\n")
+	emit("struct " + c["name"] + " {\n")
+	if (parent != null) {
+		emit("    " + parent["name"] + " __parent;\n")
+	} else {
+		emit("    OboeObject __base;\n")
+	}
+	for (fd in c["fields"]) {
+		if (fd["is_static"]) {
+			continue
+		}
+		emit("    OboeValue " + fd["name"] + ";\n")
+	}
+	emit("};\n")
+	emit("static const OboeClassInfo " + c["name"] + "__classinfo = { \"" +
+	     c["name"] + "\", " +
+	     (parent != null ? "&" + parent["name"] + "__classinfo" : "NULL") +
+	     " };\n\n")
+	CLASS_EMITTED[idx] = true
+}
+
+func gen_class(c) {
+	// static fields as globals
+	for (fd in c["fields"]) {
+		if (fd["is_static"]) {
+			emit("static OboeValue " + c["name"] + "__" +
+			     fd["name"] + " = {0};\n")
+		}
+	}
+
+	// constructors
+	var init_count = 0
+	for (m in c["methods"]) {
+		if (m["name"] == "init") {
+			init_count = init_count + 1
+		}
+	}
+
+	if (init_count == 0) {
+		var owner = find_init_owner(c)
+		if (owner == null) {
+			emit("OboeValue " + c["name"] +
+			     "__new_default(void) {\n")
+			emit("    " + c["name"] + " *obj = calloc(1, sizeof(" +
+			     c["name"] + "));\n")
+			emit("    ((OboeObject*)obj)->cls = &" + c["name"] +
+			     "__classinfo;\n")
+			emit("    return ob_object_wrap(obj);\n")
+			emit("}\n\n")
+		} else {
+			// no init of its own: wrap the nearest ancestor's
+			// constructors
+			var inh = 0
+			for (m in owner["methods"]) {
+				if (m["name"] != "init") {
+					continue
+				}
+				emit("OboeValue " + c["name"] + "__new_inh_" +
+				     str(inh) + "(")
+				emit_ctor_params(m["params"], true)
+				emit(") {\n")
+				emit("    " + c["name"] +
+				     " *obj = calloc(1, sizeof(" + c["name"] +
+				     "));\n")
+				emit("    ((OboeObject*)obj)->cls = &" +
+				     c["name"] + "__classinfo;\n")
+				emit("    " + owner["name"] + "__init_" +
+				     str(inh) + "((" + owner["name"] + "*)obj")
+				for (p in m["params"]) {
+					if (p["name"] == "this") {
+						continue
+					}
+					emit(", " + p["name"])
+				}
+				emit(");\n")
+				emit("    return ob_object_wrap(obj);\n")
+				emit("}\n\n")
+				inh = inh + 1
+			}
+		}
+	}
+
+	var idx = 0
+	push_scope()
+	for (m in c["methods"]) {
+		if (m["name"] != "init") {
+			continue
+		}
+		emit("void " + c["name"] + "__init_" + str(idx) + "(" +
+		     c["name"] + " *this")
+		for (p in m["params"]) {
+			if (p["name"] == "this") {
+				continue
+			}
+			emit(", OboeValue " + p["name"])
+		}
+		emit(") {\n")
+		push_scope()
+		define_var("this", c["name"])
+		bind_params(m["params"], true)
+		var saved_class = CURRENT_CLASS
+		CURRENT_CLASS = c["name"]
+		gen_stmt_list(m["body"], 4)
+		CURRENT_CLASS = saved_class
+		pop_scope()
+		emit("}\n\n")
+
+		emit("OboeValue " + c["name"] + "__new_" + str(idx) + "(")
+		emit_ctor_params(m["params"], false)
+		emit(") {\n")
+		emit("    " + c["name"] + " *obj = calloc(1, sizeof(" +
+		     c["name"] + "));\n")
+		emit("    ((OboeObject*)obj)->cls = &" + c["name"] +
+		     "__classinfo;\n")
+		emit("    " + c["name"] + "__init_" + str(idx) + "(obj")
+		for (p in m["params"]) {
+			if (p["name"] == "this") {
+				continue
+			}
+			emit(", " + p["name"])
+		}
+		emit(");\n")
+		emit("    return ob_object_wrap(obj);\n")
+		emit("}\n\n")
+		idx = idx + 1
+	}
+	pop_scope()
+
+	// operator overloads: emitted as (self, rhs) pairs matching OboeOpFunc so
+	// they can be registered with the runtime dispatch table
+	for (m in c["methods"]) {
+		if (m["op_symbol"] == null) {
+			continue
+		}
+		var cfunc = null
+		for (o in CLASS_OPS) {
+			if (o["decl"] == m) {
+				cfunc = o["cfunc"]
+			}
+		}
+		var params = m["params"]
+		if (params.len() != 2 or params[0]["name"] != "this") {
+			codegen_error(m["line"],
+				      "a class operator must take exactly (this, other)")
+		}
+		var rhs = params[1]
+		emit("static OboeValue " + cfunc + "(OboeValue __self, OboeValue " +
+		     rhs["name"] + ") {\n")
+		emit("    " + c["name"] + " *this = (" + c["name"] +
+		     "*)__self.as.obj;\n")
+		emit("    (void)this;\n")
+		push_scope()
+		define_var("this", c["name"])
+		define_var(rhs["name"],
+			   (rhs["type_name"] != null and
+			    find_class(rhs["type_name"]) != null) ?
+				   rhs["type_name"] : null)
+		var saved_class = CURRENT_CLASS
+		CURRENT_CLASS = c["name"]
+		gen_stmt_list(m["body"], 4)
+		CURRENT_CLASS = saved_class
+		pop_scope()
+		emit("    return ob_null();\n")
+		emit("}\n\n")
+	}
+
+	// regular methods
+	for (m in c["methods"]) {
+		if (m["name"] == "init" or m["op_symbol"] != null) {
+			continue
+		}
+		if (m["is_static"]) {
+			emit("OboeValue " + c["name"] + "__" + m["name"] + "(")
+			var first = true
+			for (p in m["params"]) {
+				if (!first) {
+					emit(", ")
+				}
+				emit("OboeValue " + p["name"])
+				first = false
+			}
+			emit(") {\n")
+			push_scope()
+			bind_params(m["params"], false)
+			var saved_class = CURRENT_CLASS
+			CURRENT_CLASS = c["name"]
+			gen_stmt_list(m["body"], 4)
+			CURRENT_CLASS = saved_class
+			pop_scope()
+			emit("    return ob_null();\n")
+			emit("}\n\n")
+		} else {
+			gen_func_def(c["name"], c, m)
+		}
+	}
+}
+
+// ============================= program =============================
+
+// Instance fields aren't declared up front; they come into existence the first
+// time a method assigns `this.field = value`. This walks every method body of a
+// class looking for such assignments and appends a field for any name not
+// already present on the class or an ancestor (a child assigning an inherited
+// field must reuse the ancestor's slot, not shadow it with its own).
+// `type_hint` carries the assigned value's class when it is statically known
+// (a class-typed parameter or a constructor call), so chained member access
+// like `u.address.city` can be resolved at compile time.
+
+// method whose body is being scanned, for param types
+var SCAN_METHOD = null
+
+func note_field(c, str name, type_hint) {
+	var got = find_field_owner(c, name)
+	if (got != null) {
+		if (got["field"]["type_name"] == null and type_hint != null) {
+			got["field"]["type_name"] = type_hint
+		}
+		return null
+	}
+	// prepended, as the C's linked list is: declared fields keep their
+	// order and inferred ones land in front of them, newest first
+	c["fields"].insert(0, { "name": name, "type_name": type_hint,
+				"is_static": false, "is_private": false,
+				"is_const": false, "init": null })
+}
+
+func field_type_hint(value) {
+	if (value == null) {
+		return null
+	}
+	if (value["kind"] == "EXPR_IDENT" and SCAN_METHOD != null) {
+		for (p in SCAN_METHOD["params"]) {
+			if (p["name"] == value["ident"]) {
+				return (p["type_name"] != null and
+					find_class(p["type_name"]) != null) ?
+					       p["type_name"] : null
+			}
+		}
+	}
+	if (value["kind"] == "EXPR_CALL" and
+	    value["callee"]["kind"] == "EXPR_IDENT" and
+	    find_class(value["callee"]["ident"]) != null) {
+		return value["callee"]["ident"]
+	}
+	return null
+}
+
+func scan_expr_for_fields(c, e) {
+	if (e == null) {
+		return null
+	}
+	var k = e["kind"]
+	if (k == "EXPR_ASSIGN") {
+		var t = e["target"]
+		if (t["kind"] == "EXPR_FIELD" and
+		    t["obj"]["kind"] == "EXPR_IDENT" and
+		    t["obj"]["ident"] == "this") {
+			note_field(c, t["name"], field_type_hint(e["value"]))
+		}
+		scan_expr_for_fields(c, e["target"])
+		scan_expr_for_fields(c, e["value"])
+	} else if (k == "EXPR_BINARY") {
+		scan_expr_for_fields(c, e["l"])
+		scan_expr_for_fields(c, e["r"])
+	} else if (k == "EXPR_UNARY") {
+		scan_expr_for_fields(c, e["operand"])
+	} else if (k == "EXPR_IS") {
+		scan_expr_for_fields(c, e["value"])
+	} else if (k == "EXPR_INDEX") {
+		scan_expr_for_fields(c, e["arr"])
+		scan_expr_for_fields(c, e["idx"])
+	} else if (k == "EXPR_FIELD" or k == "EXPR_SAFE_FIELD") {
+		scan_expr_for_fields(c, e["obj"])
+	} else if (k == "EXPR_TERNARY") {
+		scan_expr_for_fields(c, e["cond"])
+		scan_expr_for_fields(c, e["then_e"])
+		scan_expr_for_fields(c, e["else_e"])
+	} else if (k == "EXPR_CALL") {
+		scan_expr_for_fields(c, e["callee"])
+		for (a in e["args"]) {
+			scan_expr_for_fields(c, a)
+		}
+	} else if (k == "EXPR_ARRAY") {
+		for (item in e["items"]) {
+			scan_expr_for_fields(c, item)
+		}
+	} else if (k == "EXPR_DICT") {
+		var i = 0
+		while (i < e["keys"].len()) {
+			scan_expr_for_fields(c, e["keys"][i])
+			scan_expr_for_fields(c, e["values"][i])
+			i = i + 1
+		}
+	} else if (k == "EXPR_STRING") {
+		for (p in e["str_parts"]) {
+			if (p["is_expr"]) {
+				scan_expr_for_fields(c, p["expr"])
+			}
+		}
+	}
+}
+
+func scan_stmt_list_for_fields(c, array body) {
+	for (s in body) {
+		var k = s["kind"]
+		if (k == "STMT_LET") {
+			scan_expr_for_fields(c, s["init"])
+		} else if (k == "STMT_EXPR") {
+			scan_expr_for_fields(c, s["expr"])
+		} else if (k == "STMT_RETURN") {
+			scan_expr_for_fields(c, s["value"])
+		} else if (k == "STMT_IF") {
+			scan_expr_for_fields(c, s["cond"])
+			scan_stmt_list_for_fields(c, s["then_body"])
+			scan_stmt_list_for_fields(c, s["else_body"])
+		} else if (k == "STMT_WHILE") {
+			scan_expr_for_fields(c, s["cond"])
+			scan_stmt_list_for_fields(c, s["body"])
+		} else if (k == "STMT_FOR") {
+			scan_expr_for_fields(c, s["range_a"])
+			scan_expr_for_fields(c, s["range_b"])
+			scan_expr_for_fields(c, s["iterable"])
+			scan_stmt_list_for_fields(c, s["body"])
+		} else if (k == "STMT_SWITCH") {
+			scan_expr_for_fields(c, s["subject"])
+			for (cc in s["cases"]) {
+				scan_stmt_list_for_fields(c, cc["body"])
+			}
+		} else if (k == "STMT_TRY") {
+			scan_stmt_list_for_fields(c, s["body"])
+			for (cc in s["catches"]) {
+				scan_stmt_list_for_fields(c, cc["body"])
+			}
+			scan_stmt_list_for_fields(c, s["finally_body"])
+		} else if (k == "STMT_THROW") {
+			scan_expr_for_fields(c, s["value"])
+		} else if (k == "STMT_BLOCK") {
+			scan_stmt_list_for_fields(c, s["body"])
+		}
+	}
+}
+
+var INFERRED = []
+
+// Parents must be inferred before children so a child assigning an inherited
+// field finds the ancestor's slot instead of creating a shadowing one.
+func infer_instance_fields(c) {
+	for (seen in INFERRED) {
+		if (seen == c) {
+			return null
+		}
+	}
+	INFERRED.push(c)
+
+	var parent = c["parent_name"] != null ? find_class(c["parent_name"]) :
+						null
+	if (parent != null) {
+		infer_instance_fields(parent)
+	}
+
+	for (m in c["methods"]) {
+		SCAN_METHOD = m
+		scan_stmt_list_for_fields(c, m["body"])
+	}
+	SCAN_METHOD = null
+}
+
+func add_class(c, str unit_prefix) {
+	c["unit_prefix"] = unit_prefix
+	CLASSES.push(c)
+	CLASS_EMITTED.push(false)
+
+	// register the class's operator overloads so expressions can dispatch on
+	// them even before the definitions are emitted
+	for (m in c["methods"]) {
+		if (m["op_symbol"] == null) {
+			continue
+		}
+		CLASS_OPS.push({ "cls": c, "symbol": m["op_symbol"],
+				 "cfunc": c["name"] + "__opov_" +
+					  str(CLASS_OPS.len()),
+				 "decl": m })
+	}
+}
+
+func collect_classes(array decls, str unit_prefix) {
+	for (d in decls) {
+		if (d["kind"] == "DECL_CLASS") {
+			add_class(d["klass"], unit_prefix)
+		}
+	}
+}
+
+func read_whole_file(str path) {
+	try {
+		return os.read_file(path)
+	} catch (os.FileNotFoundError e) {
+		return null
+	}
+}
+
+func codegen_set_source_dir(str dir) {
+	SOURCE_DIR = dir
+}
+
+// ============================= unit loading =============================
+// Compilation happens over a list of units: the main file plus every
+// transitively imported module. All sources are loaded and pre-scanned for
+// `operator <sym>` declarations *before* anything is tokenized, so a custom
+// operator declared in any file lexes correctly in every other file. The
+// import graph used for codegen comes from the parsed ASTs; the textual
+// import scan below exists only to find the files early.
+//
+// A unit is:
+//   { "module":     null for the main file
+//     "prefix":     "" for the main file, "<module>__" otherwise
+//     "path":       the file this unit came from, for diagnostics
+//     "dir":        directory its own imports resolve against
+//     "src":, "prog":
+//     "referenced": actually imported per the ASTs (or the main file)
+//     "builtin":    a built-in stdlib module with no backing file }
+var UNITS = []
+
+func find_unit(str module) {
+	var i = 0
+	while (i < UNITS.len()) {
+		if (UNITS[i]["module"] == module) {
+			return i
+		}
+		i = i + 1
+	}
+	return -1
+}
+
+// OS the compiled program is for. Defaults to the host; `oboe build --target`
+// overrides it. An OS-specific module file (`foo.<os>.oboe`) is preferred over
+// the generic one (`foo.oboe`).
+var TARGET_OS = HOST_OS
+
+func codegen_set_target_os(str target) {
+	TARGET_OS = target
+}
+
+// ---- project.jsonc ----
+// A port of json_extract_string_field from src/projectjson.c: the loose lookup
+// that matches a field anywhere in the document, at any depth. That file is
+// vendored from reedbed and must not be edited, so this reproduces it rather
+// than sharing it. Strings and `//` comments are walked the same way, so a key
+// inside either is never matched.
+func is_json_ws(int c) {
+	return c == 32 or c == 9 or c == 10 or c == 13
+}
+
+func json_skip_ws(str s, int i) {
+	var n = s.len()
+	while (i < n and is_json_ws(byte_of(s, i))) {
+		i = i + 1
+	}
+	return i
+}
+
+func json_string_field(str json, str field) {
+	var n = json.len()
+	// accept a whole document as readily as an object body
+	var start = json_skip_ws(json, 0)
+	if (byte_of(json, start) == 123) {
+		start = start + 1
+	}
+	var in_string = false
+	var escaped = false
+	var key_start = -1
+	var p = start
+	while (p < n) {
+		var c = byte_of(json, p)
+		if (in_string) {
+			if (escaped) {
+				escaped = false
+			} else if (c == 92) {
+				escaped = true
+			} else if (c == 34) {
+				in_string = false
+				if (key_start >= 0) {
+					var after = json_skip_ws(json, p + 1)
+					if (byte_of(json, after) == 58) {
+						var key = json.substr(key_start,
+								      p - key_start)
+						if (key == field) {
+							return json_read_string(json,
+										json_skip_ws(json,
+											     after + 1))
+						}
+					}
+				}
+				key_start = -1
+			}
+		} else if (c == 34) {
+			in_string = true
+			key_start = p + 1
+		} else if (c == 47 and byte_of(json, p + 1) == 47) {
+			while (byte_of(json, p + 1) != -1 and
+			       byte_of(json, p + 1) != 10) {
+				p = p + 1
+			}
+		}
+		p = p + 1
+	}
+	return null
+}
+
+// the body of a `"..."` value, or null when the value is not a string
+func json_read_string(str s, int p) {
+	if (byte_of(s, p) != 34) {
+		return null
+	}
+	p = p + 1
+	var n = s.len()
+	var q = p
+	while (q < n and byte_of(s, q) != 34) {
+		q = q + 1
+	}
+	if (q >= n) {
+		return null
+	}
+	return s.substr(p, q - p)
+}
+
+// Entry file of a module folder: the `entry` from its project.jsonc/.json when
+// it has one, otherwise main.oboe. Returns null when the folder holds neither.
+func folder_entry_path(str folder) {
+	var pj = find_project_json_in(folder)
+	var json = pj != null ? read_whole_file(pj) : null
+	if (json != null) {
+		var entry = json_string_field(json, "entry")
+		if (entry != null) {
+			var path = folder + "/" + entry
+			return file_exists(path) ? path : null
+		}
+	}
+	var main_path = folder + "/main.oboe"
+	return file_exists(main_path) ? main_path : null
+}
+
+// `name` of the project.jsonc/.json in `folder`, or null when it has none
+func folder_project_name(str folder) {
+	var pj = find_project_json_in(folder)
+	var json = pj != null ? read_whole_file(pj) : null
+	if (json == null) {
+		return null
+	}
+	return json_string_field(json, "name")
+}
+
+// A folder is importable as its project.json's `name`, or -- when it has no
+// project.json -- as its own folder name. The project-name pass runs first so a
+// library directory can be named anything on disk.
+//
+// The C walks readdir order, which is whatever the filesystem feels like;
+// os.listdir sorts, so this is the deterministic version of the same search.
+// Only a directory holding two projects of the same name could tell them apart.
+func resolve_folder_module(str dir, str module) {
+	var entries = []
+	try {
+		entries = os.listdir(dir)
+	} catch (os.FileNotFoundError e) {
+		entries = []
+	}
+	for (name in entries) {
+		if (name.substr(0, 1) == ".") {
+			continue
+		}
+		var sub = dir + "/" + name
+		if (!os.is_dir(sub)) {
+			continue
+		}
+		var pname = folder_project_name(sub)
+		if (pname == null or pname != module) {
+			continue
+		}
+		return folder_entry_path(sub)
+	}
+	var direct = dir + "/" + module
+	if (os.is_dir(direct)) {
+		return folder_entry_path(direct)
+	}
+	return null
+}
+
+// The project's own .oboe/libraries, set once from the main file. An installed
+// package lives in that directory, so its own dependencies are its siblings
+// there rather than anything under its own folder -- without this a fetched
+// package could never import another one.
+var LIB_ROOT = ""
+
+func codegen_set_library_root(str main_path) {
+	var abs = os.realpath(main_path) ?? main_path
+	var root = walk_to_project_root(path_dirname(abs))
+	LIB_ROOT = root + "/.oboe/libraries"
+}
+
+// Resolution order for `import foo`: the importing file's own directory, then
+// that directory's .oboe/libraries, then the project's .oboe/libraries. Within
+// each, `foo.<target-os>.oboe`, `foo.oboe`, then a module folder.
+func resolve_module_path(str dir, str module) {
+	var dirs = [dir, dir + "/.oboe/libraries"]
+	var suffixed = module + "." + TARGET_OS
+	var names = [suffixed, module]
+	for (root in dirs) {
+		for (name in names) {
+			var path = root + "/" + name + ".oboe"
+			if (file_exists(path)) {
+				return path
+			}
+		}
+		var folder = resolve_folder_module(root, module)
+		if (folder != null) {
+			return folder
+		}
+	}
+
+	if (LIB_ROOT != "") {
+		for (name in names) {
+			var path = LIB_ROOT + "/" + name + ".oboe"
+			if (file_exists(path)) {
+				return path
+			}
+		}
+		var folder = resolve_folder_module(LIB_ROOT, module)
+		if (folder != null) {
+			return folder
+		}
+	}
+	return null
+}
+
+// copy of src with comments and string bodies blanked, for the textual scan
+func strip_for_scan(str src) {
+	var out = src.split("")
+	var len = out.len()
+	var i = 0
+	while (i < len) {
+		if (out[i] == "/" and i + 1 < len and out[i + 1] == "/") {
+			while (i < len and out[i] != "\n") {
+				out[i] = " "
+				i = i + 1
+			}
+		} else if (out[i] == "\"") {
+			i = i + 1
+			while (i < len and out[i] != "\"") {
+				if (out[i] == "\\" and i + 1 < len) {
+					out[i + 1] = " "
+				}
+				if (out[i] != "\n") {
+					out[i] = " "
+				}
+				i = i + 1
+			}
+		}
+		i = i + 1
+	}
+	return out.join("")
+}
+
+func is_ident_char(int c) {
+	return (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or
+	       (c >= 48 and c <= 57) or c == 95
+}
+
+// extracts module names from `import ...` lines and loads those files too;
+// misses here are harmless (the AST-driven resolve pass loads stragglers)
+func scan_imports_textual(str src, str dir) {
+	var s = strip_for_scan(src)
+	var len = s.len()
+	var i = 0
+	while (i + 6 < len) {
+		if (s.substr(i, 6) != "import" or
+		    (i > 0 and is_ident_char(byte_of(s, i - 1))) or
+		    is_ident_char(byte_of(s, i + 6))) {
+			// also skips `cimport`
+			i = i + 1
+			continue
+		}
+		// take the rest of the line
+		var start = i + 6
+		var end = start
+		while (end < len and byte_of(s, end) != 10) {
+			end = end + 1
+		}
+		var take = end - start
+		if (take > 511) {
+			take = 511
+		}
+		var line = s.substr(start, take)
+		// `a[, b] from mod` -> word after "from"; `mod [as alias]` ->
+		// first word
+		var fpos = line.index_of(" from ")
+		var word = fpos >= 0 ? line.substr(fpos + 6,
+						   line.len() - fpos - 6) : line
+		var w = 0
+		while (byte_of(word, w) == 32 or byte_of(word, w) == 9) {
+			w = w + 1
+		}
+		var k = 0
+		while (is_ident_char(byte_of(word, w + k)) and k < 255) {
+			k = k + 1
+		}
+		var name = word.substr(w, k)
+		if (k == 0 or find_unit(name) >= 0) {
+			i = i + 1
+			continue
+		}
+		var path = resolve_module_path(dir, name)
+		if (path == null) {
+			// not a module file; the parse pass will complain if it
+			// was real
+			i = i + 1
+			continue
+		}
+		var msrc = read_whole_file(path)
+		if (msrc != null) {
+			// a module resolves its own imports relative to itself,
+			// so a library folder can import its siblings by bare
+			// name
+			load_unit_textual(name, msrc, path, path_dirname(path))
+		}
+		i = i + 1
+	}
+}
+
+func load_unit_textual(module, str src, str path, str dir) {
+	UNITS.push({ "module": module,
+		     "prefix": module != null ? module + "__" : "",
+		     "path": path, "dir": dir, "src": src, "prog": null,
+		     "referenced": false, "builtin": false })
+	scan_imports_textual(src, dir)
+}
+
+// the source file a generated symbol's unit came from, for diagnostics raised
+// outside the per-unit emission loop (static initializers, operators, handlers)
+func unit_file_for_prefix(str prefix) {
+	for (u in UNITS) {
+		if (u["prefix"] == prefix) {
+			return u["path"]
+		}
+	}
+	return null
+}
+
+func module_is_builtin(str module) {
+	var ui = find_unit(module)
+	return ui >= 0 and UNITS[ui]["builtin"]
+}
+
+func parse_unit(int ui) {
+	var u = UNITS[ui]
+	if (u["prog"] != null) {
+		return null
+	}
+	u["prog"] = parse_program(lex_all(u["src"]), u["path"])
+}
+
+// finds (or late-loads) a module unit, parsed
+func ensure_unit(str module, str from_dir) {
+	var ui = find_unit(module)
+	if (ui < 0) {
+		var path = resolve_module_path(from_dir, module)
+		if (path == null and std_module_members(module) != null) {
+			// no file shadows it: the built-in stdlib module
+			UNITS.push({ "module": module,
+				     "prefix": module + "__",
+				     "path": "<builtin " + module + ">",
+				     "dir": from_dir, "src": "", "prog": null,
+				     "referenced": false, "builtin": true })
+			ui = UNITS.len() - 1
+			parse_unit(ui)
+			return ui
+		}
+		if (path == null) {
+			flush_out()
+			fail("cannot find module '" + module + "' (looked in " +
+			     from_dir + " and " + from_dir +
+			     "/.oboe/libraries)")
+		}
+		var src = read_whole_file(path)
+		var before = UNITS.len()
+		load_unit_textual(module, src, path, path_dirname(path))
+		var i = before
+		while (i < UNITS.len()) {
+			prescan_ops(UNITS[i]["src"])
+			i = i + 1
+		}
+		ui = find_unit(module)
+	}
+	parse_unit(ui)
+	return ui
+}
+
+// walks the parsed import graph: registers this unit's bindings and marks
+// every transitively imported unit as referenced
+func resolve_imports(int ui) {
+	for (d in UNITS[ui]["prog"]) {
+		if (d["kind"] != "DECL_IMPORT") {
+			continue
+		}
+		var owner = UNITS[ui]["prefix"]
+		if (d["members"].len() > 0) {
+			for (m in d["members"]) {
+				IMPORT_DIRECTS.push({ "local_name": m,
+						      "module": d["module"],
+						      "owner": owner })
+			}
+		} else {
+			IMPORT_ALIASES.push({ "local_name": d["alias"] ??
+							    d["module"],
+					      "module": d["module"],
+					      "owner": owner })
+		}
+		var dep = ensure_unit(d["module"], UNITS[ui]["dir"])
+		if (!UNITS[dep]["referenced"]) {
+			UNITS[dep]["referenced"] = true
+			resolve_imports(dep)
+		}
+	}
+}
+
+// ================== events / operators / FFI ==================
+
+// Each event gets a synthesized class whose fields are the payload params;
+// `on E as e` handlers bind `e` to that class so `e.field` resolves like any
+// member access, and `E.fire(...)` resolves like a static call to E__fire.
+func register_event_decl(ev) {
+	var fields = []
+	for (p in ev["params"]) {
+		fields.push({ "name": p["name"], "type_name": p["type_name"],
+			      "is_static": false, "is_private": false,
+			      "is_const": false, "init": null })
+	}
+	var c = { "name": ev["name"], "parent_name": null, "fields": fields,
+		  "methods": [], "line": 0 }
+	add_class(c, "")
+	EVENTS.push({ "decl": ev, "cls": c })
+}
+
+func collect_extras(array decls, str prefix) {
+	for (d in decls) {
+		var k = d["kind"]
+		if (k == "DECL_OPERATOR") {
+			var f = d["func"]
+			if (f["params"].len() != 2) {
+				codegen_error(f["line"],
+					      "a top-level operator must take exactly two parameters")
+			}
+			if (find_user_op(f["op_symbol"]) != null) {
+				codegen_error(f["line"],
+					      "operator is already defined")
+			}
+			USER_OPS.push({ "symbol": f["op_symbol"],
+					"cfunc": "__oboe_userop_" +
+						 str(USER_OPS.len()),
+					"decl": f, "prefix": prefix })
+		} else if (k == "DECL_EVENT") {
+			if (find_event(d["name"]) != null or
+			    find_class(d["name"]) != null) {
+				codegen_error(d["line"],
+					      "an event or class with this name already exists")
+			}
+			register_event_decl(d)
+		} else if (k == "DECL_ON") {
+			HANDLERS.push({ "decl": d,
+					"cfunc": "__on_" + d["event_name"] +
+						 "_" + str(HANDLERS.len()),
+					"prefix": prefix })
+		} else if (k == "DECL_CIMPORT") {
+			// two files importing the same symbol share one binding
+			if (find_ffi(d["name"]) == null) {
+				FFI.push({ "name": d["name"], "lib": d["lib"] })
+			}
+		}
+	}
+}
+
+// The built-in KeyboardInterruptEvent exists without a declaration; synthesize
+// it when a handler references it. Any other unknown event is an error.
+func finalize_events() {
+	for (h in HANDLERS) {
+		var ev = h["decl"]
+		if (find_event(ev["event_name"]) != null) {
+			continue
+		}
+		if (ev["event_name"] == "KeyboardInterruptEvent") {
+			register_event_decl({ "name": "KeyboardInterruptEvent",
+					      "params": [], "line": 0 })
+		} else {
+			codegen_error(ev["line"],
+				      "'on' handler references an undeclared event")
+		}
+	}
+}
+
+func has_kbint_handlers() {
+	for (h in HANDLERS) {
+		if (h["decl"]["event_name"] == "KeyboardInterruptEvent") {
+			return true
+		}
+	}
+	return false
+}
+
+// `OboeValue a, OboeValue b`, or `void` when the event carries no payload
+func emit_event_params(array params) {
+	var first = true
+	for (p in params) {
+		if (!first) {
+			emit(", ")
+		}
+		emit("OboeValue " + p["name"])
+		first = false
+	}
+	if (first) {
+		emit("void")
+	}
+}
+
+func emit_extras_predecls() {
+	for (u in USER_OPS) {
+		emit("static OboeValue " + u["cfunc"] +
+		     "(OboeValue, OboeValue);\n")
+	}
+	for (h in HANDLERS) {
+		emit("static OboeValue " + h["cfunc"] + "(OboeValue __ev);\n")
+	}
+	for (ev in EVENTS) {
+		emit("OboeValue " + ev["decl"]["name"] + "__fire(")
+		emit_event_params(ev["decl"]["params"])
+		emit(");\n")
+	}
+	for (f in FFI) {
+		emit("static void *__ffi_" + f["name"] + ";\n")
+	}
+}
+
+func emit_extras_defs() {
+	// top-level custom operators
+	for (u in USER_OPS) {
+		var f = u["decl"]
+		CURRENT_FILE = unit_file_for_prefix(u["prefix"])
+		var a = f["params"][0]
+		var b = f["params"][1]
+		emit("static OboeValue " + u["cfunc"] + "(OboeValue " +
+		     a["name"] + ", OboeValue " + b["name"] + ") {\n")
+		CURRENT_PREFIX = u["prefix"]
+		push_scope()
+		define_var(a["name"], (a["type_name"] != null and
+				       find_class(a["type_name"]) != null) ?
+					      a["type_name"] : null)
+		define_var(b["name"], (b["type_name"] != null and
+				       find_class(b["type_name"]) != null) ?
+					      b["type_name"] : null)
+		gen_stmt_list(f["body"], 4)
+		pop_scope()
+		emit("    return ob_null();\n")
+		emit("}\n\n")
+	}
+
+	// event handlers, in declaration order
+	for (h in HANDLERS) {
+		var d = h["decl"]
+		CURRENT_FILE = unit_file_for_prefix(h["prefix"])
+		emit("static OboeValue " + h["cfunc"] + "(OboeValue __ev) {\n")
+		emit("    (void)__ev;\n")
+		CURRENT_PREFIX = h["prefix"]
+		push_scope()
+		if (d["var_name"] != null) {
+			emit("    OboeValue " + d["var_name"] + " = __ev;\n")
+			define_var(d["var_name"], d["event_name"])
+		}
+		gen_stmt_list(d["body"], 4)
+		pop_scope()
+		emit("    return ob_null();\n")
+		emit("}\n\n")
+	}
+
+	CURRENT_PREFIX = ""
+
+	// fire functions: build the payload object, then invoke every handler
+	for (e in EVENTS) {
+		var ev = e["decl"]
+		emit("OboeValue " + ev["name"] + "__fire(")
+		emit_event_params(ev["params"])
+		emit(") {\n")
+		emit("    " + ev["name"] + " *obj = calloc(1, sizeof(" +
+		     ev["name"] + "));\n")
+		emit("    ((OboeObject*)obj)->cls = &" + ev["name"] +
+		     "__classinfo;\n")
+		for (p in ev["params"]) {
+			emit("    obj->" + p["name"] + " = " + p["name"] +
+			     ";\n")
+		}
+		emit("    OboeValue __ev = ob_object_wrap(obj);\n")
+		emit("    (void)__ev;\n")
+		for (h in HANDLERS) {
+			if (h["decl"]["event_name"] == ev["name"]) {
+				emit("    " + h["cfunc"] + "(__ev);\n")
+			}
+		}
+		emit("    return ob_null();\n")
+		emit("}\n\n")
+	}
+
+	if (has_kbint_handlers()) {
+		emit("static void __oboe_fire_kbint(void) { KeyboardInterruptEvent__fire(); }\n\n")
+	}
+}
+
+// Loads the main file and every transitively imported module, then generates
+// one C translation unit for the whole program. Returns the generated C.
+func codegen_compile(str main_path) {
+	// phase 1: load all sources (main + transitively imported modules)
+	var main_src = read_whole_file(main_path)
+	if (main_src == null) {
+		fail("cannot read '" + main_path + "'")
+	}
+	// before any import is resolved, so a module can be found in the
+	// project's library directory no matter which unit asks for it
+	codegen_set_library_root(main_path)
+
+	load_unit_textual(null, main_src, main_path, SOURCE_DIR ?? ".")
+
+	// phase 2: register every custom operator symbol before any tokenizing
+	var i = 0
+	while (i < UNITS.len()) {
+		prescan_ops(UNITS[i]["src"])
+		i = i + 1
+	}
+
+	// phase 3: parse everything, then resolve the real import graph
+	i = 0
+	while (i < UNITS.len()) {
+		parse_unit(i)
+		i = i + 1
+	}
+	UNITS[0]["referenced"] = true
+	resolve_imports(0)
+
+	// phase 4: collect symbols from every referenced unit
+	i = 0
+	while (i < UNITS.len()) {
+		if (UNITS[i]["referenced"]) {
+			CURRENT_FILE = UNITS[i]["path"]
+			collect_classes(UNITS[i]["prog"], UNITS[i]["prefix"])
+			register_funcs(UNITS[i]["prog"], UNITS[i]["prefix"])
+			collect_extras(UNITS[i]["prog"], UNITS[i]["prefix"])
+		}
+		i = i + 1
+	}
+	finalize_events()
+	i = 0
+	while (i < CLASSES.len()) {
+		infer_instance_fields(CLASSES[i])
+		i = i + 1
+	}
+
+	// phase 5: emit
+	emit("#include \"oboe_runtime.h\"\n#include <stdlib.h>\n#include <stdio.h>\n\n")
+	emit_script_path_builtins(main_path)
+
+	i = 0
+	while (i < CLASSES.len()) {
+		emit_class_struct(CLASSES[i], i)
+		i = i + 1
+	}
+
+	var ui = 0
+	while (ui < UNITS.len()) {
+		if (UNITS[ui]["referenced"]) {
+			var pfx = UNITS[ui]["prefix"] != "" ?
+					  UNITS[ui]["prefix"] : null
+			for (d in UNITS[ui]["prog"]) {
+				if (d["kind"] == "DECL_CLASS") {
+					emit_class_predecls(d["klass"])
+				} else if (d["kind"] == "DECL_FUNC") {
+					emit_func_prototype(pfx, null,
+							    d["func"])
+				}
+			}
+		}
+		ui = ui + 1
+	}
+	emit_extras_predecls()
+
+	var prog = UNITS[0]["prog"] // the main file
+
+	// top-level variable declarations (in every referenced unit) become
+	// prefixed globals so functions can see them; each unit's top-level
+	// statements run in a per-unit function before main, modules first
+	ui = 0
+	while (ui < UNITS.len()) {
+		if (UNITS[ui]["referenced"]) {
+			for (d in UNITS[ui]["prog"]) {
+				if (d["kind"] == "DECL_STMT" and
+				    d["stmt"]["kind"] == "STMT_LET") {
+					emit("static OboeValue " +
+					     UNITS[ui]["prefix"] +
+					     d["stmt"]["name"] + ";\n")
+				}
+			}
+		}
+		ui = ui + 1
+	}
+	emit("\n")
+
+	var has_main = false
+	for (d in prog) {
+		if (d["kind"] == "DECL_FUNC" and d["func"]["name"] == "main") {
+			has_main = true
+		}
+	}
+
+	ui = UNITS.len() - 1
+	while (ui >= 0) { // modules first, main last
+		if (!UNITS[ui]["referenced"]) {
+			ui = ui - 1
+			continue
+		}
+		var pfx = UNITS[ui]["prefix"] != "" ? UNITS[ui]["prefix"] : null
+		CURRENT_PREFIX = UNITS[ui]["prefix"]
+		CURRENT_FILE = UNITS[ui]["path"]
+
+		// the unit's own top-level variables resolve by bare name in it
+		push_scope()
+		for (d in UNITS[ui]["prog"]) {
+			if (d["kind"] != "DECL_STMT" or
+			    d["stmt"]["kind"] != "STMT_LET") {
+				continue
+			}
+			var s = d["stmt"]
+			var class_type = null
+			if (s["type_name"] != null and
+			    find_class(s["type_name"]) != null) {
+				class_type = s["type_name"]
+			} else if (s["init"] != null) {
+				class_type = infer_class(s["init"])
+			}
+			define_var_c(s["name"], class_type,
+				     UNITS[ui]["prefix"] + s["name"])
+		}
+
+		for (d in UNITS[ui]["prog"]) {
+			if (d["kind"] == "DECL_CLASS") {
+				gen_class(d["klass"])
+			} else if (d["kind"] == "DECL_FUNC") {
+				gen_func_def(pfx, null, d["func"])
+			}
+		}
+
+		// the unit's top-level statements, run once at startup
+		emit("static void __oboe_toplevel_" + str(ui) + "(void) {\n")
+		for (d in UNITS[ui]["prog"]) {
+			if (d["kind"] != "DECL_STMT") {
+				continue
+			}
+			var s = d["stmt"]
+			if (s["kind"] == "STMT_LET") {
+				var init = s["init"] != null ?
+						   gen_expr(s["init"]) :
+						   "ob_null()"
+				emit("    " + UNITS[ui]["prefix"] + s["name"] +
+				     " = " + init + ";\n")
+			} else {
+				gen_stmt(s, 4)
+			}
+		}
+		emit("}\n\n")
+		pop_scope()
+		ui = ui - 1
+	}
+	CURRENT_PREFIX = ""
+	emit_extras_defs()
+
+	// static field initializers, operator registrations, FFI resolution
+	emit("static void __oboe_static_init(void) {\n")
+	for (o in CLASS_OPS) {
+		emit("    ob_register_operator(&" + o["cls"]["name"] +
+		     "__classinfo, \"" + o["symbol"] + "\", " + o["cfunc"] +
+		     ");\n")
+	}
+	for (f in FFI) {
+		emit("    __ffi_" + f["name"] + " = ob_ffi_sym(\"" + f["lib"] +
+		     "\", \"" + f["name"] + "\");\n")
+	}
+	for (c in CLASSES) {
+		var saved_class = CURRENT_CLASS
+		CURRENT_CLASS = c["name"]
+		CURRENT_PREFIX = c["unit_prefix"] ?? ""
+		CURRENT_FILE = unit_file_for_prefix(CURRENT_PREFIX)
+		for (fd in c["fields"]) {
+			if (!fd["is_static"]) {
+				continue
+			}
+			var v = fd["init"] != null ? gen_expr(fd["init"]) :
+						     "ob_null()"
+			emit("    " + c["name"] + "__" + fd["name"] + " = " +
+			     v + ";\n")
+		}
+		CURRENT_CLASS = saved_class
+	}
+	CURRENT_PREFIX = ""
+	emit("}\n\n")
+
+	emit("int main(int argc, char **argv) {\n")
+	emit("    __oboe_static_init();\n")
+	if (has_kbint_handlers()) {
+		emit("    ob_install_sigint(__oboe_fire_kbint);\n")
+	}
+	ui = UNITS.len() - 1
+	while (ui >= 0) { // modules' top level first
+		if (UNITS[ui]["referenced"]) {
+			emit("    __oboe_toplevel_" + str(ui) + "();\n")
+		}
+		ui = ui - 1
+	}
+	if (has_main) {
+		emit("    oboe_user_main(ob_args_from_argv(argc, argv));\n")
+	}
+	emit("    return 0;\n")
+	emit("}\n")
+
+	return OUT.join("")
+}

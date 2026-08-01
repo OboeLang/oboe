@@ -12,9 +12,8 @@
  * GNU General Public License for more details.
  */
 #include "dump.h"
-#include <stdlib.h>
+#include "numfmt.h"
 #include <string.h>
-#include <math.h>
 
 /* ---- enum name tables ----
    Each is tied to its enum by a _Static_assert on the last constant, so adding
@@ -162,27 +161,12 @@ static void field_str(FILE *out, const char *key, const char *val)
 	fputc('"', out);
 }
 
-/* The shortest %g that still round-trips, with ".0" appended when nothing
-   marks it as a float. This is exactly what the Oboe runtime's str() does to a
-   float (see ob_to_string), which is how the two dumps agree on a literal. */
+/* The dump spells a float the way str() does, which is how the twin in
+   selfhost/dump.oboe reaches the same bytes with nothing but str(). */
 static void field_double(FILE *out, const char *key, double d)
 {
 	char buf[64];
-	if (isnan(d)) {
-		fprintf(out, " %s=nan", key);
-		return;
-	}
-	if (isinf(d)) {
-		fprintf(out, " %s=%s", key, d < 0 ? "-inf" : "inf");
-		return;
-	}
-	for (int prec = 1; prec <= 17; prec++) {
-		snprintf(buf, sizeof buf, "%.*g", prec, d);
-		if (strtod(buf, NULL) == d)
-			break;
-	}
-	if (!strpbrk(buf, ".eE"))
-		strncat(buf, ".0", sizeof(buf) - strlen(buf) - 1);
+	ob_double_text(d, buf, sizeof buf);
 	fprintf(out, " %s=%s", key, buf);
 }
 

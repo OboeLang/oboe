@@ -46,6 +46,13 @@ func main(array args) {
         print("caught file-as-dir")
     }
 
+    // realpath collapses `.` and `..` and answers with one absolute spelling,
+    // so two ways of naming the same file compare equal
+    print("realpath:",
+          os.realpath("${root}/a/../zeta.oboe") == os.realpath("${root}/zeta.oboe"))
+    print("realpath absolute:", os.realpath("${root}/a").starts_with("/"))
+    print("realpath missing:", os.realpath("${root}/nope"))
+
     os.remove("${root}/zeta.oboe")
     os.remove("${root}/alpha.oboe")
     os.remove("${root}/a/b")

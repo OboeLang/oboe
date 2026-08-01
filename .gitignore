@@ -1,2 +1,3 @@
 .oboe/
 *.kate-swp
+compiler/stage/

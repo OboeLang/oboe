@@ -1,0 +1,11 @@
+// A module whose class has a static field initialised by calling one of the
+// module's own functions. Those initialisers are emitted together in
+// __oboe_static_init, outside the per-unit emission loop, so the compiler has
+// to restore this module's prefix for the call to resolve.
+func base_count() {
+	return 40
+}
+
+class Registry {
+	static int total = base_count() + 2
+}

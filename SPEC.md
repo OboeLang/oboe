@@ -344,6 +344,7 @@ Importing `math`, `random` or `os` works with no file on disk, they're built int
 - `os.run(cmd)` runs a command through the shell and returns its exit code; `os.spawn(cmd)` starts it without waiting and returns the pid.
 - `os.read_file(path)` (throws `os.FileNotFoundError`), `os.write_file(path, content)`, `os.append_file(path, content)`, `os.exists(path)`, `os.remove(path)`, `os.getenv(name)` (string, or `null` when unset), `os.exit(status)` (ends the program immediately, skipping any `finally`).
 - `os.is_dir(path)`, `os.mkdir(path)` (recursive, like `mkdir -p`; an existing directory counts as success), `os.listdir(path)` (entry names without `.` and `..`, sorted by byte order so a directory walk is reproducible; throws `os.FileNotFoundError` when the path isn't a readable directory). `os.exists` cannot tell a directory from a file — that is what `os.is_dir` is for.
+- `os.realpath(path)` is the canonical absolute path, with `.`, `..` and symlinks resolved, or `null` when the path does not resolve. Two names for the same file always give the same string.
 - `os.script_file()` is the absolute path of the running script and `os.script_dir()` its directory; `os.project_root()` is the nearest ancestor directory containing a project.jsonc, falling back to `os.script_dir()`. All three are resolved at compile time.
 
 ### Methods on primitives

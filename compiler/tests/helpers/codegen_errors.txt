@@ -1,0 +1,64 @@
+# Inputs that make codegen fail, for the selfhost_codegen gate: one per line, as
+# `<name><TAB><source>`. The suite writes each to its own file and requires the
+# two compilers to produce the identical diagnostic, the identical partial
+# output, and the identical exit status. Blank lines and lines starting with #
+# are skipped. A name beginning with _ is a helper another line imports.
+#
+# Between them these reach every codegen diagnostic in src/codegen.c that the
+# ordinary tests/fail_*.oboe do not already reach. Two cannot be reached at all:
+#
+#   "unknown expression kind"   the switch over ExprKind is exhaustive, so the
+#                               statement after it is dead
+#   "cannot read '<file>'"      codegen_compile's own read; every CLI path that
+#                               reaches it has already opened the file
+#
+# Keeping each case to one line is deliberate: a diagnostic's line number is
+# part of what is compared, and a one-line case makes it obvious.
+
+# ---- member access through super
+supermethod	class A { } class B extends A { func f(this) { super.nope() } }
+superprivate	class A { private func p(this) { } } class B extends A { func f(this) { super.p() } }
+superfield	class A { } class B extends A { func f(this) { print(super.nope) } }
+
+# ---- member access on an instance
+unknownrecv	func f(a) { print(a.b) }
+nofield	class A { func f(this) { print(this.nope) } }
+privfield	class A { private var p } func f(A a) { print(a.p) }
+methodarity	func f() { print("a".upper(1)) }
+
+# ---- assignment
+badtarget	func f() { 1 = 2 }
+undefassign	func f() { nope = 1 }
+
+# ---- argument binding
+posafternamed	func g(int a = 1, int b = 2) { } func f() { g(a = 1, 2) }
+
+# ---- constructors
+noancestor	class A { } class B extends A { func init(this) { super(1) } }
+ancestorarity	class A { func init(this, int q) { } } class B extends A { func init(this) { super() } }
+
+# ---- operators
+# the `operator` pre-scan is a raw text scan with no comment awareness, so the
+# symbol below is registered for lexing while the declaration never exists
+undeclaredop	func f() { print(1 <=> 2) } // operator <=> (a, b) { }
+topopargs	operator ||> (a) { }
+opredefined	operator ||> (a, b) { } operator ||> (c, d) { }
+classopargs	class A { operator + (this) { } }
+
+# ---- events
+eventexists	event E = event() event E = event()
+
+# ---- imported members
+_cehelper	var thing = 1
+modhasnofunc	import thing from _cehelper func f() { thing() }
+stdvalue	import abs from math func f() { print(abs) }
+stdarity	import abs from math func f() { print(abs(1, 2)) }
+
+# ---- builtin arity
+inputarity	func f() { print(input(1)) }
+rangearity	func f() { print(range(1)) }
+ordarity	func f() { print(ord()) }
+chrarity	func f() { print(chr(1, 2)) }
+
+# ---- calls
+notcallable	func f() { var g = 1 g() }

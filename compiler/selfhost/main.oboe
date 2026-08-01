@@ -13,15 +13,19 @@
 //
 // oboec -- the Oboe-written compiler front end. It is being brought up one
 // stage at a time against the C compiler in src/, each stage gated on emitting
-// bytes identical to its C counterpart. Today it stops after the parser.
+// bytes identical to its C counterpart.
 import os
 import lex_all from lexer
 import parse_program from parser
 import dump_tokens, dump_ast from dump
+// qualified, not `from`: the textual import pre-scan reads one line, so a
+// member list long enough to wrap would be missed by it
+import codegen
 import fail from diag
 
 func usage() {
-	eprint("usage: oboec --dump-tokens|--dump-ast <file>")
+	eprint("usage: oboec <file> -o <out.c> [--target-os <os>]")
+	eprint("       oboec --dump-tokens|--dump-ast|--emit-c <file>")
 	os.exit(2)
 }
 
@@ -34,20 +38,44 @@ func read_source(str path) {
 }
 
 func main(array args) {
-	var dump = ""
+	// compiling to a file is the job; the dump modes are development gates
+	var mode = "c"
 	var input = null
+	var output = null
+	var target_os = null
 
 	var i = 1
 	while (i < args.len()) {
 		var a = args[i]
 		if (a == "--dump-tokens") {
-			dump = "tokens"
+			mode = "tokens"
 			i = i + 1
 			continue
 		}
 		if (a == "--dump-ast") {
-			dump = "ast"
+			mode = "ast"
 			i = i + 1
+			continue
+		}
+		if (a == "--emit-c") {
+			mode = "c"
+			i = i + 1
+			continue
+		}
+		if (a == "-o" or a == "--output") {
+			if (i + 1 >= args.len()) {
+				usage()
+			}
+			output = args[i + 1]
+			i = i + 2
+			continue
+		}
+		if (a == "--target-os") {
+			if (i + 1 >= args.len()) {
+				usage()
+			}
+			target_os = args[i + 1]
+			i = i + 2
 			continue
 		}
 		if (a.starts_with("-")) {
@@ -56,14 +84,36 @@ func main(array args) {
 		input = a
 		i = i + 1
 	}
-	if (input == null or dump == "") {
+	if (input == null) {
 		usage()
+	}
+	if (output != null and mode != "c") {
+		usage()
+	}
+
+	if (mode == "c") {
+		// everything the generated text depends on is set the way the C
+		// CLI's transpile_to_c sets it, so the two agree byte for byte
+		if (target_os != null) {
+			codegen.codegen_set_target_os(target_os)
+		}
+		codegen.codegen_set_source_dir(codegen.path_dirname(input))
+		// with -o, a diagnostic partway through emission has to leave
+		// the partial C in the file rather than on stdout
+		codegen.codegen_set_output_path(output)
+		var c = codegen.codegen_compile(input)
+		if (output == null) {
+			write(c)
+		} else {
+			os.write_file(output, c)
+		}
+		return null
 	}
 
 	// one write, not one per token or node: the corpus files run to tens of
 	// thousands of either
 	var toks = lex_all(read_source(input))
-	if (dump == "tokens") {
+	if (mode == "tokens") {
 		write(dump_tokens(toks))
 	} else {
 		write(dump_ast(parse_program(toks, input)))

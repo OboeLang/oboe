@@ -71,6 +71,36 @@ jobs:
           make clean
           make CC="clang -Werror"
 
+  bootstrap:
+    name: bootstrap (stage2 == stage3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The compiler proper is written in Oboe and lives in bin/oboec, built
+      # from the committed bootstrap/oboec.c. This asserts the fixpoint: a
+      # compiler built from what the bootstrap produces produces that same C
+      # again. stage1 (the committed file) may legitimately differ from both,
+      # since it was generated before whatever change is being tested.
+      #
+      # `make clean` matters even more here than elsewhere bc bin/oboec is a
+      # third committed binary that a stale build could inadvertantly test
+      # in place of this commit.
+      - name: Check the compiler reproduces itself
+        working-directory: compiler
+        run: |
+          make clean
+          make bootstrap-check
+
+      # The other jobs run the suite on the Oboe front end, which is the only
+      # supported one. This run keeps the deprecated in-process C codegen from
+      # rotting: the selfhost gates already compare its output to oboec's on
+      # every file, but nothing else exercises it as a whole compiler, and it
+      # is only worth keeping around as a fallback for as long as it works.
+      - name: Run the test suite on the deprecated C front end
+        working-directory: compiler
+        run: OBOE_USE_C_FRONTEND=1 make test
+
   macos:
     name: build & test (macOS)
     runs-on: macos-latest

@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+// os.is_dir / os.mkdir / os.listdir. Works inside a directory it creates under
+// Raw control bytes in a string literal, which nothing else in the corpus
+// has. They are the only thing that reaches escape_c_string's octal escape:
+// C's \xNN is greedy, so a byte below 0x20 (and DEL) has to go out as three
+// octal digits or the next character can be swallowed into it. Written with
+// raw bytes because Oboe has no numeric escape to spell them with.
+func main(array args) {
+    var ctl = "abcd"
+    print(ctl.len())
+    var i = 0
+    for (ch in ctl) {
+        print(i, ord(ch))
+        i = i + 1
+    }
+}
