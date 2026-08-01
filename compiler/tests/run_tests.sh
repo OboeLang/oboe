@@ -204,6 +204,57 @@ else
 fi
 rm -rf "$tmp"
 
+# ---- self-hosted lexer --------------------------------------------------
+#
+# selfhost/lexer.oboe is the port of src/lexer.c, and this is the gate on it:
+# `oboe dump-tokens` and `oboec --dump-tokens` must agree byte for byte -- token
+# type, line and escaped lexeme -- over every Oboe file in the tree, plus the
+# torture fixtures for the corners the real tests miss and a deliberately bad
+# character for the diagnostic. Exit status is compared too, so an error that
+# prints the right text with the wrong status still fails.
+tmp="$(mktemp -d)"
+if "$OBOE" build selfhost/main.oboe -o "$tmp/oboec" >/dev/null 2>&1; then
+    printf 'var a = 1\nvar b = `x`\n' > "$tmp/badchar.oboe"
+    diffs=""
+    n=0
+    : > "$tmp/seen"
+    for src in tests/*.oboe tests/helpers/*.oboe selfhost/*.oboe \
+               selfhost/mini/*.oboe "$tmp/badchar.oboe"; do
+        n=$((n+1))
+        a="$("$OBOE" dump-tokens "$src" 2>&1; printf 'rc=%s' "$?")"
+        b="$("$tmp/oboec" --dump-tokens "$src" 2>&1; printf 'rc=%s' "$?")"
+        [ "$a" = "$b" ] || diffs="$diffs $src"
+        printf '%s\n' "$a" | awk '{print $1}' >> "$tmp/seen"
+    done
+    if [ -z "$diffs" ]; then
+        echo "PASS selfhost_lexer ($n files)"
+        pass=$((pass+1))
+    else
+        echo "FAIL selfhost_lexer (differs:$diffs)"
+        fail=$((fail+1))
+    fi
+
+    # Agreeing on tokens the corpus never produces proves nothing, so pin the
+    # coverage: every TokenType in the enum has to show up somewhere above.
+    # T_X_OP is the one exception -- the lexer never emits it, the parser
+    # retags an identifier spelled `x` in operator position.
+    sed -n '/^typedef enum {/,/^} TokenType;/p' src/lexer.h |
+        grep -o '\bT_[A-Z_0-9]*' | grep -v '^T_X_OP$' | sort -u > "$tmp/want"
+    sort -u "$tmp/seen" > "$tmp/got"
+    missing="$(comm -23 "$tmp/want" "$tmp/got" | tr '\n' ' ')"
+    if [ -z "$missing" ]; then
+        echo "PASS selfhost_lexer_coverage ($(wc -l < "$tmp/want" | tr -d ' ') token types)"
+        pass=$((pass+1))
+    else
+        echo "FAIL selfhost_lexer_coverage (no corpus file produces: $missing)"
+        fail=$((fail+1))
+    fi
+else
+    echo "FAIL selfhost_lexer (could not build selfhost/main.oboe)"
+    fail=$((fail+1))
+fi
+rm -rf "$tmp"
+
 # ---- katare client ------------------------------------------------------
 #
 # Driven against tests/helpers/katare_stub.c, a scripted server compiled here.

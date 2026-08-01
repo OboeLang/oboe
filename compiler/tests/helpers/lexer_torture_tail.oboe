@@ -1,0 +1,6 @@
+// Runs-to-EOF oddities, kept out of lexer_torture.oboe because each one
+// swallows everything after it. The unterminated ${ consumes the rest of the
+// file; the trailing bare `operator` is skipped by the prescan's `i + 8 < len`
+// bound, so it never registers a symbol.
+var unterminated = "abc ${ d "
+operator

@@ -142,21 +142,53 @@ OboeValue ob_null(void)
 	return r;
 }
 
+/* Allocates [size_t length][len payload bytes][NUL] and returns the payload,
+   which is what as.s points at. See the note on ob_slen in the header. */
+static char *ob_str_alloc(size_t len)
+{
+	size_t *hdr = malloc(sizeof(size_t) + len + 1);
+	if (!hdr)
+		ob_oom();
+	*hdr = len;
+	char *s = (char *)(hdr + 1);
+	s[len] = '\0';
+	return s;
+}
+
+size_t ob_slen(const char *s)
+{
+	return ((const size_t *)s)[-1];
+}
+
+/* Wraps a payload that came from ob_str_alloc, with no second copy. */
+static OboeValue ob_string_wrap(char *payload)
+{
+	OboeValue r = { 0 };
+	r.tag = OB_STRING;
+	r.as.s = payload;
+	return r;
+}
+
 OboeValue ob_string(const char *v)
 {
 	OboeValue r = { 0 };
 	r.tag = OB_STRING;
-	r.as.s = strdup(v ? v : "");
-	if (!r.as.s)
-		ob_oom();
+	if (!v)
+		v = "";
+	size_t n = strlen(v);
+	r.as.s = ob_str_alloc(n);
+	memcpy(r.as.s, v, n);
 	return r;
 }
 
+/* The length header has to sit in front of the payload, so a buffer that was
+   malloc'd elsewhere cannot simply be adopted -- this copies its contents and
+   frees it. The name stays because every caller still means "here, it's
+   yours"; only the mechanics changed. */
 OboeValue ob_string_take(char *v)
 {
-	OboeValue r = { 0 };
-	r.tag = OB_STRING;
-	r.as.s = v;
+	OboeValue r = ob_string(v);
+	free(v);
 	return r;
 }
 
@@ -833,6 +865,15 @@ static bool ob_either_float(OboeValue a, OboeValue b)
 
 OboeValue ob_add(OboeValue a, OboeValue b)
 {
+	if (a.tag == OB_STRING && b.tag == OB_STRING) {
+		/* the overwhelmingly common case, and worth not routing
+		   through two throwaway copies of what we already have */
+		size_t na = ob_slen(a.as.s), nb = ob_slen(b.as.s);
+		char *out = ob_str_alloc(na + nb);
+		memcpy(out, a.as.s, na);
+		memcpy(out + na, b.as.s, nb);
+		return ob_string_wrap(out);
+	}
 	if (a.tag == OB_STRING || b.tag == OB_STRING) {
 		char *as = ob_to_cstr(a);
 		char *bs = ob_to_cstr(b);
@@ -1154,11 +1195,11 @@ OboeValue ob_repeat(OboeValue a, OboeValue b)
 		int64_t n = b.as.i;
 		if (n < 0)
 			n = 0;
-		size_t len = strlen(a.as.s);
+		size_t len = ob_slen(a.as.s);
 		char *out = malloc(len * n + 1);
-		out[0] = '\0';
 		for (int64_t i = 0; i < n; i++)
-			strcat(out, a.as.s);
+			memcpy(out + len * i, a.as.s, len);
+		out[len * n] = '\0';
 		return ob_string_take(out);
 	}
 	ob_type_error("x");
@@ -1657,7 +1698,7 @@ int64_t ob_iter_len(OboeValue v)
 	case OB_DICT:
 		return (int64_t)v.as.dict->count;
 	case OB_STRING:
-		return (int64_t)strlen(v.as.s);
+		return (int64_t)ob_slen(v.as.s);
 	default:
 		ob_iter_type_error(v);
 		return 0;
@@ -1689,7 +1730,7 @@ OboeValue ob_iter_value(OboeValue v, int64_t i)
 			return ob_null();
 		return v.as.dict->entries[i].value;
 	case OB_STRING: {
-		if (i < 0 || (size_t)i >= strlen(v.as.s))
+		if (i < 0 || (size_t)i >= ob_slen(v.as.s))
 			return ob_null();
 		char one[2] = { v.as.s[i], '\0' };
 		return ob_string(one);
@@ -1744,7 +1785,7 @@ static int64_t ob_want_idx(OboeValue v, const char *method)
 
 static OboeValue ob_str_len(OboeValue s)
 {
-	return ob_int((int64_t)strlen(ob_want_str(s, "len")));
+	return ob_int((int64_t)ob_slen(ob_want_str(s, "len")));
 }
 
 OboeValue ob_str_upper(OboeValue s)
@@ -1766,7 +1807,7 @@ OboeValue ob_str_lower(OboeValue s)
 static OboeValue ob_str_reverse(OboeValue s)
 {
 	const char *in = ob_want_str(s, "reverse");
-	size_t n = strlen(in);
+	size_t n = ob_slen(in);
 	char *out = malloc(n + 1);
 	for (size_t i = 0; i < n; i++)
 		out[i] = in[n - 1 - i];
@@ -1795,7 +1836,7 @@ OboeValue ob_str_split(OboeValue s, OboeValue sep)
 	const char *in = ob_want_str(s, "split");
 	const char *sp = ob_want_str(sep, "split");
 	OboeValue out = ob_array_new();
-	size_t splen = strlen(sp);
+	size_t splen = ob_slen(sp);
 	if (splen == 0) {
 		for (const char *p = in; *p; p++) {
 			char one[2] = { *p, '\0' };
@@ -1821,14 +1862,14 @@ OboeValue ob_str_starts_with(OboeValue s, OboeValue prefix)
 {
 	const char *in = ob_want_str(s, "starts_with");
 	const char *p = ob_want_str(prefix, "starts_with");
-	return ob_bool(strncmp(in, p, strlen(p)) == 0);
+	return ob_bool(strncmp(in, p, ob_slen(p)) == 0);
 }
 
 OboeValue ob_str_ends_with(OboeValue s, OboeValue suffix)
 {
 	const char *in = ob_want_str(s, "ends_with");
 	const char *p = ob_want_str(suffix, "ends_with");
-	size_t n = strlen(in), m = strlen(p);
+	size_t n = ob_slen(in), m = ob_slen(p);
 	return ob_bool(m <= n && strcmp(in + n - m, p) == 0);
 }
 
@@ -1850,10 +1891,10 @@ OboeValue ob_str_replace(OboeValue s, OboeValue from, OboeValue to)
 	const char *in = ob_want_str(s, "replace");
 	const char *f = ob_want_str(from, "replace");
 	const char *t = ob_want_str(to, "replace");
-	size_t flen = strlen(f);
+	size_t flen = ob_slen(f);
 	if (flen == 0)
 		return ob_string(in);
-	size_t tlen = strlen(t), cap = strlen(in) + 1, n = 0;
+	size_t tlen = ob_slen(t), cap = ob_slen(in) + 1, n = 0;
 	char *out = malloc(cap);
 	for (const char *p = in; *p;) {
 		const char *hit = strstr(p, f);
@@ -1882,7 +1923,7 @@ OboeValue ob_str_replace(OboeValue s, OboeValue from, OboeValue to)
 OboeValue ob_str_substr(OboeValue s, OboeValue start, OboeValue len)
 {
 	const char *in = ob_want_str(s, "substr");
-	int64_t n = (int64_t)strlen(in);
+	int64_t n = (int64_t)ob_slen(in);
 	int64_t a = ob_want_idx(start, "substr");
 	int64_t l = ob_want_idx(len, "substr");
 	if (a < 0)
@@ -1893,10 +1934,9 @@ OboeValue ob_str_substr(OboeValue s, OboeValue start, OboeValue len)
 		l = 0;
 	if (a + l > n)
 		l = n - a;
-	char *out = malloc((size_t)l + 1);
+	char *out = ob_str_alloc((size_t)l);
 	memcpy(out, in + a, (size_t)l);
-	out[l] = '\0';
-	return ob_string_take(out);
+	return ob_string_wrap(out);
 }
 
 OboeValue ob_str_repeat(OboeValue s, OboeValue n)
@@ -2001,7 +2041,7 @@ OboeValue ob_arr_join(OboeValue a, OboeValue sep)
 {
 	OboeArray *arr = ob_want_arr(a, "join");
 	const char *sp = ob_want_str(sep, "join");
-	size_t splen = strlen(sp), cap = 64, n = 0;
+	size_t splen = ob_slen(sp), cap = 64, n = 0;
 	char *out = malloc(cap);
 	out[0] = '\0';
 	for (size_t i = 0; i < arr->count; i++) {
@@ -2163,7 +2203,7 @@ OboeValue ob_m_slice(OboeValue v, OboeValue start, OboeValue end)
 	if (v.tag == OB_ARRAY)
 		return ob_arr_slice(v, start, end);
 	if (v.tag == OB_STRING) {
-		int64_t n = (int64_t)strlen(v.as.s);
+		int64_t n = (int64_t)ob_slen(v.as.s);
 		int64_t a = ob_want_idx(start, "slice"),
 			b = ob_want_idx(end, "slice");
 		if (a < 0)

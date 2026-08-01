@@ -66,25 +66,22 @@ static Keyword keywords[] = {
 /* Indexed by TokenType, so it has to stay in the enum's order; the assert below
    catches a token added to the enum but not here. */
 static const char *const token_names[] = {
-	"T_EOF",      "T_IDENT",	"T_INT",      "T_FLOAT",
-	"T_STRING",   "T_LET",		"T_CONST",    "T_FUNC",
-	"T_RETURN",   "T_CLASS",	"T_STATIC",   "T_PRIVATE",
-	"T_IF",	      "T_ELSE",		"T_WHILE",    "T_FOR",
-	"T_IN",	      "T_BREAK",	"T_CONTINUE", "T_SWITCH",
-	"T_CASE",     "T_TRY",		"T_CATCH",    "T_FINALLY",
-	"T_THROW",    "T_IMPORT",	"T_AS",	      "T_FROM",
-	"T_TRUE",     "T_FALSE",	"T_NULL",     "T_AND",
-	"T_OR",	      "T_IS",		"T_X_OP",     "T_EXTENDS",
-	"T_EVENT",    "T_ON",		"T_OPERATOR", "T_CIMPORT",
-	"T_LBRACE",   "T_RBRACE",	"T_LPAREN",   "T_RPAREN",
-	"T_LBRACKET", "T_RBRACKET",	"T_COMMA",    "T_DOT",
-	"T_COLON",    "T_SEMI",		"T_PLUS",     "T_MINUS",
-	"T_STAR",     "T_SLASH",	"T_PERCENT",  "T_ASSIGN",
-	"T_EQ",	      "T_NEQ",		"T_LT",	      "T_LTE",
-	"T_GT",	      "T_GTE",		"T_NOT",      "T_ANDAND",
-	"T_OROR",     "T_AMP",		"T_PIPE",     "T_CARET",
-	"T_TILDE",    "T_SHL",		"T_SHR",      "T_QQ",
-	"T_QDOT",     "T_QUESTION",	"T_ARROW",    "T_CUSTOMOP"
+	"T_EOF",      "T_IDENT",   "T_INT",    "T_FLOAT",    "T_STRING",
+	"T_LET",      "T_CONST",   "T_FUNC",   "T_RETURN",   "T_CLASS",
+	"T_STATIC",   "T_PRIVATE", "T_IF",     "T_ELSE",     "T_WHILE",
+	"T_FOR",      "T_IN",	   "T_BREAK",  "T_CONTINUE", "T_SWITCH",
+	"T_CASE",     "T_TRY",	   "T_CATCH",  "T_FINALLY",  "T_THROW",
+	"T_IMPORT",   "T_AS",	   "T_FROM",   "T_TRUE",     "T_FALSE",
+	"T_NULL",     "T_AND",	   "T_OR",     "T_IS",	     "T_X_OP",
+	"T_EXTENDS",  "T_EVENT",   "T_ON",     "T_OPERATOR", "T_CIMPORT",
+	"T_LBRACE",   "T_RBRACE",  "T_LPAREN", "T_RPAREN",   "T_LBRACKET",
+	"T_RBRACKET", "T_COMMA",   "T_DOT",    "T_COLON",    "T_SEMI",
+	"T_PLUS",     "T_MINUS",   "T_STAR",   "T_SLASH",    "T_PERCENT",
+	"T_ASSIGN",   "T_EQ",	   "T_NEQ",    "T_LT",	     "T_LTE",
+	"T_GT",	      "T_GTE",	   "T_NOT",    "T_ANDAND",   "T_OROR",
+	"T_AMP",      "T_PIPE",	   "T_CARET",  "T_TILDE",    "T_SHL",
+	"T_SHR",      "T_QQ",	   "T_QDOT",   "T_QUESTION", "T_ARROW",
+	"T_CUSTOMOP"
 };
 _Static_assert(sizeof(token_names) / sizeof(token_names[0]) == T_CUSTOMOP + 1,
 	       "token_names must list every TokenType, in enum order");

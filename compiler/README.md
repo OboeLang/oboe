@@ -6,10 +6,16 @@ A transpiler from Oboe to C, plus the `oboe` CLI described in SPEC.md.
 make
 ```
 
-Produces `bin/oboe`. Run the test suite with `make test`: each `tests/*.oboe`
-is run and diffed against its `.expected` output; `fail_*` tests assert that
-compilation/execution fails with the message in their `.expect_fail` file, and
-`_*.oboe` files are helper modules imported by other tests, not run directly.
+Produces `bin/oboe`. Run the test suite with `make test`: each `tests/*.oboe` is run and diffed against its `.expected` output; `fail_*` tests assert that compilation/execution fails with the message in their `.expect_fail` file, and `_*.oboe` files are helper modules imported by other tests, not run directly.
+
+## Self-hosting
+
+`selfhost/` is the compiler currently being rewritten in Oboe, still transpiling to C handing the C to gcc. Only the compiler proper is moving; the CLI, the package manager, the katare client and the vendored wire-format code stay in C, but I'd eventually like to move them to Oboe..
+
+- `selfhost/{lexer,dump,diag,main}.oboe` -- `oboec`, the port in progress. The lexer is done; the parser and codegen are not.
+- `selfhost/mini/` -- a compiler for a small Oboe-like subset, written in Oboe. It was the spike that proved the language could host a compiler at all, and it stays as a cheap regression test engine for the features that made that possible (break/continue, short-circuit `and`/`or`, `ord`, dict-shaped AST nodes, `eprint` + `os.exit`).
+
+Each stage is gated on emitting bytes identical to its C counterpart, which is what the hidden `oboe dump-tokens <file>` command is for -- it prints one line per token, and `selfhost_lexer` asserts `oboec --dump-tokens` matches it exactly over every Oboe file in the tree. `selfhost_lexer_coverage` then asserts the corpus actually produces every `TokenType`, so agreement is never vacuous.
 
 ## Usage
 
@@ -43,6 +49,8 @@ Packages come from a katare registry. The protocol and the reference server live
 ## Design
 
 Every Oboe value is represented at runtime as a single dynamic, tagged `OboeValue` (see `runtime/oboe_runtime.h`), rather than mapped to native C types per declared type. This sidesteps needing a full static type checker in this first pass, and gives heterogeneous arrays/dicts, `??`/`?.`, and `is` type-checks for free. Type annotations in Oboe source are otherwise unenforced at compile time in this version, except for one place: resolving which class's fields/methods a `.member` access refers to, which requires the compiler to know an expression's clas* statically. A lightweight local pass tracks class types only (not primitive types) through `let`, parameters, field declarations, and a function's or method's declared return type; a `.method()`/`.field` access on an expression whose class can't be inferred is a compile error.
+
+A string's bytes are preceded in the same allocation by a `size_t` holding their length, with `as.s` pointing past it, so `ob_slen()` is O(1) while the payload stays an ordinary NUL-terminated C string that `strcmp`, `printf` and the FFI can use unchanged. Without that, walking a string a byte at a time is quadratic -- `.substr()` needs the subject's length just to clamp, and `strlen` re-derives it every call. `ob_string()` and `ob_string_take()` are the only two functions that ever fill in `as.s`; the header only exists in front of pointers they produced, so `ob_slen()` must never be handed an interior pointer.
 
 Classes compile to plain C structs, with a class's parent embedded as the struct's first member (standard-layout pointer-cast trick), so inherited methods/fields are reachable via a pointer cast rather than a vtable, as the spec specifies non-virtual dispatch. `super(...)` and `super.method()` compile to direct calls on the nearest ancestor that defines the constructor/method, and a class with no `init` gets thin wrappers around its ancestor's constructors. Instance fields aren't declared up front; the compiler infers a class's field set by scanning all of its methods for `this.field = ...` assignments. `static`/`const` fields still use an explicit declaration (`static int count = 0`), since they aren't tied to any particular instance.
 

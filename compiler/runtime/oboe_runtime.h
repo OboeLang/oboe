@@ -97,8 +97,25 @@ OboeValue ob_int_sized(int64_t v, int width, bool is_unsigned);
 OboeValue ob_float(double v);
 OboeValue ob_bool(bool v);
 OboeValue ob_string(const char *v);
-OboeValue ob_string_take(char *v); /* takes ownership of malloc'd buffer */
+OboeValue ob_string_take(char *v); /* copies the buffer's contents, frees it */
 OboeValue ob_null(void);
+
+/* An Oboe string's byte length, in constant time.
+
+   Every string is allocated with its length in a header immediately before the
+   payload, and `as.s` points past that header at an ordinary NUL-terminated C
+   string -- so strcmp, printf and the FFI go on treating it as a plain char *,
+   while the length is one load away.
+
+   This is not a micro-optimization. Without it, walking a string a byte at a
+   time is quadratic, because .substr() has to know the subject's length just to
+   clamp its arguments, and strlen() re-derives it on every call: the
+   Oboe-written lexer took 4.8s on a 16k-line file, almost all of it inside
+   strlen. ob_string() and ob_string_take() are the only two places that ever
+   fill in as.s, so the header is always there to be read -- but it is only
+   there for pointers those produced, which is why this takes an Oboe payload
+   and not any char *. An interior pointer has no header in front of it. */
+size_t ob_slen(const char *s);
 OboeValue ob_array_new(void);
 OboeValue ob_dict_new(void);
 OboeValue ob_object_wrap(void *obj);
