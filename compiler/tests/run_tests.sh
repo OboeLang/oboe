@@ -199,6 +199,78 @@ else
 fi
 rm -rf "$tmp"
 
+# `oboe build --emit-c` stops at the C. Two things worth pinning: it needs no C
+# compiler at all (so it works for a target whose cross-compiler isn't
+# installed), and when several declared targets are built it keeps their output
+# files apart -- they would otherwise all be dist/<name>.c and the last one
+# would silently win.
+tmp="$(mktemp -d)"
+printf 'func main(array args) { print("hi") }\n' > "$tmp/main.oboe"
+cat > "$tmp/project.json" <<'EOF'
+{
+    "project": { "name": "emit", "entry": "main.oboe" },
+    "build": { "targets": { "linux": {}, "windows": {} } }
+}
+EOF
+# a cc that always fails, to prove --emit-c never reaches for one
+printf '#!/bin/sh\nexit 1\n' > "$tmp/nocc"
+chmod +x "$tmp/nocc"
+( cd "$tmp" && "$OLDPWD/$OBOE" build --emit-c --cc "$tmp/nocc" ) >/dev/null 2>&1
+if [ -s "$tmp/dist/emit.linux.c" ] && [ -s "$tmp/dist/emit.windows.c" ] &&
+   [ ! -e "$tmp/dist/emit" ] && [ ! -e "$tmp/dist/emit.exe" ] &&
+   head -1 "$tmp/dist/emit.linux.c" | grep -q 'oboe_runtime.h'; then
+    echo "PASS build_emit_c"
+    pass=$((pass+1))
+else
+    echo "FAIL build_emit_c (dist: $(ls "$tmp/dist" 2>/dev/null | tr '\n' ' '))"
+    fail=$((fail+1))
+fi
+rm -rf "$tmp"
+
+# Several declared targets with no `output` between them used to write the same
+# dist/<name> and lose all but the last. Windows hid it, being the one target
+# that renames its own output, so the pair below is deliberately linux+freebsd.
+tmp="$(mktemp -d)"
+printf 'func main(array args) { print("hi") }\n' > "$tmp/main.oboe"
+cat > "$tmp/project.json" <<'EOF'
+{
+    "project": { "name": "coll", "entry": "main.oboe" },
+    "build": { "targets": { "linux": {}, "freebsd": {} } }
+}
+EOF
+( cd "$tmp" && "$OLDPWD/$OBOE" build --emit-c ) >/dev/null 2>&1
+if [ -s "$tmp/dist/coll.linux.c" ] && [ -s "$tmp/dist/coll.freebsd.c" ]; then
+    echo "PASS build_targets_dont_collide"
+    pass=$((pass+1))
+else
+    echo "FAIL build_targets_dont_collide (dist: $(ls "$tmp/dist" 2>/dev/null | tr '\n' ' '))"
+    fail=$((fail+1))
+fi
+rm -rf "$tmp"
+
+# The Windows cross-compile, which needs mingw-w64 and so is skipped where it
+# isn't installed. It is worth a test at all because the runtime silently stopped
+# building for that target once anything reached for a libc extension mingw hides
+# under -std=c11 (strndup did), and nothing else here would notice.
+tmp="$(mktemp -d)"
+if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+    echo "SKIP cross_compile_windows (mingw-w64 not installed)"
+    skip=$((skip+1))
+else
+    printf 'func main(array args) { print("x,y".split(",").join("-")) }\n' \
+        > "$tmp/w.oboe"
+    "$OBOE" build "$tmp/w.oboe" -t windows -o "$tmp/w.exe" >"$tmp/log" 2>&1
+    if [ -s "$tmp/w.exe" ] && head -c 2 "$tmp/w.exe" | grep -q MZ; then
+        echo "PASS cross_compile_windows"
+        pass=$((pass+1))
+    else
+        echo "FAIL cross_compile_windows"
+        sed 's/^/    /' "$tmp/log" | head -5
+        fail=$((fail+1))
+    fi
+fi
+rm -rf "$tmp"
+
 # ---- self-hosting spike -------------------------------------------------
 #
 # selfhost/mini/ is a compiler for a small Oboe-like subset, written in Oboe.

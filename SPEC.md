@@ -44,6 +44,11 @@ oboe build # Self-explanatory. Builds the program into an executable, in the dis
                 # (nt/darwin/osx also accepted). Defaults to the host OS. Windows outputs
                 # get .exe appended automatically. windows needs mingw-w64 installed;
                 # macos needs osxcross; the BSDs default to clang.
+    --emit-c    # Stops after generating the C and writes that instead of an executable,
+                # to `-o` if given and otherwise next to where the binary would have gone
+                # (`dist/app.c`, or `dist/app.<target>.c` when several targets are built,
+                # since they would otherwise overwrite each other). No C compiler is
+                # needed or looked for, so `--emit-c -t windows` works without mingw-w64.
     --cc <compiler> # Overrides the C compiler used, for targets/toolchains not covered above.
     --desktop # Generates a desktop-installable artifact for the target: a .desktop
               # launcher on Linux, a .app bundle on macOS. Ignored elsewhere.

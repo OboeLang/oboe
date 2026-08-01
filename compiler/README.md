@@ -62,6 +62,7 @@ bin/oboe run -- [args]                  # the same, with arguments for the progr
 bin/oboe build [file] [-o out] [-v]     # project -> dist/<name>; file -> ./<file-stem>
     [-t <config-or-os>] [--cc compiler]        # a project.jsonc build.targets name, or
                                                # linux|windows|macos|freebsd|openbsd|netbsd
+    [--emit-c]                                 # write the generated C, don't compile it
     [--desktop] [--meta-name N] [--meta-version V] [--meta-description D] [--meta-icon I]
 bin/oboe tidy [-v]                      # installs what project.jsonc declares; no-op outside a project
 bin/oboe remove <pkg>                   # deletes a package's files and dependency entry

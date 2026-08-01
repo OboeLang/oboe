@@ -434,6 +434,10 @@ typedef struct {
 	const char *target; /* normalized target OS */
 	const char *cc; /* --cc override */
 	bool verbose;
+	bool emit_c; /* stop at the generated C and write that instead */
+	/* set when this is one of several declared targets being built in turn,
+	   so --emit-c can keep their output files apart */
+	bool one_of_many;
 	bool desktop; /* generate a .desktop file next to the output */
 	const char *meta_name;
 	const char *meta_version;
@@ -757,6 +761,43 @@ static void cmd_build(BuildOpts *o)
 	codegen_set_target_os(target);
 	g_build_target_os = target;
 
+	/* Building several declared targets in one go, with no `output` naming
+	   them apart: every one of them would write dist/<name> and all but the
+	   last would be overwritten. Windows is the only target that renames its
+	   own output, so today a linux+windows pair survives by accident while a
+	   linux+freebsd pair silently loses a binary. Name them after the target
+	   instead. An explicit `output` still wins, which is what SPEC's own
+	   build.targets example uses. */
+	if (o->one_of_many && !output) {
+		size_t n = strlen(out_path);
+		snprintf(out_path + n, sizeof(out_path) - n, ".%s", target);
+	}
+
+	/* --emit-c stops here: write the generated C and nothing else. No cc, no
+	   dist/, no .exe suffix, no resource object, no bundle. Deliberately
+	   ahead of the compiler check below, because not needing a C compiler is
+	   half the point -- `--emit-c -t windows` is how you read the Windows
+	   translation of a program on a machine with no mingw-w64 installed. */
+	if (o->emit_c) {
+		char c_out[4200]; /* sized above out_path so the suffix can't truncate */
+		if (output)
+			snprintf(c_out, sizeof c_out, "%s", output);
+		else
+			snprintf(c_out, sizeof c_out, "%s.c", out_path);
+		char parent[sizeof c_out];
+		snprintf(parent, sizeof parent, "%s", c_out);
+		char *dir = dirname(parent);
+		if (strcmp(dir, ".") != 0)
+			mkdirs(dir);
+		transpile_to_c(entry, c_out);
+		if (verbose)
+			printf("oboe: transpiled %s (target: %s)\n", entry,
+			       target);
+		printf("Wrote %s\n", c_out);
+		free(entry);
+		return;
+	}
+
 	/* pick the compiler: --cc wins, else a per-target default */
 	const char *cc = o->cc ? o->cc : default_cc_for(target);
 	if (!tool_exists(cc)) {
@@ -876,6 +917,7 @@ static void cmd_build_all(const BuildOpts *base)
 	for (int i = 0; i < count; i++) {
 		BuildOpts o = *base;
 		o.config = names[i];
+		o.one_of_many = count > 1;
 		printf("=== %s ===\n", names[i]);
 		cmd_build(&o);
 		free(names[i]);
@@ -1056,6 +1098,8 @@ int main(int argc, char **argv)
 			} else if (strcmp(a, "-v") == 0 ||
 				   strcmp(a, "--verbose") == 0)
 				o.verbose = true;
+			else if (strcmp(a, "--emit-c") == 0)
+				o.emit_c = true;
 			else if (strcmp(a, "--desktop") == 0)
 				o.desktop = true;
 			else if (a[0] == '-') {

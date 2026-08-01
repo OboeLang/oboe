@@ -55,6 +55,20 @@ static void ob_oom(void)
 	exit(1);
 }
 
+/* strndup is POSIX 2008, but this file is cross-compiled to Windows too, and
+   mingw hides its CRT extensions under -std=c11's __STRICT_ANSI__. Carrying our
+   own is cheaper than either widening the dialect for every compiled program or
+   guessing which libc has it. */
+static char *ob_strndup(const char *s, size_t n)
+{
+	char *out = malloc(n + 1);
+	if (!out)
+		ob_oom();
+	memcpy(out, s, n);
+	out[n] = '\0';
+	return out;
+}
+
 /* ---- numeric representation ----
    An OB_INT is stored as an int64_t plus the width/signedness of the Oboe type
    it was declared as. width 0 means the plain `int` (64-bit signed); 8/16/32/64
@@ -1875,7 +1889,7 @@ OboeValue ob_str_split(OboeValue s, OboeValue sep)
 			ob_array_push(out, ob_string(start));
 			break;
 		}
-		char *piece = strndup(start, (size_t)(hit - start));
+		char *piece = ob_strndup(start, (size_t)(hit - start));
 		ob_array_push(out, ob_string_take(piece));
 		start = hit + splen;
 	}
