@@ -22,6 +22,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <libgen.h>
@@ -199,7 +201,71 @@ static void mkdirs(const char *path)
 	mkdir(buf, 0755);
 }
 
-static void cmd_run_file(const char *path)
+/* Runs the freshly built binary with `prog_argv` as its own arguments, and
+   exits with its status.
+
+   execv rather than system(): the arguments come straight off our command line,
+   and routing them through a shell would mean quoting every one of them well
+   enough to survive word splitting, globbing and $(...). That is a bug waiting
+   to happen for an argument that is doing nothing more exotic than containing a
+   space.
+
+   What the shell was doing for us and now has to be done by hand: SIGINT and
+   SIGQUIT are ignored here while the child runs, so a ^C reaches only the
+   program. Without that, `oboe run` would die alongside it and return to the
+   prompt while an `on KeyboardInterruptEvent` handler was still printing. The
+   child restores the default disposition before exec, because an *ignored*
+   signal survives exec where a handler does not. */
+static void run_binary(const char *bin_path, int prog_argc, char **prog_argv)
+{
+	char **args = calloc((size_t)prog_argc + 2, sizeof(char *));
+	if (!args) {
+		fprintf(stderr, "oboe: out of memory\n");
+		exit(1);
+	}
+	args[0] = (char *)bin_path;
+	for (int i = 0; i < prog_argc; i++)
+		args[i + 1] = prog_argv[i];
+
+	struct sigaction ign, old_int, old_quit;
+	memset(&ign, 0, sizeof ign);
+	ign.sa_handler = SIG_IGN;
+	sigemptyset(&ign.sa_mask);
+	sigaction(SIGINT, &ign, &old_int);
+	sigaction(SIGQUIT, &ign, &old_quit);
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		perror("oboe: fork");
+		free(args);
+		remove(bin_path);
+		exit(1);
+	}
+	if (pid == 0) {
+		sigaction(SIGINT, &old_int, NULL);
+		sigaction(SIGQUIT, &old_quit, NULL);
+		execv(bin_path, args);
+		perror("oboe: cannot run the compiled program");
+		_exit(127);
+	}
+
+	int status = 0;
+	while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+		;
+	sigaction(SIGINT, &old_int, NULL);
+	sigaction(SIGQUIT, &old_quit, NULL);
+	free(args);
+	remove(bin_path);
+
+	if (WIFEXITED(status))
+		exit(WEXITSTATUS(status));
+	/* the shell reported a signal death this way, so keep doing it */
+	if (WIFSIGNALED(status))
+		exit(128 + WTERMSIG(status));
+	exit(1);
+}
+
+static void cmd_run_file(const char *path, int prog_argc, char **prog_argv)
 {
 	char c_path[] = "/tmp/oboe_XXXXXX.c";
 	int fd = mkstemps(c_path, 2);
@@ -226,9 +292,7 @@ static void cmd_run_file(const char *path)
 		exit(rc);
 	}
 
-	int run_rc = system(bin_path);
-	remove(bin_path);
-	exit(WIFEXITED(run_rc) ? WEXITSTATUS(run_rc) : 1);
+	run_binary(bin_path, prog_argc, prog_argv);
 }
 
 static void cmd_init(const char *dir)
@@ -296,7 +360,7 @@ static void cmd_init(const char *dir)
 	printf("Initialized an Oboe project in the current directory.\n");
 }
 
-static void cmd_run_project(void)
+static void cmd_run_project(int prog_argc, char **prog_argv)
 {
 	const char *path = find_project_json();
 	char *json = path ? read_whole_file(path) : NULL;
@@ -309,7 +373,7 @@ static void cmd_run_project(void)
 	if (!entry)
 		entry = strdup("main.oboe");
 	free(json);
-	cmd_run_file(entry);
+	cmd_run_file(entry, prog_argc, prog_argv);
 }
 
 #if defined(_WIN32)
@@ -950,10 +1014,15 @@ int main(int argc, char **argv)
 		return 0;
 	}
 	if (strcmp(cmd, "run") == 0) {
-		if (argc >= 3)
-			cmd_run_file(argv[2]);
+		/* everything after the file is the program's, not ours. `--`
+		   is how a project run gets arguments, since there is no file
+		   in front of them to separate them from a file name. */
+		if (argc >= 3 && strcmp(argv[2], "--") == 0)
+			cmd_run_project(argc - 3, argv + 3);
+		else if (argc >= 3)
+			cmd_run_file(argv[2], argc - 3, argv + 3);
 		else
-			cmd_run_project();
+			cmd_run_project(0, NULL);
 		return 0;
 	}
 	if (strcmp(cmd, "build") == 0) {

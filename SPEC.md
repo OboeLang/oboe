@@ -29,6 +29,10 @@ oboe sema <file>... # Prints each file's sha256 in the wire form. `-` reads stdi
 # Running and Building
 oboe run helloworld.oboe # Runs a singular Oboe file as-is. Only useful for certain cases, really.
 oboe run # Runs a program from main.oboe, or something else as defined by project.jsonc
+    oboe run <file> <args>... # Anything after the file is the program's, not oboe's, and
+                              # arrives in `main`'s `args` after the program name.
+    oboe run -- <args>...     # The same for a project run, where there is no file name in
+                              # front of the arguments to separate them from one.
 oboe build # Self-explanatory. Builds the program into an executable, in the dist folder.
            # Embeds all required libraries into various DLLs/.so files.
     oboe build <file> # Builds a specific script to an executable of the same name in the current folder.

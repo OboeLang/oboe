@@ -40,8 +40,9 @@ I'm testing this based on the selfhoster emitting bytes identical to its C count
 
 ```
 bin/oboe init [dir]                     # scaffold a project here, or in a new/existing directory
-bin/oboe run path/to/file.oboe
+bin/oboe run path/to/file.oboe [args]   # anything after the file is the program's
 bin/oboe run                            # runs the project's entry file (project.jsonc)
+bin/oboe run -- [args]                  # the same, with arguments for the program
 bin/oboe build [file] [-o out] [-v]     # project -> dist/<name>; file -> ./<file-stem>
     [-t <config-or-os>] [--cc compiler]        # a project.jsonc build.targets name, or
                                                # linux|windows|macos|freebsd|openbsd|netbsd

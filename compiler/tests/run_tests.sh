@@ -166,6 +166,39 @@ else
 fi
 rm -rf "$tmp"
 
+# `oboe run` forwards everything after the file to the program, and everything
+# after `--` when running a project. The golden runner can't cover this: it
+# invokes `oboe run <file>` and nothing else. The awkward argument is the point
+# -- the program is exec'd rather than handed to a shell, so a space or a $( )
+# has to arrive exactly as written rather than being expanded on the way.
+tmp="$(mktemp -d)"
+cat > "$tmp/args.oboe" <<'EOF'
+func main(array args) {
+    print(args.len())
+    for (i, a in ipairs(args)) { if (i > 0) { print(a) } }
+}
+EOF
+mkdir -p "$tmp/proj"
+printf '{ "project": { "name": "p", "entry": "main.oboe" } }\n' \
+    > "$tmp/proj/project.jsonc"
+cp "$tmp/args.oboe" "$tmp/proj/main.oboe"
+
+awkward='a b$(echo no) & | ;'
+got="$("$OBOE" run "$tmp/args.oboe" one "$awkward" 2>&1)"
+want="$(printf '3\none\n%s' "$awkward")"
+proj="$(cd "$tmp/proj" && "$OLDPWD/$OBOE" run -- solo 2>&1)"
+proj_want="$(printf '2\nsolo')"
+if [ "$got" = "$want" ] && [ "$proj" = "$proj_want" ]; then
+    echo "PASS run_forwards_arguments"
+    pass=$((pass+1))
+else
+    echo "FAIL run_forwards_arguments"
+    printf '    file:    %s\n    wanted:  %s\n' "$got" "$want"
+    printf '    project: %s\n    wanted:  %s\n' "$proj" "$proj_want"
+    fail=$((fail+1))
+fi
+rm -rf "$tmp"
+
 # ---- self-hosting spike -------------------------------------------------
 #
 # selfhost/mini/ is a compiler for a small Oboe-like subset, written in Oboe.
