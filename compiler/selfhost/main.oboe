@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// oboec -- the Oboe-written compiler front end. It is being brought up one
+// stage at a time against the C compiler in src/, each stage gated on emitting
+// bytes identical to its C counterpart. Today it stops after the lexer.
+import os
+import lex_all from lexer
+import dump_tokens from dump
+import fail from diag
+
+func usage() {
+	eprint("usage: oboec --dump-tokens <file>")
+	os.exit(2)
+}
+
+func read_source(str path) {
+	try {
+		return os.read_file(path)
+	} catch (os.FileNotFoundError e) {
+		fail("cannot read '" + path + "'")
+	}
+}
+
+func main(array args) {
+	var dump = ""
+	var input = null
+
+	var i = 1
+	while (i < args.len()) {
+		var a = args[i]
+		if (a == "--dump-tokens") {
+			dump = "tokens"
+			i = i + 1
+			continue
+		}
+		if (a.starts_with("-")) {
+			usage()
+		}
+		input = a
+		i = i + 1
+	}
+	if (input == null or dump == "") {
+		usage()
+	}
+
+	var toks = lex_all(read_source(input))
+	// one write, not one per token: the corpus files run to tens of
+	// thousands of tokens
+	write(dump_tokens(toks))
+}

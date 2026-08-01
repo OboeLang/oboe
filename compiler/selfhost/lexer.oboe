@@ -11,122 +11,400 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 //
-// Tokenizer for the mini-Oboe spike. A token is a dict, not a class: the
-// compiler resolves `.field` only on statically-known classes, and dicts side-
-// step that entirely for the heterogeneous data a compiler is made of.
+// The lexer, ported from src/lexer.c. A token is a dict rather than a struct:
 //
-//     { "kind": "int"|"str"|"ident"|"kw"|"op"|"eof", "text": ..., "line": ... }
+//     { "type": "T_IDENT", "text": "counter", "line": 12 }
+//
+// "type" holds the C enum constant's own spelling so the two lexers can be
+// diffed literally -- see `oboe dump-tokens` and selfhost/dump.oboe. The C
+// Token also carries ival/dval, but both are a pure function of "text"
+// (atoll/strtod), so they are derived where they are used instead of stored.
 import fail from diag
 
-const var KEYWORDS = ["func", "var", "if", "else", "while", "return", "print",
-                      "break", "continue", "true", "false"]
+// The source under the cursor. Module-level, mirroring lexer.c's file statics:
+// the C lexer is not re-entrant either, and one file is lexed at a time.
+var SRC = ""
+var SLEN = 0
+var POS = 0
+var LINE = 1
 
-// three-then-two-then-one so `==` never lexes as two `=`
-const var OPS2 = ["==", "!=", "<=", ">=", "&&", "||"]
+const var OP_CHARS = "+-*/%<>=!&|^~?@#$:."
 
-func is_digit(str c) {
-    var n = ord(c)
-    return n >= 48 and n <= 57
+const var KEYWORDS = {
+	"let": "T_LET",
+	// `var` is the spec spelling; `let` is a legacy alias
+	"var": "T_LET",
+	"const": "T_CONST",
+	"func": "T_FUNC",
+	"return": "T_RETURN",
+	"class": "T_CLASS",
+	"static": "T_STATIC",
+	"private": "T_PRIVATE",
+	"if": "T_IF",
+	"else": "T_ELSE",
+	"while": "T_WHILE",
+	"for": "T_FOR",
+	"in": "T_IN",
+	"break": "T_BREAK",
+	"continue": "T_CONTINUE",
+	"switch": "T_SWITCH",
+	"case": "T_CASE",
+	"try": "T_TRY",
+	"catch": "T_CATCH",
+	"finally": "T_FINALLY",
+	"throw": "T_THROW",
+	"import": "T_IMPORT",
+	"as": "T_AS",
+	"from": "T_FROM",
+	"true": "T_TRUE",
+	"false": "T_FALSE",
+	"null": "T_NULL",
+	"and": "T_AND",
+	"or": "T_OR",
+	"is": "T_IS",
+	"extends": "T_EXTENDS",
+	"event": "T_EVENT",
+	"on": "T_ON",
+	"operator": "T_OPERATOR",
+	"cimport": "T_CIMPORT"
 }
 
-func is_alpha(str c) {
-    var n = ord(c)
-    return (n >= 97 and n <= 122) or (n >= 65 and n <= 90) or n == 95
+// lexer.c dispatches punctuation through a switch that tries the two-byte
+// spelling before the one-byte one; these two tables are that switch, in the
+// same order of preference.
+const var OPS2 = {
+	"->": "T_ARROW",
+	"==": "T_EQ",
+	"!=": "T_NEQ",
+	"<=": "T_LTE",
+	"<<": "T_SHL",
+	">=": "T_GTE",
+	">>": "T_SHR",
+	"&&": "T_ANDAND",
+	"||": "T_OROR",
+	"??": "T_QQ",
+	"?.": "T_QDOT"
 }
 
-func is_alnum(str c) {
-    return is_alpha(c) or is_digit(c)
+const var OPS1 = {
+	"{": "T_LBRACE",
+	"}": "T_RBRACE",
+	"(": "T_LPAREN",
+	")": "T_RPAREN",
+	"[": "T_LBRACKET",
+	"]": "T_RBRACKET",
+	",": "T_COMMA",
+	".": "T_DOT",
+	":": "T_COLON",
+	";": "T_SEMI",
+	"+": "T_PLUS",
+	"-": "T_MINUS",
+	"*": "T_STAR",
+	"/": "T_SLASH",
+	"%": "T_PERCENT",
+	"=": "T_ASSIGN",
+	"<": "T_LT",
+	">": "T_GT",
+	"!": "T_NOT",
+	"&": "T_AMP",
+	"|": "T_PIPE",
+	"^": "T_CARET",
+	"~": "T_TILDE",
+	"?": "T_QUESTION"
 }
 
-func is_space(str c) {
-    return c == " " or c == "\t" or c == "\n" or c == "\r"
+// ---- cursor ----
+
+// The byte value at i, or -1 at or past the end. -1 matches no classification,
+// which is what lets the callers drop lexer.c's explicit `pos + 1 < len`
+// guards on lookahead.
+func byte_at(int i) {
+	if (i < 0 or i >= SLEN) {
+		return -1
+	}
+	return ord(SRC.substr(i, 1))
 }
 
-func token(str kind, str text, int line) {
-    var t = {}
-    t["kind"] = kind
-    t["text"] = text
-    t["line"] = line
-    return t
+// The byte at i as a one-byte string, or "" past the end.
+func ch(int i) {
+	if (i < 0 or i >= SLEN) {
+		return ""
+	}
+	return SRC.substr(i, 1)
 }
 
-func lex(str src) {
-    var toks = []
-    var i = 0
-    var line = 1
-    var n = src.len()
+// ---- character classes ----
+// The C locale's ctype, spelled out: the source is bytes, and a byte over 127
+// is not a letter here any more than it is to glibc's isalpha.
 
-    while (i < n) {
-        var c = src.substr(i, 1)
+func is_digit(int c) {
+	return c >= 48 and c <= 57
+}
 
-        if (is_space(c)) {
-            if (c == "\n") { line = line + 1 }
-            i = i + 1
-            continue
-        }
+func is_alpha(int c) {
+	return (c >= 97 and c <= 122) or (c >= 65 and c <= 90)
+}
 
-        // line comments run to the newline, which the loop above then counts
-        if (c == "/" and i + 1 < n and src.substr(i + 1, 1) == "/") {
-            while (i < n and src.substr(i, 1) != "\n") { i = i + 1 }
-            continue
-        }
+func is_alnum(int c) {
+	return is_alpha(c) or is_digit(c)
+}
 
-        if (is_digit(c)) {
-            var start = i
-            while (i < n and is_digit(src.substr(i, 1))) { i = i + 1 }
-            toks.push(token("int", src.substr(start, i - start), line))
-            continue
-        }
+// space, \t, \n, \v, \f, \r
+func is_space(int c) {
+	return c == 32 or (c >= 9 and c <= 13)
+}
 
-        if (is_alpha(c)) {
-            var start = i
-            while (i < n and is_alnum(src.substr(i, 1))) { i = i + 1 }
-            var word = src.substr(start, i - start)
-            var kind = KEYWORDS.contains(word) ? "kw" : "ident"
-            toks.push(token(kind, word, line))
-            continue
-        }
+func is_ident_start(int c) {
+	return is_alpha(c) or c == 95
+}
 
-        if (c == "\"") {
-            i = i + 1
-            var parts = []
-            while (i < n) {
-                var d = src.substr(i, 1)
-                if (d == "\"") { break }
-                if (d == "\\" and i + 1 < n) {
-                    var e = src.substr(i + 1, 1)
-                    if (e == "n") { parts.push("\n") }
-                    else if (e == "t") { parts.push("\t") }
-                    else { parts.push(e) }
-                    i = i + 2
-                    continue
-                }
-                if (d == "\n") { line = line + 1 }
-                parts.push(d)
-                i = i + 1
-            }
-            if (i >= n) { fail(line, "unterminated string") }
-            i = i + 1
-            toks.push(token("str", parts.join(""), line))
-            continue
-        }
+func is_ident_char(int c) {
+	return is_alnum(c) or c == 95
+}
 
-        var two = i + 1 < n ? src.substr(i, 2) : ""
-        if (OPS2.contains(two)) {
-            toks.push(token("op", two, line))
-            i = i + 2
-            continue
-        }
+func is_op_char(int c) {
+	if (c < 0) {
+		return false
+	}
+	return OP_CHARS.contains(chr(c))
+}
 
-        if ("+-*/%<>(){},;=!".contains(c)) {
-            toks.push(token("op", c, line))
-            i = i + 1
-            continue
-        }
+// ---- custom operator symbols ----
+// `operator ||> (...)` declarations introduce new operator tokens. Symbols are
+// collected in a text pre-scan of each file before tokenizing; the registry is
+// global, so a symbol declared in any already-scanned file keeps lexing in
+// later ones. Builtin spellings are excluded so `operator + (...)` never
+// changes how `+` itself lexes.
+var CUSTOM_OPS = []
 
-        fail(line, "unexpected character '${c}'")
-    }
+const var BUILTIN_OPS = ["+", "-", "*", "/", "%", "=", "==", "!=", "<", "<=",
+			 ">", ">=", "&&", "||", "??", "?.", "!", "?", ".",
+			 "->", ":", "&", "|", "^", "~", "<<", ">>"]
 
-    toks.push(token("eof", "", line))
-    return toks
+func register_custom_op(str sym) {
+	if (BUILTIN_OPS.contains(sym)) {
+		return
+	}
+	if (CUSTOM_OPS.contains(sym)) {
+		return
+	}
+	if (CUSTOM_OPS.len() >= 64) {
+		fail("too many custom operators")
+	}
+	CUSTOM_OPS.push(sym)
+}
+
+// Registers the `operator <sym>` declarations in src without tokenizing it, so
+// a symbol declared in one file lexes correctly in another. Seats the cursor on
+// src as a side effect; lex_all re-seats it afterwards.
+//
+// Bug-compatible with lexer.c: a raw text scan with no comment or string
+// awareness, so a commented-out `operator ||>` registers too.
+func prescan_ops(str src) {
+	SRC = src
+	SLEN = src.len()
+	var i = 0
+	while (i + 8 < SLEN) {
+		// cheap reject before paying for the substring
+		if (ch(i) != "o" or SRC.substr(i, 8) != "operator") {
+			i = i + 1
+			continue
+		}
+		// must stand alone as a word
+		if (i > 0 and is_ident_char(byte_at(i - 1))) {
+			i = i + 1
+			continue
+		}
+		var p = i + 8
+		if (p < SLEN and is_ident_char(byte_at(p))) {
+			i = i + 1
+			continue
+		}
+		while (p < SLEN and is_space(byte_at(p))) {
+			p = p + 1
+		}
+		var start = p
+		while (p < SLEN and is_op_char(byte_at(p))) {
+			p = p + 1
+		}
+		if (p > start) {
+			register_custom_op(SRC.substr(start, p - start))
+		}
+		i = i + 1
+	}
+}
+
+// The longest registered custom operator matching at pos, or "" for none.
+func match_custom_op(int pos) {
+	var best = ""
+	var best_len = 0
+	for (op in CUSTOM_OPS) {
+		var n = op.len()
+		if (n > best_len and pos + n <= SLEN and
+		    SRC.substr(pos, n) == op) {
+			best = op
+			best_len = n
+		}
+	}
+	return best
+}
+
+// ---- tokens ----
+
+func tok(str type, str text, int line) {
+	return { "type": type, "text": text, "line": line }
+}
+
+// Reads a double-quoted string body, leaving the cursor on the closing quote.
+// `${...}` is kept verbatim, braces included, for codegen to re-parse later.
+// The escapes are \n \t \r \" \\ ; anything else decodes to the bare character,
+// which is what makes `\$` a literal `$`.
+func read_string_body() {
+	var parts = []
+	while (POS < SLEN and ch(POS) != "\"") {
+		var c = ch(POS)
+		if (c == "\\" and POS + 1 < SLEN) {
+			var e = ch(POS + 1)
+			var decoded = e
+			if (e == "n") {
+				decoded = "\n"
+			} else if (e == "t") {
+				decoded = "\t"
+			} else if (e == "r") {
+				decoded = "\r"
+			}
+			parts.push(decoded)
+			POS = POS + 2
+			continue
+		}
+		if (c == "$" and ch(POS + 1) == "{") {
+			var start = POS
+			var p = POS + 2
+			var depth = 1
+			while (p < SLEN and depth > 0) {
+				var d = ch(p)
+				if (d == "{") {
+					depth = depth + 1
+				} else if (d == "}") {
+					depth = depth - 1
+				}
+				// stop *on* the matching brace, so the slice
+				// below takes it
+				if (depth > 0) {
+					p = p + 1
+				}
+			}
+			parts.push(SRC.substr(start, p - start + 1))
+			POS = p + 1
+			continue
+		}
+		if (c == "\n") {
+			LINE = LINE + 1
+		}
+		parts.push(c)
+		POS = POS + 1
+	}
+	return parts.join("")
+}
+
+// Tokenizes the whole source, terminated by a T_EOF token.
+func lex_all(str src) {
+	prescan_ops(src)
+	SRC = src
+	SLEN = src.len()
+	POS = 0
+	LINE = 1
+
+	var toks = []
+	while (POS < SLEN) {
+		var c = ch(POS)
+		var cv = byte_at(POS)
+
+		if (c == "\n") {
+			LINE = LINE + 1
+			POS = POS + 1
+			continue
+		}
+		if (is_space(cv)) {
+			POS = POS + 1
+			continue
+		}
+		if (c == "/" and ch(POS + 1) == "/") {
+			while (POS < SLEN and ch(POS) != "\n") {
+				POS = POS + 1
+			}
+			continue
+		}
+		// before the punctuation tables, so a declared symbol wins over
+		// the builtin spelling it starts with -- but after comments, so
+		// no custom operator can begin with `//`
+		if (is_op_char(cv)) {
+			var cop = match_custom_op(POS)
+			if (cop != "") {
+				toks.push(tok("T_CUSTOMOP", cop, LINE))
+				POS = POS + cop.len()
+				continue
+			}
+		}
+		if (c == "\"") {
+			POS = POS + 1
+			var body = read_string_body()
+			POS = POS + 1
+			toks.push(tok("T_STRING", body, LINE))
+			continue
+		}
+		if (is_digit(cv)) {
+			var start = POS
+			while (POS < SLEN and is_digit(byte_at(POS))) {
+				POS = POS + 1
+			}
+			// a '.' only starts a fraction when a digit follows, so
+			// `1.foo()` and a range like `1..n` keep lexing '.' as
+			// its own token
+			var is_float = false
+			if (POS + 1 < SLEN and ch(POS) == "." and
+			    is_digit(byte_at(POS + 1))) {
+				is_float = true
+				POS = POS + 1
+				while (POS < SLEN and is_digit(byte_at(POS))) {
+					POS = POS + 1
+				}
+			}
+			var numstr = SRC.substr(start, POS - start)
+			var nkind = is_float ? "T_FLOAT" : "T_INT"
+			toks.push(tok(nkind, numstr, LINE))
+			continue
+		}
+		if (is_ident_start(cv)) {
+			var istart = POS
+			while (POS < SLEN and is_ident_char(byte_at(POS))) {
+				POS = POS + 1
+			}
+			var ident = SRC.substr(istart, POS - istart)
+			// the bare identifier `x` used infix is the repetition
+			// operator, but only the parser knows it is in operator
+			// position, so it leaves here as a plain T_IDENT
+			var kind = "T_IDENT"
+			if (KEYWORDS.has(ident)) {
+				kind = KEYWORDS[ident]
+			}
+			toks.push(tok(kind, ident, LINE))
+			continue
+		}
+
+		var two = SRC.substr(POS, 2)
+		if (OPS2.has(two)) {
+			toks.push(tok(OPS2[two], two, LINE))
+			POS = POS + 2
+			continue
+		}
+		if (OPS1.has(c)) {
+			toks.push(tok(OPS1[c], c, LINE))
+			POS = POS + 1
+			continue
+		}
+		fail("unexpected character '" + c + "' at line " + str(LINE))
+	}
+	toks.push(tok("T_EOF", "", LINE))
+	return toks
 }

@@ -11,11 +11,18 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 //
-// Every diagnostic goes through here so the "oboe: " prefix and the exit
-// status stay in one place, matching what the C compiler writes byte for byte.
+// Diagnostics. eprint + os.exit is exactly the shape the C compiler's
+// codegen_error() has: message on stderr, non-zero status, no exception
+// machinery wrapped around it.
 import os
 
-func fail(str msg) {
-	eprint("oboe: " + msg)
-	os.exit(1)
+var SOURCE_NAME = "<input>"
+
+func set_source(str name) {
+    SOURCE_NAME = name
+}
+
+func fail(int line, str msg) {
+    eprint("${SOURCE_NAME}:${str(line)}: error: ${msg}")
+    os.exit(1)
 }

@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// Serializations used to gate the port against the C compiler. Every function
+// here has a twin in the C tree that must produce the identical bytes -- see
+// cmd_dump_tokens in src/main.c and the selfhost_lexer test.
+
+// Three octal digits. C's \xNN is greedy and would swallow a following hex
+// digit, so the escape below is octal, and octal escapes are only unambiguous
+// at a fixed width.
+func oct3(int n) {
+	return str(n / 64) + str((n / 8) % 8) + str(n % 8)
+}
+
+// Escapes a lexeme so that a token can never span a line of the dump. Bytes
+// over 127 pass through untouched: the dump is compared byte for byte, so
+// there is nothing to gain by spelling out UTF-8.
+func dump_escape(str s) {
+	var out = []
+	var n = s.len()
+	var i = 0
+	while (i < n) {
+		var c = s.substr(i, 1)
+		var v = ord(c)
+		if (c == "\\") {
+			out.push("\\\\")
+		} else if (v == 10) {
+			out.push("\\n")
+		} else if (v == 9) {
+			out.push("\\t")
+		} else if (v == 13) {
+			out.push("\\r")
+		} else if (v < 32 or v == 127) {
+			out.push("\\" + oct3(v))
+		} else {
+			out.push(c)
+		}
+		i = i + 1
+	}
+	return out.join("")
+}
+
+// One line per token: `<TYPE> <line> <escaped lexeme>`.
+func dump_tokens(array toks) {
+	var out = []
+	for (t in toks) {
+		out.push(t["type"] + " " + str(t["line"]) + " " +
+			 dump_escape(t["text"]) + "\n")
+	}
+	return out.join("")
+}

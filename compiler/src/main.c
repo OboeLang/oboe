@@ -12,6 +12,7 @@
  * GNU General Public License for more details.
  */
 #include "codegen.h"
+#include "lexer.h"
 #include "pkg.h"
 #include "projectedit.h"
 #include "projectjson.h"
@@ -849,6 +850,56 @@ static void cmd_remove(const char *name)
 		printf("oboe: nothing to remove for '%s'.\n", name);
 }
 
+/* ---- dump-tokens ----
+   The gate for the Oboe-written lexer. One line per token, `<TYPE> <line>
+   <text>`, with the lexeme escaped so no token can ever span a line. The
+   selfhost lexer prints the same thing and the suite asserts the two agree
+   byte for byte over the whole corpus. Deliberately absent from the usage
+   line: it is a development gate, not part of the CLI. */
+static void dump_escape(const char *s, FILE *out)
+{
+	for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+		switch (*p) {
+		case '\\':
+			fputs("\\\\", out);
+			break;
+		case '\n':
+			fputs("\\n", out);
+			break;
+		case '\t':
+			fputs("\\t", out);
+			break;
+		case '\r':
+			fputs("\\r", out);
+			break;
+		default:
+			/* octal, not \xNN: C's hex escape is greedy and would
+			   swallow a following hex digit */
+			if (*p < 0x20 || *p == 0x7f)
+				fprintf(out, "\\%03o", *p);
+			else
+				fputc(*p, out);
+		}
+	}
+}
+
+static int cmd_dump_tokens(const char *path)
+{
+	char *src = read_whole_file(path);
+	if (!src) {
+		fprintf(stderr, "oboe: cannot read '%s'\n", path);
+		return 1;
+	}
+	int n = 0;
+	Token *toks = lex_all(src, &n);
+	for (int i = 0; i < n; i++) {
+		printf("%s %d ", token_type_name(toks[i].type), toks[i].line);
+		dump_escape(toks[i].text ? toks[i].text : "", stdout);
+		putchar('\n');
+	}
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 2) {
@@ -933,6 +984,13 @@ int main(int argc, char **argv)
 	}
 	if (strcmp(cmd, "install") == 0) {
 		return cmd_install(argc - 2, argv + 2);
+	}
+	if (strcmp(cmd, "dump-tokens") == 0) {
+		if (argc < 3) {
+			fprintf(stderr, "oboe: dump-tokens needs a file\n");
+			return 1;
+		}
+		return cmd_dump_tokens(argv[2]);
 	}
 
 	fprintf(stderr, "oboe: unknown command '%s'\n", cmd);

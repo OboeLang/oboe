@@ -168,21 +168,21 @@ rm -rf "$tmp"
 
 # ---- self-hosting spike -------------------------------------------------
 #
-# selfhost/ is a compiler for a small Oboe-like subset, written in Oboe. It is
-# the standing proof that the language can host its own toolchain, and it
+# selfhost/mini/ is a compiler for a small Oboe-like subset, written in Oboe.
+# It is the standing proof that the language can host its own toolchain, and it
 # exercises end to end the pieces the real self-hosted compiler depends on:
 # break/continue in scanning loops, short-circuit and/or, ord() classification,
 # dict-shaped AST nodes, C string escaping and eprint+os.exit diagnostics.
 tmp="$(mktemp -d)"
-if "$OBOE" build selfhost/mini.oboe -o "$tmp/mini" >/dev/null 2>&1 &&
-   "$tmp/mini" selfhost/sample.mini -o "$tmp/sample" >/dev/null 2>&1; then
+if "$OBOE" build selfhost/mini/main.oboe -o "$tmp/mini" >/dev/null 2>&1 &&
+   "$tmp/mini" selfhost/mini/sample.mini -o "$tmp/sample" >/dev/null 2>&1; then
     got="$("$tmp/sample" 2>&1)"
-    if [ "$got" = "$(cat selfhost/sample.expected)" ]; then
+    if [ "$got" = "$(cat selfhost/mini/sample.expected)" ]; then
         echo "PASS selfhost_mini"
         pass=$((pass+1))
     else
         echo "FAIL selfhost_mini (output mismatch)"
-        diff <(printf '%s\n' "$got") selfhost/sample.expected | sed 's/^/    /'
+        diff <(printf '%s\n' "$got") selfhost/mini/sample.expected | sed 's/^/    /'
         fail=$((fail+1))
     fi
 else

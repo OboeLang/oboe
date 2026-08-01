@@ -113,6 +113,9 @@ typedef struct {
 } Lexer;
 
 void lexer_init(Lexer *lx, const char *src);
+/* The enum constant's own spelling, e.g. "T_IDENT". Used by --dump-tokens,
+   which is how the Oboe-written lexer is diffed against this one. */
+const char *token_type_name(TokenType t);
 /* Tokenizes the whole source into a growable array, terminated by T_EOF. */
 Token *lex_all(const char *src, int *out_count);
 /* Registers any `operator <sym>` declarations found in src without tokenizing
