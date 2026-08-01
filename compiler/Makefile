@@ -15,16 +15,24 @@ CC = gcc
 # _POSIX_C_SOURCE alone hides the BSD extensions we use (mkstemps): glibc still
 # exposes them under _DEFAULT_SOURCE, but darwin needs _DARWIN_C_SOURCE to do
 # the same. both are ignored by the libc they don't belong to.
-CFLAGS = -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -Wall -Wextra -Wno-unused-parameter -g -Iruntime -Isrc
+CFLAGS = -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -Wall -Wextra -Wno-unused-parameter -g -Iruntime -Isrc -Ilegacy
 
-SRC = src/lexer.c src/parser.c src/codegen.c src/dump.c src/numfmt.c \
-      src/projectjson.c src/sha256.c src/izim.c src/record.c src/kabuk.c \
+# src/ is the live C: the CLI, the package manager, the katare client and the
+# wire-format code vendored from reedbed.
+SRC = src/projectjson.c src/sha256.c src/izim.c src/record.c src/kabuk.c \
       src/katare.c src/projectedit.c src/pkg.c src/main.c
-OBJ = $(SRC:.c=.o)
+# legacy/ is the superseded C compiler. It is still linked in because main.c
+# reaches it two ways -- the deprecated OBOE_USE_C_FRONTEND path, and the
+# dump-tokens/dump-ast/emit-c commands the selfhost gates diff against -- but
+# nothing else should grow a dependency on it. See legacy/README.md.
+LEGACY = legacy/lexer.c legacy/parser.c legacy/codegen.c legacy/dump.c \
+         legacy/numfmt.c
+OBJ = $(SRC:.c=.o) $(LEGACY:.c=.o)
 # every object depends on every header: the set is small, and without this a
 # change to ast.h or the runtime header silently leaves stale objects linked in
-HDR = src/ast.h src/lexer.h src/parser.h src/codegen.h src/dump.h \
-      src/numfmt.h src/projectjson.h src/sha256.h src/izim.h src/record.h \
+HDR = legacy/ast.h legacy/lexer.h legacy/parser.h legacy/codegen.h \
+      legacy/dump.h legacy/numfmt.h \
+      src/projectjson.h src/sha256.h src/izim.h src/record.h \
       src/kabuk.h src/katare.h src/projectedit.h src/pkg.h \
       runtime/oboe_runtime.h
 

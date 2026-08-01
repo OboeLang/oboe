@@ -1,5 +1,21 @@
 A transpiler from Oboe to C, plus the `oboe` CLI described in SPEC.md.
 
+## Layout
+
+```
+selfhost/   the compiler, written in Oboe        -> bin/oboec
+src/        the CLI and package manager, in C    -> bin/oboe
+runtime/    oboe_runtime.{c,h}, embedded into every compiled program
+bootstrap/  generated: the C that bin/oboec is built from
+legacy/     the superseded C compiler -- NOT how anything is compiled now
+tests/      the suite (see below), driven by tests/run_tests.sh
+```
+
+`legacy/` is the one that surprises people: it is a complete Oboe compiler in C
+and it is still linked into `bin/oboe`, but nothing routes through it any more.
+It survives as the reference the self-hosting gates diff against, and as a
+deprecated fallback. `legacy/README.md` says when it can go.
+
 ## Build
 
 ```
@@ -14,7 +30,7 @@ Produces `bin/oboe` (the CLI, in C) and `bin/oboec` (the compiler proper, writte
 
 Notes about miscellaneous/old/irrelevant crap:
 
-- `selfhost/{lexer,parser,codegen,dump,diag,hostos,main}.oboe`: `oboec`. `bin/oboe` execs it for every `run`, `build` and `install`. `src/lexer.c`, `src/parser.c` and `src/codegen.c` are no longer a front-end; they exist as the reference the gates below diff against, which will stop being useful when Oboe drifts enough
+- `selfhost/{lexer,parser,codegen,dump,diag,hostos,main}.oboe`: `oboec`. `bin/oboe` execs it for every `run`, `build` and `install`. Their C counterparts moved to `legacy/` and are no longer a front-end; they exist as the reference the gates below diff against, which will stop being useful when Oboe drifts enough
 - `selfhost/mini/` is a compiler for a small Oboe-like subset, written in Oboe. It was the spike that proved the language could host a compiler at all, and it stays as a cheap regression test engine for the features that made that possible (break/continue, short-circuit `and`/`or`, `ord`, dict-shaped AST nodes, `eprint` + `os.exit`).
 
 ### Bootstrap
@@ -25,7 +41,7 @@ Notes about miscellaneous/old/irrelevant crap:
 
 ### Gates
 
-I'm testing this based on the selfhoster emitting bytes identical to its C counterpart, which is what the hidden `oboe dump-tokens <file>`, `oboe dump-ast <file>` and `oboe emit-c <file>` commands are for. The two dump serializers live in `src/dump.c`, next to the definition of the format their twins in `selfhost/dump.oboe` have to reproduce; none of the three is in the usage line, since they are development tools rather than part of the CLI.
+I'm testing this based on the selfhoster emitting bytes identical to its C counterpart, which is what the hidden `oboe dump-tokens <file>`, `oboe dump-ast <file>` and `oboe emit-c <file>` commands are for. The two dump serializers live in `legacy/dump.c`, next to the definition of the format their twins in `selfhost/dump.oboe` have to reproduce; none of the three is in the usage line, since they are development tools rather than part of the CLI.
 
 - `selfhost_lexer`: `oboec --dump-tokens` must match `oboe dump-tokens` byte for byte, exit status included, over every Oboe file in the tree.
 - `selfhost_parser`: the same for `--dump-ast`, over that corpus plus every malformed input in `tests/helpers/parse_errors.txt`, so the diagnostics are compared as closely as the trees are. The dump carries each node's kind, line and every field of its arm in `ast.h`.

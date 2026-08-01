@@ -239,7 +239,7 @@ rm -rf "$tmp"
 
 # ---- self-hosted lexer --------------------------------------------------
 #
-# selfhost/lexer.oboe is the port of src/lexer.c, and this is the gate on it:
+# selfhost/lexer.oboe is the port of legacy/lexer.c, and this is the gate on it:
 # `oboe dump-tokens` and `oboec --dump-tokens` must agree byte for byte -- token
 # type, line and escaped lexeme -- over every Oboe file in the tree, plus the
 # torture fixtures for the corners the real tests miss and a deliberately bad
@@ -271,7 +271,7 @@ if "$OBOE" build selfhost/main.oboe -o "$tmp/oboec" >/dev/null 2>&1; then
     # coverage: every TokenType in the enum has to show up somewhere above.
     # T_X_OP is the one exception -- the lexer never emits it, the parser
     # retags an identifier spelled `x` in operator position.
-    sed -n '/^typedef enum {/,/^} TokenType;/p' src/lexer.h |
+    sed -n '/^typedef enum {/,/^} TokenType;/p' legacy/lexer.h |
         grep -o '\bT_[A-Z_0-9]*' | grep -v '^T_X_OP$' | sort -u > "$tmp/want"
     sort -u "$tmp/seen" > "$tmp/got"
     missing="$(comm -23 "$tmp/want" "$tmp/got" | tr '\n' ' ')"
@@ -288,7 +288,7 @@ if "$OBOE" build selfhost/main.oboe -o "$tmp/oboec" >/dev/null 2>&1; then
     # The same gate one stage further on: `oboe dump-ast` against
     # `oboec --dump-ast`, over the same corpus plus every malformed input in
     # tests/helpers/parse_errors.txt. The AST dump carries each node's kind,
-    # line and every field of its arm in src/ast.h, so this catches a
+    # line and every field of its arm in legacy/ast.h, so this catches a
     # mis-shaped tree and not just one that happens to print the same.
     mkdir -p "$tmp/pe"
     while IFS="$(printf '\t')" read -r name src; do
@@ -320,8 +320,8 @@ if "$OBOE" build selfhost/main.oboe -o "$tmp/oboec" >/dev/null 2>&1; then
     # nothing, so every ExprKind, StmtKind, DeclKind and ForIterKind in ast.h
     # has to appear in one of the dumps above.
     { sed -n '/^typedef enum {/,/} ExprKind;/p;/^typedef enum {/,/} StmtKind;/p
-              /^typedef enum {/,/} DeclKind;/p' src/ast.h
-      grep 'ForIterKind' src/ast.h
+              /^typedef enum {/,/} DeclKind;/p' legacy/ast.h
+      grep 'ForIterKind' legacy/ast.h
     } | grep -oE '\b(EXPR|STMT|DECL|FOR)_[A-Z_]+' | sort -u > "$tmp/kwant"
     sort -u "$tmp/kinds" > "$tmp/kgot"
     missing="$(comm -23 "$tmp/kwant" "$tmp/kgot" | tr '\n' ' ')"
@@ -406,10 +406,10 @@ if "$OBOE" build selfhost/main.oboe -o "$tmp/oboec" >/dev/null 2>&1; then
 
     # Same argument as the token and AST coverage: agreement on emissions the
     # corpus never asks for proves nothing. Every runtime entry point named in
-    # a string literal in src/codegen.c -- every operator fallback, every
+    # a string literal in legacy/codegen.c -- every operator fallback, every
     # primitive method, every coercion and type check -- has to appear in the C
     # the corpus generated.
-    grep -oE '"[^"]*"' src/codegen.c | grep -oE '\bob_[a-z_0-9]+' |
+    grep -oE '"[^"]*"' legacy/codegen.c | grep -oE '\bob_[a-z_0-9]+' |
         sort -u > "$tmp/cwant"
     grep -oE '\bob_[a-z_0-9]+' "$tmp/emitted" | sort -u > "$tmp/cgot"
     missing="$(comm -23 "$tmp/cwant" "$tmp/cgot" | tr '\n' ' ')"
