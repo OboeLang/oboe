@@ -19,6 +19,6 @@
 #ifndef OBOE_VERSION_H
 #define OBOE_VERSION_H
 
-#define OBOE_VERSION "1.0.0"
+#define OBOE_VERSION "1.0.1"
 
 #endif
