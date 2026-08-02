@@ -105,20 +105,22 @@ jobs:
           name: oboe-linux-x86_64
           path: compiler/dist-release/*.tar.gz
 
+  # arm64 only. GitHub has retired macos-13, its last free x86_64 image, and a
+  # job asking for a label that no longer exists does not fail -- it sits
+  # queued, unassigned, until the run times out. That is how 1.0.0 went out
+  # without an Intel build.
+  #
+  # The alternative would be adding `-arch x86_64` here for a universal binary,
+  # and it is deliberately not done: nothing would ever run that slice before it
+  # shipped, which is the same untested-support claim the cross-compile targets
+  # are already called out for. An Intel build comes back when there is a runner
+  # that can test one (a paid larger runner is x86_64), not before.
   macos:
-    name: macos ${{ matrix.arch }}
+    name: macos arm64
     needs: version
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # macos-latest is arm64; macos-13 is the last x86_64 runner. Each
-          # builds and tests natively -- neither slice is cross-compiled and
-          # shipped untested, which for this project would be a claim of
-          # support nothing has verified.
-          - { runner: macos-latest, arch: arm64 }
-          - { runner: macos-13, arch: x86_64 }
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-latest
+    env:
+      ARCH: arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -134,11 +136,11 @@ jobs:
 
       - name: Package
         working-directory: compiler
-        run: ../.github/package-release.sh macos-${{ matrix.arch }} ${{ needs.version.outputs.version }}
+        run: ../.github/package-release.sh macos-$ARCH ${{ needs.version.outputs.version }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: oboe-macos-${{ matrix.arch }}
+          name: oboe-macos-arm64
           path: compiler/dist-release/*.tar.gz
 
   release:

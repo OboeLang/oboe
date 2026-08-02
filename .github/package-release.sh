@@ -76,7 +76,10 @@ A symlink is fine; \`oboe\` resolves it before looking for the runtime.
 
 ## Supported platforms
 
-Linux and macOS. There is no Windows build: the CLI is POSIX-throughout
+Linux (x86_64) and macOS (Apple Silicon). There is no Intel Mac build: the
+only free x86_64 macOS CI runner has been retired
+
+There is no Windows build either: the CLI is POSIX-throughout
 (\`fork\`/\`execv\`/\`waitpid\`, \`mkstemps\`, \`dirname\`), so use WSL there.
 \`oboe build -t windows\` cross-compiles Windows *programs* from a supported
 host, but that path has no test coverage yet.
