@@ -1,6 +1,4 @@
-# Oboe spec (draft)
-
-Many things are still left unresolved; this is incomplete.
+# Oboe spec
 
 ## Toolchain
 
