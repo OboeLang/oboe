@@ -157,18 +157,24 @@ jobs:
           cd artifacts
           sha256sum *.tar.gz | tee SHA256SUMS
 
-      # Drafted rather than published: the notes want a human, and a release
-      # that turns out to be wrong is far cheaper to delete before anyone has
-      # fetched it.
-      #
       # `gh` is preinstalled on the runner, which keeps a third-party action out
       # of the one job holding a write token.
-      - name: Draft the release
+      - name: Attach the artifacts to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "Oboe ${{ needs.version.outputs.version }}" \
-            --draft --generate-notes \
-            artifacts/*.tar.gz artifacts/SHA256SUMS
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+               >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME exists; uploading assets to it"
+            gh release upload "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" --clobber \
+              artifacts/*.tar.gz artifacts/SHA256SUMS
+          else
+            echo "no release for $GITHUB_REF_NAME; creating one as a draft"
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Oboe ${{ needs.version.outputs.version }}" \
+              --draft --generate-notes \
+              artifacts/*.tar.gz artifacts/SHA256SUMS
+          fi
