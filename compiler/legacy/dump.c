@@ -493,6 +493,7 @@ void dump_ast(Program *prog, FILE *out)
 		case DECL_ON:
 			ind(out, 1);
 			fputs("DECL_ON", out);
+			field_str(out, "module", d->as.on.event_module);
 			field_str(out, "event", d->as.on.event_name);
 			field_str(out, "var", d->as.on.var_name);
 			fprintf(out, " line=%d\n", d->as.on.line);

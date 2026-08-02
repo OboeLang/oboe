@@ -235,8 +235,9 @@ OboeValue codegen__module_is_builtin(OboeValue module);
 OboeValue codegen__parse_unit(OboeValue ui);
 OboeValue codegen__ensure_unit(OboeValue module, OboeValue from_dir);
 OboeValue codegen__resolve_imports(OboeValue ui);
-OboeValue codegen__register_event_decl(OboeValue ev);
+OboeValue codegen__register_event_decl(OboeValue ev, OboeValue prefix);
 OboeValue codegen__collect_extras(OboeValue decls, OboeValue prefix);
+OboeValue codegen__handler_event_prefix(OboeValue h);
 OboeValue codegen__finalize_events();
 OboeValue codegen__has_kbint_handlers();
 OboeValue codegen__emit_event_params(OboeValue params);
@@ -2842,7 +2843,7 @@ OboeValue codegen__resolve_imports(OboeValue ui) {
     return ob_null();
 }
 
-OboeValue codegen__register_event_decl(OboeValue ev) {
+OboeValue codegen__register_event_decl(OboeValue ev, OboeValue prefix) {
     OboeValue fields = ({ OboeValue __a = ob_array_new(); __a; });
     { OboeValue __it = ob_index_get(ev, ob_interpolate(1, ob_string("params"))); int64_t __n = ob_iter_len(__it);
     for (int64_t __i = 0; __i < __n; __i++) {
@@ -2851,7 +2852,7 @@ OboeValue codegen__register_event_decl(OboeValue ev) {
     } }
     OboeValue c = ({ OboeValue __d = ob_dict_new(); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("name"))), ob_index_get(ev, ob_interpolate(1, ob_string("name")))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("parent_name"))), ob_null()); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("fields"))), fields); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("methods"))), ({ OboeValue __a = ob_array_new(); __a; })); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("line"))), ob_int(0LL)); __d; });
     (void)(codegen__add_class(c, ob_string("")));
-    (void)(ob_arr_push(codegen__EVENTS, ({ OboeValue __d = ob_dict_new(); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("decl"))), ev); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("cls"))), c); __d; })));
+    (void)(ob_arr_push(codegen__EVENTS, ({ OboeValue __d = ob_dict_new(); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("decl"))), ev); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("cls"))), c); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("prefix"))), prefix); __d; })));
     return ob_null();
 }
 
@@ -2875,7 +2876,7 @@ OboeValue codegen__collect_extras(OboeValue decls, OboeValue prefix) {
                 if (ob_truthy(ob_bool(ob_truthy(ob_binop("!=", codegen__find_event(ob_index_get(d, ob_interpolate(1, ob_string("name")))), ob_null(), ob_neq)) || ob_truthy(ob_binop("!=", codegen__find_class(ob_index_get(d, ob_interpolate(1, ob_string("name")))), ob_null(), ob_neq))))) {
                     (void)(codegen__codegen_error(ob_index_get(d, ob_interpolate(1, ob_string("line"))), ob_interpolate(1, ob_string("an event or class with this name already exists"))));
                 }
-                (void)(codegen__register_event_decl(d));
+                (void)(codegen__register_event_decl(d, prefix));
             }
             else {
                 if (ob_truthy(ob_binop("==", k, ob_interpolate(1, ob_string("DECL_ON")), ob_eq))) {
@@ -2894,21 +2895,45 @@ OboeValue codegen__collect_extras(OboeValue decls, OboeValue prefix) {
     return ob_null();
 }
 
+OboeValue codegen__handler_event_prefix(OboeValue h) {
+    OboeValue d = ob_index_get(h, ob_interpolate(1, ob_string("decl")));
+    { OboeValue __it = codegen__IMPORT_ALIASES; int64_t __n = ob_iter_len(__it);
+    for (int64_t __i = 0; __i < __n; __i++) {
+        OboeValue ia = ob_iter_value(__it, __i);
+        if (ob_truthy(ob_bool(ob_truthy(ob_binop("==", ob_index_get(ia, ob_interpolate(1, ob_string("local_name"))), ob_index_get(d, ob_interpolate(1, ob_string("event_module"))), ob_eq)) && ob_truthy(ob_binop("==", ob_index_get(ia, ob_interpolate(1, ob_string("owner"))), ob_index_get(h, ob_interpolate(1, ob_string("prefix"))), ob_eq))))) {
+            return ob_binop("+", ob_index_get(ia, ob_interpolate(1, ob_string("module"))), ob_interpolate(1, ob_string("__")), ob_add);
+        }
+    } }
+    (void)(codegen__codegen_error(ob_index_get(d, ob_interpolate(1, ob_string("line"))), ob_binop("+", ob_binop("+", ob_interpolate(1, ob_string("'")), ob_index_get(d, ob_interpolate(1, ob_string("event_module"))), ob_add), ob_interpolate(1, ob_string("' is not a module imported here")), ob_add)));
+    return ob_null();
+}
+
 OboeValue codegen__finalize_events() {
+    OboeValue saved = codegen__CURRENT_FILE;
     { OboeValue __it = codegen__HANDLERS; int64_t __n = ob_iter_len(__it);
     for (int64_t __i = 0; __i < __n; __i++) {
         OboeValue h = ob_iter_value(__it, __i);
         OboeValue ev = ob_index_get(h, ob_interpolate(1, ob_string("decl")));
-        if (ob_truthy(ob_binop("!=", codegen__find_event(ob_index_get(ev, ob_interpolate(1, ob_string("event_name")))), ob_null(), ob_neq))) {
+        (void)((codegen__CURRENT_FILE = codegen__unit_file_for_prefix(ob_index_get(h, ob_interpolate(1, ob_string("prefix"))))));
+        OboeValue got = codegen__find_event(ob_index_get(ev, ob_interpolate(1, ob_string("event_name"))));
+        if (ob_truthy(ob_binop("!=", ob_index_get(ev, ob_interpolate(1, ob_string("event_module"))), ob_null(), ob_neq))) {
+            OboeValue want = codegen__handler_event_prefix(h);
+            if (ob_truthy(ob_bool(ob_truthy(ob_binop("==", got, ob_null(), ob_eq)) || ob_truthy(ob_binop("!=", ob_index_get(got, ob_interpolate(1, ob_string("prefix"))), want, ob_neq))))) {
+                (void)(codegen__codegen_error(ob_index_get(ev, ob_interpolate(1, ob_string("line"))), ob_binop("+", ob_binop("+", ob_interpolate(1, ob_string("module '")), ob_index_get(ev, ob_interpolate(1, ob_string("event_module"))), ob_add), ob_interpolate(1, ob_string("' declares no such event")), ob_add)));
+            }
+            continue;
+        }
+        if (ob_truthy(ob_binop("!=", got, ob_null(), ob_neq))) {
             continue;
         }
         if (ob_truthy(ob_binop("==", ob_index_get(ev, ob_interpolate(1, ob_string("event_name"))), ob_interpolate(1, ob_string("KeyboardInterruptEvent")), ob_eq))) {
-            (void)(codegen__register_event_decl(({ OboeValue __d = ob_dict_new(); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("name"))), ob_interpolate(1, ob_string("KeyboardInterruptEvent"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("params"))), ({ OboeValue __a = ob_array_new(); __a; })); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("line"))), ob_int(0LL)); __d; })));
+            (void)(codegen__register_event_decl(({ OboeValue __d = ob_dict_new(); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("name"))), ob_interpolate(1, ob_string("KeyboardInterruptEvent"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("params"))), ({ OboeValue __a = ob_array_new(); __a; })); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("line"))), ob_int(0LL)); __d; }), ob_string("")));
         }
         else {
             (void)(codegen__codegen_error(ob_index_get(ev, ob_interpolate(1, ob_string("line"))), ob_interpolate(1, ob_string("'on' handler references an undeclared event"))));
         }
     } }
+    (void)((codegen__CURRENT_FILE = saved));
     return ob_null();
 }
 
@@ -3739,6 +3764,7 @@ OboeValue dump__dump_ast(OboeValue decls) {
                             if (ob_truthy(ob_binop("==", kind, ob_interpolate(1, ob_string("DECL_ON")), ob_eq))) {
                                 (void)(dump__ind(ob_int(1LL)));
                                 (void)(dump__emit(ob_interpolate(1, ob_string("DECL_ON"))));
+                                (void)(dump__field_str(ob_interpolate(1, ob_string("module")), ob_index_get(d, ob_interpolate(1, ob_string("event_module")))));
                                 (void)(dump__field_str(ob_interpolate(1, ob_string("event")), ob_index_get(d, ob_interpolate(1, ob_string("event_name")))));
                                 (void)(dump__field_str(ob_interpolate(1, ob_string("var")), ob_index_get(d, ob_interpolate(1, ob_string("var_name")))));
                                 (void)(dump__emit(ob_binop("+", ob_binop("+", ob_interpolate(1, ob_string(" line=")), ob_str(ob_index_get(d, ob_interpolate(1, ob_string("line")))), ob_add), ob_interpolate(1, ob_string("\n")), ob_add)));
@@ -4782,6 +4808,11 @@ OboeValue parser__parse_program(OboeValue tokens, OboeValue filename) {
                         if (ob_truthy(parser__match(p, ob_interpolate(1, ob_string("T_ON"))))) {
                             OboeValue ev = parser__expect(p, ob_interpolate(1, ob_string("T_IDENT")), ob_interpolate(1, ob_string("expected event name after 'on'")));
                             (void)(ob_index_set(d, ob_interpolate(1, ob_string("kind")), ob_interpolate(1, ob_string("DECL_ON"))));
+                            (void)(ob_index_set(d, ob_interpolate(1, ob_string("event_module")), ob_null()));
+                            if (ob_truthy(parser__match(p, ob_interpolate(1, ob_string("T_DOT"))))) {
+                                (void)(ob_index_set(d, ob_interpolate(1, ob_string("event_module")), ob_index_get(ev, ob_interpolate(1, ob_string("text")))));
+                                (void)((ev = parser__expect(p, ob_interpolate(1, ob_string("T_IDENT")), ob_interpolate(1, ob_string("expected event name after '.'")))));
+                            }
                             (void)(ob_index_set(d, ob_interpolate(1, ob_string("event_name")), ob_index_get(ev, ob_interpolate(1, ob_string("text")))));
                             (void)(ob_index_set(d, ob_interpolate(1, ob_string("line")), ob_index_get(ev, ob_interpolate(1, ob_string("line")))));
                             (void)(ob_index_set(d, ob_interpolate(1, ob_string("var_name")), ob_null()));

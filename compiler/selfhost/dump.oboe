@@ -374,6 +374,7 @@ func dump_ast(array decls) {
 		} else if (kind == "DECL_ON") {
 			ind(1)
 			emit("DECL_ON")
+			field_str("module", d["event_module"])
 			field_str("event", d["event_name"])
 			field_str("var", d["var_name"])
 			emit(" line=" + str(d["line"]) + "\n")

@@ -2860,7 +2860,7 @@ func resolve_imports(int ui) {
 // Each event gets a synthesized class whose fields are the payload params;
 // `on E as e` handlers bind `e` to that class so `e.field` resolves like any
 // member access, and `E.fire(...)` resolves like a static call to E__fire.
-func register_event_decl(ev) {
+func register_event_decl(ev, str prefix) {
 	var fields = []
 	for (p in ev["params"]) {
 		fields.push({ "name": p["name"], "type_name": p["type_name"],
@@ -2870,7 +2870,9 @@ func register_event_decl(ev) {
 	var c = { "name": ev["name"], "parent_name": null, "fields": fields,
 		  "methods": [], "line": 0 }
 	add_class(c, "")
-	EVENTS.push({ "decl": ev, "cls": c })
+	// the unit that declared it, so `on mod.E` can check it really is
+	// mod's event; the event itself stays global and unprefixed
+	EVENTS.push({ "decl": ev, "cls": c, "prefix": prefix })
 }
 
 func collect_extras(array decls, str prefix) {
@@ -2896,7 +2898,7 @@ func collect_extras(array decls, str prefix) {
 				codegen_error(d["line"],
 					      "an event or class with this name already exists")
 			}
-			register_event_decl(d)
+			register_event_decl(d, prefix)
 		} else if (k == "DECL_ON") {
 			HANDLERS.push({ "decl": d,
 					"cfunc": "__on_" + d["event_name"] +
@@ -2911,22 +2913,50 @@ func collect_extras(array decls, str prefix) {
 	}
 }
 
+// `on mod.E`: the qualifier goes through the handling unit's own import
+// bindings, like any other `mod.member`, and names the unit E must come from.
+func handler_event_prefix(h) {
+	var d = h["decl"]
+	for (ia in IMPORT_ALIASES) {
+		if (ia["local_name"] == d["event_module"] and
+		    ia["owner"] == h["prefix"]) {
+			return ia["module"] + "__"
+		}
+	}
+	codegen_error(d["line"], "'" + d["event_module"] +
+				 "' is not a module imported here")
+}
+
 // The built-in KeyboardInterruptEvent exists without a declaration; synthesize
 // it when a handler references it. Any other unknown event is an error.
 func finalize_events() {
+	var saved = CURRENT_FILE
 	for (h in HANDLERS) {
 		var ev = h["decl"]
-		if (find_event(ev["event_name"]) != null) {
+		CURRENT_FILE = unit_file_for_prefix(h["prefix"])
+		var got = find_event(ev["event_name"])
+		if (ev["event_module"] != null) {
+			var want = handler_event_prefix(h)
+			if (got == null or got["prefix"] != want) {
+				codegen_error(ev["line"],
+					      "module '" +
+						      ev["event_module"] +
+						      "' declares no such event")
+			}
+			continue
+		}
+		if (got != null) {
 			continue
 		}
 		if (ev["event_name"] == "KeyboardInterruptEvent") {
 			register_event_decl({ "name": "KeyboardInterruptEvent",
-					      "params": [], "line": 0 })
+					      "params": [], "line": 0 }, "")
 		} else {
 			codegen_error(ev["line"],
 				      "'on' handler references an undeclared event")
 		}
 	}
+	CURRENT_FILE = saved
 }
 
 func has_kbint_handlers() {

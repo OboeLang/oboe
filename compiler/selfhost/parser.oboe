@@ -1058,10 +1058,16 @@ func parse_program(array tokens, str filename) {
 			d["params"] = parse_params(p)
 			match(p, "T_SEMI")
 		} else if (match(p, "T_ON")) {
-			// `on MyEvent [as e] { body }`
+			// `on [module.]MyEvent [as e] { body }`
 			var ev = expect(p, "T_IDENT",
 					"expected event name after 'on'")
 			d["kind"] = "DECL_ON"
+			d["event_module"] = null
+			if (match(p, "T_DOT")) {
+				d["event_module"] = ev["text"]
+				ev = expect(p, "T_IDENT",
+					    "expected event name after '.'")
+			}
 			d["event_name"] = ev["text"]
 			d["line"] = ev["line"]
 			d["var_name"] = null

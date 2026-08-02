@@ -72,6 +72,9 @@ static int g_class_op_count = 0;
 typedef struct {
 	EventDecl *decl;
 	ClassDecl *cls;
+	/* the unit that declared it, so `on mod.E` can check it really is
+	   mod's event; the event itself stays global and unprefixed */
+	char *prefix;
 } EventInfo;
 static EventInfo *g_events = NULL;
 static int g_event_count = 0;
@@ -3183,7 +3186,7 @@ static void resolve_imports(int ui)
 /* Each event gets a synthesized class whose fields are the payload params;
    `on E as e` handlers bind `e` to that class so `e.field` resolves like any
    member access, and `E.fire(...)` resolves like a static call to E__fire. */
-static void register_event_decl(EventDecl *ev)
+static void register_event_decl(EventDecl *ev, const char *prefix)
 {
 	ClassDecl *c = calloc(1, sizeof(ClassDecl));
 	c->name = strdup(ev->name);
@@ -3201,6 +3204,7 @@ static void register_event_decl(EventDecl *ev)
 	g_events = realloc(g_events, (g_event_count + 1) * sizeof(EventInfo));
 	g_events[g_event_count].decl = ev;
 	g_events[g_event_count].cls = c;
+	g_events[g_event_count].prefix = strdup(prefix);
 	g_event_count++;
 }
 
@@ -3237,7 +3241,7 @@ static void collect_extras(Decl *decls, const char *prefix)
 				codegen_error(
 					d->as.event.line,
 					"an event or class with this name already exists");
-			register_event_decl(&d->as.event);
+			register_event_decl(&d->as.event, prefix);
 			break;
 		case DECL_ON:
 			g_handlers = realloc(g_handlers,
@@ -3266,24 +3270,54 @@ static void collect_extras(Decl *decls, const char *prefix)
 	}
 }
 
+/* `on mod.E`: the qualifier goes through the handling unit's own import
+   bindings, like any other `mod.member`, and names the unit E must come from. */
+static char *handler_event_prefix(int hi)
+{
+	OnDecl *h = g_handlers[hi].decl;
+	for (int i = 0; i < g_import_alias_count; i++) {
+		if (strcmp(g_import_aliases[i].local_name, h->event_module) ==
+			    0 &&
+		    strcmp(g_import_aliases[i].owner, g_handlers[hi].prefix) ==
+			    0)
+			return fmt("%s__", g_import_aliases[i].module);
+	}
+	codegen_error(h->line, fmt("'%s' is not a module imported here",
+				   h->event_module));
+	return NULL;
+}
+
 /* The built-in KeyboardInterruptEvent exists without a declaration; synthesize
    it when a handler references it. Any other unknown event is an error. */
 static void finalize_events(void)
 {
+	const char *saved = g_current_file;
 	for (int i = 0; i < g_handler_count; i++) {
 		OnDecl *h = g_handlers[i].decl;
-		if (find_event(h->event_name))
+		g_current_file = unit_file_for_prefix(g_handlers[i].prefix);
+		EventInfo *got = find_event(h->event_name);
+		if (h->event_module) {
+			char *want = handler_event_prefix(i);
+			if (!got || strcmp(got->prefix, want) != 0)
+				codegen_error(
+					h->line,
+					fmt("module '%s' declares no such event",
+					    h->event_module));
+			continue;
+		}
+		if (got)
 			continue;
 		if (strcmp(h->event_name, "KeyboardInterruptEvent") == 0) {
 			EventDecl *ev = calloc(1, sizeof(EventDecl));
 			ev->name = strdup("KeyboardInterruptEvent");
-			register_event_decl(ev);
+			register_event_decl(ev, "");
 		} else {
 			codegen_error(
 				h->line,
 				"'on' handler references an undeclared event");
 		}
 	}
+	g_current_file = saved;
 }
 
 static bool has_kbint_handlers(void)

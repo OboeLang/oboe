@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+// `on module.Event`: an imported module's event handled by its qualified name,
+// through the module name and through an alias
+import _extras
+import _extras as ex
+
+on _extras.ModEvent as e {
+    print("qualified: ${e.msg}")
+}
+
+on ex.ModEvent as e {
+    print("aliased: ${e.msg}")
+}
+
+func main(array args) {
+    print(_extras.moduleWork(-3))
+}

@@ -279,6 +279,7 @@ typedef struct {
 } EventDecl;
 
 typedef struct {
+	char *event_module; /* `on mod.E` qualifier, may be NULL */
 	char *event_name;
 	char *var_name; /* `as e` binding, may be NULL */
 	Stmt **body;

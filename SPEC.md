@@ -414,6 +414,20 @@ on ExampleEvent as e {
 }
 ```
 
+An event declared in another module can be named through that module, the same way any other member is: `on <module>.<event> [as <variable>] { ... }`. The qualifier is resolved through the importing file's own imports, so an alias works too.
+```
+import requests
+import requests as r
+
+on requests.RequestCompleteEvent as e {
+    print(e.response)
+}
+
+on r.RequestCompleteEvent as e {
+    print(e.code)
+}
+```
+
 `event` - type, used to create events. could also be `Event`, but i dunno
 ```
 event MyEvent = event()

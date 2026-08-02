@@ -89,3 +89,4 @@ eventassign	event E event()
 eventctor	event E = 3
 onname	on { }
 onvar	on E as { }
+onqualname	on m. { }

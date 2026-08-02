@@ -1197,10 +1197,16 @@ Program *parse_program(Token *tokens, int count, const char *filename)
 			d->as.event.params = parse_params(p);
 			match(p, T_SEMI);
 		} else if (match(p, T_ON)) {
-			/* `on MyEvent [as e] { body }` */
+			/* `on [module.]MyEvent [as e] { body }` */
 			Token *ev = expect(p, T_IDENT,
 					   "expected event name after 'on'");
 			d->kind = DECL_ON;
+			d->as.on.event_module = NULL;
+			if (match(p, T_DOT)) {
+				d->as.on.event_module = strdup(ev->text);
+				ev = expect(p, T_IDENT,
+					    "expected event name after '.'");
+			}
 			d->as.on.event_name = strdup(ev->text);
 			d->as.on.line = ev->line;
 			d->as.on.var_name = NULL;
