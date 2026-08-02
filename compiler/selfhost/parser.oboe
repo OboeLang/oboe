@@ -605,6 +605,9 @@ func parse_params(Parser p) {
 	if (!check(p, "T_RPAREN")) {
 		var more = true
 		while (more) {
+			// `var x`, the keyword spells out "untyped" here the
+			// same way it does for a let or a field
+			match(p, "T_LET")
 			var tn = parse_typed_name(p)
 			var param = { "type_name": tn["type"],
 				      "name": tn["name"],

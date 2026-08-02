@@ -165,7 +165,7 @@ int func add(int x, int y) {
 
 - Declared with the `func` keyword.
 - Return type is written before `func`, though it is optional.
-- Parameters are `type name` pairs.
+- Parameters are `type name` pairs. A parameter may be left untyped, either as a bare name or with `var` in the type's place (`func f(var x)`), matching how `var` reads at a declaration.
 - `array args` is the convention for a program's `main` entry point: `func main(array args) { ... }`.
 - Free functions are allowed; functions do not have to belong to a class.
 

@@ -1,0 +1,39 @@
+// `var` is optional filler in a parameter list, the same way it is in
+// `const var x` and in a class field declaration.
+
+func plain(var a, var b) {
+	print("plain", a, b)
+}
+
+func mixed(int a, var b, var c = "dflt") {
+	print("mixed", a, b, c)
+}
+
+class Box {
+	func init(this, var v) {
+		this.v = v
+	}
+
+	func show(this, var label) {
+		print(label, this.v)
+	}
+}
+
+event Ping = event(var who)
+
+on Ping as e {
+	print("ping from", e.who)
+}
+
+operator |+| (var a, var b) {
+	return a + b + 1
+}
+
+func main(array args) {
+	plain(1, 2)
+	mixed(3, "four")
+	mixed(3, "four", "five")
+	Box("boxed").show("box:")
+	Ping.fire("robin")
+	print(10 |+| 20)
+}

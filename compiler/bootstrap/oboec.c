@@ -4346,6 +4346,7 @@ OboeValue parser__parse_params(OboeValue p) {
     if (ob_truthy(ob_not(parser__check(p, ob_interpolate(1, ob_string("T_RPAREN")))))) {
         OboeValue more = ob_bool(true);
         while (ob_truthy(more)) {
+            (void)(parser__match(p, ob_interpolate(1, ob_string("T_LET"))));
             OboeValue tn = parser__parse_typed_name(p);
             OboeValue param = ({ OboeValue __d = ob_dict_new(); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("type_name"))), ob_index_get(tn, ob_interpolate(1, ob_string("type")))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("name"))), ob_index_get(tn, ob_interpolate(1, ob_string("name")))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("default_value"))), ob_null()); __d; });
             if (ob_truthy(parser__match(p, ob_interpolate(1, ob_string("T_ASSIGN"))))) {

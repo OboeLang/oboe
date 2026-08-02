@@ -645,6 +645,9 @@ static Param *parse_params(Parser *p)
 	bool seen_default = false;
 	if (!check(p, T_RPAREN)) {
 		do {
+			/* `var x`, the keyword spells out "untyped" here the
+			   same way it does for a let or a field */
+			match(p, T_LET);
 			char *type_name, *name;
 			parse_typed_name(p, &type_name, &name);
 			Param *param = calloc(1, sizeof(Param));
