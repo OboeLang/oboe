@@ -94,6 +94,39 @@ done
 
 # --- CLI behavior tests ---
 
+# `oboe --version` is what a bug report will quote, so it has to agree with the
+# source rather than with a string typed here: src/version.h is the one place
+# the version is written down, and the release workflow checks the tag against
+# that same file.
+want_version="$(sed -n 's/^#define OBOE_VERSION "\(.*\)"/\1/p' src/version.h)"
+got_version="$($OBOE --version 2>&1)"
+if [ -n "$want_version" ] && [ "$got_version" = "oboe $want_version ($HOST_OS)" ]
+then
+    echo "PASS cli_version"
+    pass=$((pass+1))
+else
+    echo "FAIL cli_version (got '$got_version', wanted 'oboe $want_version ($HOST_OS)')"
+    fail=$((fail+1))
+fi
+
+# `--help` has to be a success with the usage on stdout; an unknown command is
+# the failure, and the two must not be the same thing.
+help_out="$($OBOE --help 2>/dev/null)"
+help_rc=$?
+$OBOE --no-such-command >/dev/null 2>&1
+bad_rc=$?
+case "$help_out" in
+*"usage: oboe"*) help_ok=yes ;;
+*) help_ok=no ;;
+esac
+if [ $help_rc -eq 0 ] && [ "$help_ok" = yes ] && [ $bad_rc -ne 0 ]; then
+    echo "PASS cli_help"
+    pass=$((pass+1))
+else
+    echo "FAIL cli_help (help exit $help_rc, usage on stdout: $help_ok, unknown-command exit $bad_rc)"
+    fail=$((fail+1))
+fi
+
 # a failing `oboe build` must not leave a dist/ directory behind
 tmp="$(mktemp -d)"
 cat > "$tmp/main.oboe" <<'EOF'

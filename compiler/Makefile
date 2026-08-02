@@ -34,7 +34,7 @@ HDR = legacy/ast.h legacy/lexer.h legacy/parser.h legacy/codegen.h \
       legacy/dump.h legacy/numfmt.h \
       src/projectjson.h src/sha256.h src/izim.h src/record.h \
       src/kabuk.h src/katare.h src/projectedit.h src/pkg.h \
-      runtime/oboe_runtime.h
+      src/version.h runtime/oboe_runtime.h
 
 BIN = bin/oboe
 # the compiler proper, written in Oboe. bin/oboe execs it; see selfhost/.

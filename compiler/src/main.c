@@ -18,6 +18,7 @@
 #include "pkg.h"
 #include "projectedit.h"
 #include "projectjson.h"
+#include "version.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1046,14 +1047,31 @@ static int cmd_emit_c(const char *path)
 	return 0;
 }
 
+static void usage(FILE *out)
+{
+	fprintf(out,
+		"usage: oboe <init|run|build|tidy|get|install|remove|publish|sema> [args]\n"
+		"       oboe --version\n");
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 2) {
-		fprintf(stderr,
-			"usage: oboe <init|run|build|tidy|get|install|remove|publish|sema> [args]\n");
+		usage(stderr);
 		return 1;
 	}
 	const char *cmd = argv[1];
+	/* The host OS rides along because it is the single most useful thing to
+	   know about a report from a machine that isn't this one, and because a
+	   build targeting the wrong OS has been a real bug here before. */
+	if (strcmp(cmd, "--version") == 0 || strcmp(cmd, "-V") == 0) {
+		printf("oboe %s (%s)\n", OBOE_VERSION, HOST_OS);
+		return 0;
+	}
+	if (strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0) {
+		usage(stdout);
+		return 0;
+	}
 	if (strcmp(cmd, "init") == 0) {
 		cmd_init(argc >= 3 ? argv[2] : NULL);
 		return 0;

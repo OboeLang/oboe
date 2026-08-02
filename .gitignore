@@ -1,3 +1,5 @@
 .oboe/
 *.kate-swp
 compiler/stage/
+# the release workflow's staging area (see .github/package-release.sh)
+compiler/dist-release/

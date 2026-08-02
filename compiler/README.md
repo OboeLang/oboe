@@ -73,6 +73,8 @@ bin/oboe install <pkg>[@<constraint>]   # fetch, build and place a tool in $OBOE
 bin/oboe publish [--dry-run]            # pack this project and upload it
 bin/oboe sema <file>...                 # sha256 in the wire form; `-` reads stdin
     [--registry katare://host[:port]/]  # else $OBOE_REGISTRY, else project.jsonc, else built-in
+bin/oboe --version                      # `oboe <version> (<host os>)`; -V is the same
+bin/oboe --help                         # the usage above; -h is the same
 ```
 
 ## Packages

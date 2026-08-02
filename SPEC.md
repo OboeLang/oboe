@@ -20,6 +20,9 @@ oboe publish # Packs the current project into a kabuk archive and uploads it.
     --dry-run # Print the file list, size and digest without uploading.
 oboe sema <file>... # Prints each file's sha256 in the wire form. `-` reads stdin.
 
+oboe --version # Prints `oboe <version> (<host os>)`, e.g. `oboe 1.0.0 (linux)`. `-V` is the same.
+oboe --help    # Prints the usage summary and exits successfully. `-h` is the same.
+
 # Packages come from a katare registry (see the reedbed repository). The registry is chosen by --registry, else $OBOE_REGISTRY, else "registry" in project.jsonc, else a compiled-in default. Publishing needs a token in $OBOE_TOKEN or in $XDG_CONFIG_HOME/oboe/credentials (mode 0600), one `katare://host:port <token>` per line.
 #
 # A library is `"kind": "vivlijotiki"` and a tool is `"kind": "pawi"`; `get` and `install` each refuse the other kind rather than installing it somewhere it will never work.

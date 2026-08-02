@@ -1,0 +1,174 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# © 2026 Sushii64
+# © 2026 robinpie
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 2 as
+# published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # so the whole thing can be rehearsed without cutting a tag; a manual run
+  # builds and uploads artifacts but never creates a release
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # The tag and src/version.h have to agree before anything is built. Getting
+  # this wrong ships a binary whose --version contradicts the release it is
+  # attached to, and that is unfixable after the fact without a new tag.
+  version:
+    name: tag matches src/version.h
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        working-directory: compiler
+        run: |
+          set -euo pipefail
+          src="$(sed -n 's/^#define OBOE_VERSION "\(.*\)"/\1/p' src/version.h)"
+          [ -n "$src" ] || { echo "could not read OBOE_VERSION"; exit 1; }
+          echo "version=$src" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE:-}" = tag ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            [ "$tag" = "$src" ] || {
+              echo "tag v$tag disagrees with src/version.h ($src)"; exit 1; }
+          fi
+          echo "building $src"
+
+  linux:
+    name: linux x86_64 (static)
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Built against musl, fully static, so one artifact runs on any distro
+      # regardless of its glibc. Static *glibc* is not an option: getaddrinfo
+      # (katare.c) and dlopen (the runtime) both warn at link time that they
+      # need the matching shared libs back at runtime, which is precisely the
+      # dependency the artifact exists to avoid.
+      #
+      # `make clean` first for the reason in CLAUDE.local.md: src/*.o and the
+      # two bin/ binaries are committed, and git does not preserve mtimes, so
+      # make can otherwise consider the checked-out objects current and package
+      # the committed binary instead of this tag.
+      - name: Build static with musl
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/src" -w /src/compiler alpine:3.20 sh -c '
+            apk add --no-cache build-base >/dev/null &&
+            make clean &&
+            make CC="gcc -static"'
+          # the container builds as root; hand the outputs back so the later
+          # steps, which do not, can strip and package them
+          sudo chown -R "$(id -u):$(id -g)" compiler
+
+      - name: Check it really is static
+        working-directory: compiler
+        run: |
+          set -euo pipefail
+          file bin/oboe bin/oboec
+          for b in bin/oboe bin/oboec; do
+            file "$b" | grep -q "statically linked" \
+              || { echo "$b is not static"; exit 1; }
+          done
+
+      # Run the suite on the host, against the musl binaries, using the host's
+      # glibc gcc for the programs they compile. That is the combination a user
+      # actually has -- a static toolchain shelling out to their own C compiler
+      # -- and it is not what either a plain CI job or a run inside the Alpine
+      # container would exercise. run_tests.sh is invoked directly rather than
+      # through `make test`, which would relink both binaries against glibc.
+      - name: Run the suite against the packaged binaries
+        working-directory: compiler
+        run: ./tests/run_tests.sh
+
+      - name: Package
+        working-directory: compiler
+        run: ../.github/package-release.sh linux-x86_64 ${{ needs.version.outputs.version }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oboe-linux-x86_64
+          path: compiler/dist-release/*.tar.gz
+
+  macos:
+    name: macos ${{ matrix.arch }}
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-latest is arm64; macos-13 is the last x86_64 runner. Each
+          # builds and tests natively -- neither slice is cross-compiled and
+          # shipped untested, which for this project would be a claim of
+          # support nothing has verified.
+          - { runner: macos-latest, arch: arm64 }
+          - { runner: macos-13, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # `gcc` on a macOS runner is Apple's clang shim, so CC = gcc is fine.
+      # There is no static option here: Apple does not ship a static libc and
+      # linking one is unsupported, so these are dynamic against the system
+      # libSystem, which is stable across macOS versions in a way glibc is not.
+      - name: Build and test
+        working-directory: compiler
+        run: |
+          make clean
+          make test
+
+      - name: Package
+        working-directory: compiler
+        run: ../.github/package-release.sh macos-${{ matrix.arch }} ${{ needs.version.outputs.version }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oboe-macos-${{ matrix.arch }}
+          path: compiler/dist-release/*.tar.gz
+
+  release:
+    name: publish the release
+    needs: [version, linux, macos]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum *.tar.gz | tee SHA256SUMS
+
+      # Drafted rather than published: the notes want a human, and a release
+      # that turns out to be wrong is far cheaper to delete before anyone has
+      # fetched it.
+      #
+      # `gh` is preinstalled on the runner, which keeps a third-party action out
+      # of the one job holding a write token.
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Oboe ${{ needs.version.outputs.version }}" \
+            --draft --generate-notes \
+            artifacts/*.tar.gz artifacts/SHA256SUMS
