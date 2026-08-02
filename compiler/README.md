@@ -11,11 +11,6 @@ legacy/     the superseded C compiler -- NOT how anything is compiled now
 tests/      the suite (see below), driven by tests/run_tests.sh
 ```
 
-`legacy/` is the one that surprises people: it is a complete Oboe compiler in C
-and it is still linked into `bin/oboe`, but nothing routes through it any more.
-It survives as the reference the self-hosting gates diff against, and as a
-deprecated fallback. `legacy/README.md` says when it can go.
-
 ## Build
 
 ```
@@ -35,7 +30,14 @@ Notes about miscellaneous/old/irrelevant crap:
 
 ### Bootstrap
 
-`bin/oboec` is built from `bootstrap/oboec.c`, a committed generated file, so a clean checkout needs nothing but a C compiler. Refreshing it is `make regen-bootstrap` -- deliberately a separate step, since it is a reviewed change rather than part of the build. That target blanks the three `os.script_*` constants the compiler bakes into its output, because a committed artifact must not carry the absolute paths of whoever generated it; it is safe only because `oboec` never calls them.
+`bin/oboec` is built from `bootstrap/oboec.c`, a committed generated file, so a clean checkout needs nothing but a C compiler. Refreshing it is `make regen-bootstrap` -- deliberately a separate step, since it is a reviewed change rather than part of the build.
+
+That target also has to scrub two facts about the machine that generated the file, since every other machine then builds it unchanged:
+
+- The three `os.script_*` constants are blanked, because a committed artifact must not carry the absolute paths of whoever generated it. Safe only because `oboec` never calls them.
+- `HOST_OS` becomes a preprocessor conditional (`bootstrap/hostos.h`, prepended to the generated C). `selfhost/hostos.oboe` is a per-OS module, so the OS is chosen at generation time; left alone, a `bin/oboec` built on, say, macOS from a Linux-generated bootstrap resolves `foo.linux.oboe` for every import. `bin/oboe` passes `--target-os` on every invocation regardless, so this is the default only for a bare `oboec`.
+
+Both substitutions are verified by `regen-bootstrap` and pinned by the suite (`bootstrap_host_os_not_baked`, `bootstrap_host_os_follows_compiler`).
 
 `make bootstrap-check` is the proof that the compiler reproduces itself: stage1 is the committed bootstrap, stage2 is what it emits from today's `selfhost/` sources, stage3 is what a compiler built from stage2 emits from the same sources, and stage2 must equal stage3. stage1 may legitimately differ from both, having been generated before whatever change is under test.
 

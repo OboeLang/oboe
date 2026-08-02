@@ -93,9 +93,21 @@ char *oboe_home(void)
 	return dir;
 }
 
+#if defined(_WIN32)
+#define HOST_OS "windows"
+#elif defined(__APPLE__)
+#define HOST_OS "macos"
+#else
+#define HOST_OS "linux"
+#endif
+
 /* The OS the current build targets, remembered here because the compiler
-   proper now lives in another process and has to be told on its command line. */
-static const char *g_build_target_os = NULL;
+   proper now lives in another process and has to be told on its command line.
+   It starts at the host OS and is never left for oboec to guess: oboec's own
+   default comes from selfhost/hostos.oboe, which bin/oboec has baked in from
+   whichever machine generated bootstrap/oboec.c. This process was compiled
+   here, so it is the one that actually knows. */
+static const char *g_build_target_os = HOST_OS;
 
 /* The compiler proper is bin/oboec, written in Oboe (see selfhost/). It is a
    separate process rather than a library call because it is an Oboe program:
@@ -128,10 +140,9 @@ static char *transpile_to_c(const char *oboe_path, const char *c_out_path)
 			exit(1);
 		}
 		char cmd[8192];
-		snprintf(cmd, sizeof cmd, "\"%s\" \"%s\" -o \"%s\"%s%s", oboec,
-			 oboe_path, c_out_path,
-			 g_build_target_os ? " --target-os " : "",
-			 g_build_target_os ? g_build_target_os : "");
+		snprintf(cmd, sizeof cmd,
+			 "\"%s\" \"%s\" -o \"%s\" --target-os \"%s\"", oboec,
+			 oboe_path, c_out_path, g_build_target_os);
 		int rc = system(cmd);
 		/* oboec has already written its own diagnostic to our stderr;
 		   adding one here would only bury it */
@@ -375,14 +386,6 @@ static void cmd_run_project(int prog_argc, char **prog_argv)
 	free(json);
 	cmd_run_file(entry, prog_argc, prog_argv);
 }
-
-#if defined(_WIN32)
-#define HOST_OS "windows"
-#elif defined(__APPLE__)
-#define HOST_OS "macos"
-#else
-#define HOST_OS "linux"
-#endif
 
 /* Every OS a build can target. The name is what `-t` accepts and what an
    OS-specific module file is suffixed with (`foo.freebsd.oboe`); `cc` is the

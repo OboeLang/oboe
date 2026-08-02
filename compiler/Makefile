@@ -66,17 +66,32 @@ $(OBOEC): bin bootstrap/oboec.c runtime/oboe_runtime.c runtime/oboe_runtime.h
 	$(CC) $(OBOECFLAGS) bootstrap/oboec.c runtime/oboe_runtime.c \
 	      $(OBOELIBS) -o $(OBOEC)
 
-# os.script_file()/script_dir()/project_root() are resolved at compile time, so
-# the emitted C carries the absolute path of whoever generated it. A committed
-# artifact must not, or every regeneration diffs someone's home directory
-# instead of the change being reviewed -- so those three constants are blanked.
-# That is only safe because oboec never calls them; if it ever does, it will
-# fail loudly rather than silently, since the paths would then be wrong.
+# Two facts about the generating machine leak into the emitted C, and neither
+# belongs in a committed artifact:
+#
+#   - os.script_file()/script_dir()/project_root() are resolved at compile time,
+#     so the output carries the absolute path of whoever generated it. Every
+#     regeneration would diff someone's home directory instead of the change
+#     being reviewed, so those three constants are blanked. That is only safe
+#     because oboec never calls them; if it ever does it will fail loudly rather
+#     than silently, since the paths would then be wrong.
+#   - selfhost/hostos.oboe is a per-OS module, so HOST_OS is resolved when this
+#     file is generated -- freezing bin/oboec to the generator's platform on
+#     every machine that later builds it. It becomes a preprocessor conditional,
+#     which is exactly what the constant means, and what legacy/codegen.c has
+#     always done. Both substitutions are checked, because a silent miss here
+#     would ship a compiler that quietly targets the wrong OS.
 regen-bootstrap: $(BIN) $(OBOEC)
 	mkdir -p stage
 	$(OBOEC) selfhost/main.oboe -o stage/boot.c
-	sed -E 's@(ob_std_os_(script_file|script_dir|project_root)\(void\) \{ return ob_string\(")[^"]*@\1<generated>@' \
-	    stage/boot.c > bootstrap/oboec.c
+	sed -E -e 's@(ob_std_os_(script_file|script_dir|project_root)\(void\) \{ return ob_string\(")[^"]*@\1<generated>@' \
+	       -e 's@(hostos__HOST_OS = ob_interpolate\(1, ob_string\()"[a-z]+"@\1OBOEC_HOST_OS@' \
+	    stage/boot.c > stage/boot.patched.c
+	@grep -q 'ob_string(OBOEC_HOST_OS)' stage/boot.patched.c \
+	  || { echo "regen-bootstrap: HOST_OS substitution did not match"; exit 1; }
+	@grep -q '<generated>' stage/boot.patched.c \
+	  || { echo "regen-bootstrap: script-path substitution did not match"; exit 1; }
+	{ cat bootstrap/hostos.h; cat stage/boot.patched.c; } > bootstrap/oboec.c
 	@echo "bootstrap/oboec.c regenerated -- review the diff before committing"
 
 # ---- bootstrap chain ----

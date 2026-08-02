@@ -496,6 +496,46 @@ else
     echo "FAIL selfhost_lexer (could not build selfhost/main.oboe)"
     fail=$((fail+1))
 fi
+
+# ---- the bootstrap must not carry its generator's OS ---------------------
+#
+# selfhost/hostos.oboe is a per-OS module, so the OS is resolved when
+# bootstrap/oboec.c is generated. Left alone that freezes the generating
+# machine's platform into the committed file, and every bin/oboec built from it
+# anywhere targets that OS -- a macOS build silently emitting Linux module
+# choices, which is exactly what happened. regen-bootstrap rewrites the
+# constant to a preprocessor conditional; this asserts it is still doing so.
+if grep -q 'hostos__HOST_OS = ob_interpolate(1, ob_string(OBOEC_HOST_OS))' \
+        bootstrap/oboec.c; then
+    echo "PASS bootstrap_host_os_not_baked"
+    pass=$((pass+1))
+else
+    echo "FAIL bootstrap_host_os_not_baked (regenerate with a current Makefile)"
+    fail=$((fail+1))
+fi
+
+# And that the conditional is load-bearing. The host this runs on cannot see a
+# wrong default -- it agrees with the baked-in one -- so build a deliberately
+# foreign-hosted oboec and check its module resolution moved with it. ffi.oboe
+# imports _libc, which exists per-OS, so the library name in the emitted C says
+# which arm was taken.
+if ${CC:-gcc} -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -O2 -Iruntime \
+        -DOBOEC_HOST_OS='"macos"' bootstrap/oboec.c runtime/oboe_runtime.c \
+        -ldl -lm -o "$tmp/oboec_macos" >/dev/null 2>&1; then
+    got="$("$tmp/oboec_macos" --emit-c tests/ffi.oboe 2>/dev/null |
+           grep -c 'libSystem.B.dylib')"
+    if [ "$got" -gt 0 ]; then
+        echo "PASS bootstrap_host_os_follows_compiler"
+        pass=$((pass+1))
+    else
+        echo "FAIL bootstrap_host_os_follows_compiler (a macos-hosted oboec still resolved _libc.linux)"
+        fail=$((fail+1))
+    fi
+else
+    echo "FAIL bootstrap_host_os_follows_compiler (could not build bootstrap/oboec.c)"
+    fail=$((fail+1))
+fi
+
 rm -rf "$tmp"
 
 # ---- katare client ------------------------------------------------------
