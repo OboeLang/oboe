@@ -4,3 +4,6 @@ compiler/stage/
 # the release workflow's staging area (see .github/package-release.sh)
 compiler/dist-release/
 *.kdev4
+compiler/bin
+compiler/legacy/*.o
+compiler/src/*.o
