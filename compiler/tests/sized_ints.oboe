@@ -30,7 +30,7 @@ func main(array args) {
     uint16 f = 70000
     print(f)
 
-    // int is the unsized default and does not wrap on its own
+    // int is the unsized default and is never truncated at stores
     int plain = 200
     print(plain + 1)
     int64 big = 9223372036854775807

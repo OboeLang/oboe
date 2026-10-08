@@ -47,7 +47,8 @@ struct OboeObject {
 
 /* `width` and `is_unsigned` describe an OB_INT's declared integer type; they sit
    outside the union so every existing `ob_int()` call keeps meaning "plain int".
-   width 0 is the default `int` (64-bit signed storage, no wrapping on its own);
+   width 0 is the default `int` (64-bit signed storage, never truncated at
+   stores, though arithmetic still wraps at 64 bits);
    8/16/32/64 are the sized types, whose stores wrap and whose arithmetic
    promotes to the wider (and, on a tie, unsigned) operand. Floats carry
    width 32 when they were stored into a `float32`, purely so the value can be

@@ -123,7 +123,7 @@ const int x = 1  // typed constant
 
 ## Primitive types
 
-- `int` is the default integer type: 64-bit signed, and it does not wrap on its own.
+- `int` is the default integer type: 64-bit signed. Unlike the sized types, stores never truncate it, but arithmetic that overflows 64 bits wraps (two's complement).
 - Sized integers: `int8`, `int16`, `int32`, `int64` and the unsigned `uint8`, `uint16`,
   `uint32`, `uint64` (`uint` is `uint64`).
 - `float` is 64-bit; `float64` is a synonym for it, and `float32` differs only in
