@@ -17,6 +17,10 @@
 # whose contents (if non-empty) must appear in the compiler's stderr.
 cd "$(dirname "$0")/.." || exit 1
 
+# bash sorts a glob by the locale's collation, and en_US's ignores '_' on its first pass
+unset LC_ALL
+export LC_COLLATE=C
+
 OBOE=bin/oboe
 pass=0
 fail=0

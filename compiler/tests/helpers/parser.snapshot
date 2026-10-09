@@ -882,14 +882,14 @@ rc=1
 == cimportname.oboe
 cimportname.oboe:1: parse error: expected C symbol name after cimport (got '3')
 rc=1
+== class_doc_interpolates.oboe
+class_doc_interpolates.oboe:1: parse error: a class docstring cannot interpolate (got '}')
+rc=1
 == classbrace.oboe
 classbrace.oboe:1: parse error: expected '{' to start class body (got '(')
 rc=1
 == classclose.oboe
 classclose.oboe:2: parse error: expected '}' to close class (got '')
-rc=1
-== class_doc_interpolates.oboe
-class_doc_interpolates.oboe:1: parse error: a class docstring cannot interpolate (got '}')
 rc=1
 == classmember.oboe
 classmember.oboe:1: parse error: expected field or method declaration in class body (got '3')
@@ -948,11 +948,11 @@ rc=1
 == istype.oboe
 istype.oboe:1: parse error: expected type name after 'is' (got '3')
 rc=1
-== loopvar2.oboe
-loopvar2.oboe:1: parse error: expected second loop variable (got '3')
-rc=1
 == loopvar.oboe
 loopvar.oboe:1: parse error: expected loop variable (got '3')
+rc=1
+== loopvar2.oboe
+loopvar2.oboe:1: parse error: expected second loop variable (got '3')
 rc=1
 == nestinterp.oboe
 nestinterp.oboe:1: parse error: expected expression (got ']')
@@ -969,11 +969,11 @@ rc=1
 == onvar.oboe
 onvar.oboe:1: parse error: expected variable name after 'as' (got '{')
 rc=1
-== opsymchar.oboe
-opsymchar.oboe:1: parse error: expected an operator symbol after 'operator': an operator symbol is punctuation from + - * / % < > = ! & | ^ ~ ? @ # $ : . (and _ after the first character), or a single word (got ';')
-rc=1
 == opsym.oboe
 opsym.oboe:1: parse error: expected an operator symbol after 'operator': an operator symbol is punctuation from + - * / % < > = ! & | ^ ~ ? @ # $ : . (and _ after the first character), or a single word (got '(')
+rc=1
+== opsymchar.oboe
+opsymchar.oboe:1: parse error: expected an operator symbol after 'operator': an operator symbol is punctuation from + - * / % < > = ! & | ^ ~ ? @ # $ : . (and _ after the first character), or a single word (got ';')
 rc=1
 == opsymstray.oboe
 opsymstray.oboe:1: parse error: expected '(' after operator symbol '<>': an operator symbol is punctuation from + - * / % < > = ! & | ^ ~ ? @ # $ : . (and _ after the first character), or a single word (got '[')
