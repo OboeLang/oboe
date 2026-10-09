@@ -6,3 +6,4 @@ compiler/dist-release/
 *.kdev4
 compiler/bin
 compiler/src/*.o
+compiler/legacy/*.o
