@@ -5,5 +5,4 @@ compiler/stage/
 compiler/dist-release/
 *.kdev4
 compiler/bin
-compiler/legacy/*.o
 compiler/src/*.o

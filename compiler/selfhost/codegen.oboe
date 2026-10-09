@@ -11,20 +11,13 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 //
-// Code generation, ported from src/codegen.c and kept in that file's order so
-// the two stay diffable. It consumes the dict AST that parser.oboe builds and
-// writes the same C bytes src/codegen.c does -- which is the whole gate: see
-// `oboe emit-c` and the selfhost_codegen test.
+// Code generation. Originally a port of the C compiler's codegen.c, since
+// deleted, and still laid out in that file's order. It consumes the dict AST
+// that parser.oboe builds and writes the C that bin/oboe hands to gcc.
 //
-// Three shapes differ from the C, none of them visible in the output:
-//
-//   * C's out-parameters become returned dicts, since Oboe has none.
-//   * C's fixed `char buf[4096]` accumulators become arrays joined at the end.
-//     The C grew the same unbounded behaviour during this port; a ceiling
-//     there is a ceiling on expression size that truncates into invalid C.
-//   * Output is collected in OUT and written once, because ob_write flushes on
-//     every call. codegen_error flushes what has been emitted so far before it
-//     complains, which is what the C's stdio buffer does for it at exit.
+// Output is collected in OUT and written once, because ob_write flushes on
+// every call. codegen_error flushes what has been emitted so far before it
+// complains.
 import os
 import die, fail from diag
 import lex_all, prescan_ops from lexer

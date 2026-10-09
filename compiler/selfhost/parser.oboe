@@ -11,9 +11,9 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 //
-// The parser, ported from src/parser.c. Every AST node is a dict whose "kind"
-// is the C enum constant's own spelling, and whose remaining keys are the
-// names of the fields in the matching arm of the union in src/ast.h:
+// The parser. Originally a port of the C compiler's parser.c, since deleted.
+// Every AST node is a dict whose "kind" keeps the C enum constant's spelling
+// from the port, and whose remaining keys are that node's fields:
 //
 //     { "kind": "EXPR_BINARY", "line": 4, "op": "+", "l": ..., "r": ... }
 //
@@ -21,11 +21,8 @@
 // class statically, which an AST walker never does. Absent optional fields
 // are stored as an explicit null, mirroring C's calloc'd structs, so a reader
 // never has to distinguish "unset" from "set to nothing".
-//
-// The two parsers are diffed through selfhost/dump.oboe against src/dump.c --
-// see `oboe dump-ast` and the selfhost_parser test.
 import die from diag
-import lex_all from lexer
+import lex_all, is_word_op from lexer
 
 class Parser {
 	func init(this, array toks, str filename) {
@@ -306,9 +303,8 @@ func parse_unary(Parser p) {
 	return e
 }
 
-// One left-associative binary level. parser.c spells this as a function taking
-// the next-tighter level as a function pointer; Oboe has no function pointers,
-// so each level below calls its own successor and hands the loop the token
+// One left-associative binary level. Oboe has no function pointers to hand it
+// the next-tighter level with, so each level below calls its own successor and hands the loop the token
 // types it accepts, paired with the operator text to record.
 func binary_op_here(Parser p, array types, array ops) {
 	var i = 0
@@ -488,11 +484,25 @@ func parse_bitor(Parser p) {
 	return e
 }
 
-// user-declared operators (`operator ||> (...)`) bind looser than the bitwise
-// operators and tighter than `and`, left-associative
+// A declared word operator is an identifier everywhere but infix position, and
+// semicolons are optional, so it only counts when it shares a line with its left
+// operand: `a owo b` is the operator, while a line that *starts* with `owo(1)`
+// is a new statement calling something named owo.
+func at_custom_op(Parser p) {
+	if (check(p, "T_CUSTOMOP")) {
+		return true
+	}
+	if (!check(p, "T_IDENT") or !is_word_op(peek(p)["text"])) {
+		return false
+	}
+	return p.toks[p.pos - 1]["line"] == peek(p)["line"]
+}
+
+// user-declared operators (`operator ||> (...)`, `operator owo (...)`) bind
+// looser than the bitwise operators and tighter than `and`, left-associative
 func parse_custom_op(Parser p) {
 	var e = parse_bitor(p)
-	while (check(p, "T_CUSTOMOP")) {
+	while (at_custom_op(p)) {
 		var line = peek(p)["line"]
 		var op = advance(p)
 		var b = new_expr("EXPR_BINARY", line)
@@ -760,8 +770,6 @@ func parse_try(Parser p) {
 	while (match(p, "T_CATCH")) {
 		expect(p, "T_LPAREN", "expected '(' after catch")
 		var type_name = expect(p, "T_IDENT", "expected exception type")
-		// parser.c builds this in a char[256] and would smash the stack
-		// on a longer dotted name; nothing in reach comes close
 		var full_type = type_name["text"]
 		while (match(p, "T_DOT")) {
 			var more = expect(p, "T_IDENT",
@@ -932,21 +940,59 @@ func parse_func(Parser p, bool is_static, bool is_private) {
 		 "op_symbol": null, "doc": doc, "body": body, "line": line }
 }
 
+const var OP_SYMBOL_HELP = "an operator symbol is punctuation from + - * / % < > = ! & | ^ ~ ? @ # $ : . (and _ after the first character), or a single word"
+
+func is_punct_symbol(str s) {
+	if (s == "") {
+		return false
+	}
+	for (c in s) {
+		if (!"+-*/%<>=!&|^~?@#$:._".contains(c)) {
+			return false
+		}
+	}
+	return true
+}
+
 // `operator <sym> (params) { body }` -- the T_OPERATOR keyword has already been
-// consumed. The symbol is either a T_CUSTOMOP token or any builtin operator
-// token (for class overloads like `operator + (this, Vector2 other)`).
-func parse_operator_decl(Parser p) {
-	var line = peek(p)["line"]
-	var sym = advance(p)
-	if (sym["text"] == "" or sym["type"] == "T_LPAREN") {
-		fail(p, "expected an operator symbol after 'operator'")
+// consumed. The symbol is a T_CUSTOMOP token, a word, or -- in a class only --
+// a builtin operator token, for overloads like `operator + (this, Vector2 o)`.
+//
+// The lexer only makes a T_CUSTOMOP out of what its prescan registered, so a
+// symbol with a character no operator may contain arrives here in pieces:
+// `operator ;;` is a `;`, and a stray character after a valid prefix is
+// whatever follows it. Both are caught before the parameter list, where the
+// error can still say what an operator symbol is allowed to be.
+func parse_operator_decl(Parser p, bool top_level) {
+	var sym = peek(p)
+	var line = sym["line"]
+	var text = sym["text"]
+	if (sym["type"] != "T_IDENT" and !is_punct_symbol(text)) {
+		fail(p, "expected an operator symbol after 'operator': " +
+			OP_SYMBOL_HELP)
+	}
+	advance(p)
+	if (!check(p, "T_LPAREN")) {
+		fail(p, "expected '(' after operator symbol '" + text + "': " +
+			OP_SYMBOL_HELP)
+	}
+	// a builtin operator's behaviour is fixed for the builtin types; what can
+	// be added is its meaning for a class, which is where that lives. Left
+	// alone, a top-level `operator +` compiled to a function nothing called.
+	var custom = sym["type"] == "T_CUSTOMOP" or
+		     (sym["type"] == "T_IDENT" and is_word_op(text))
+	if (top_level and !custom) {
+		die(p.filename + ":" + str(line) + ": parse error: '" + text +
+		    "' is a built-in operator and cannot be redefined; " +
+		    "overload it inside a class instead, as `operator " + text +
+		    " (this, other)`")
 	}
 	var params = parse_params(p)
 	var body = parse_block(p)
 	var doc = take_doc(body)
 	return { "name": "operator", "return_type": null, "params": params,
 		 "is_static": false, "is_private": false,
-		 "op_symbol": sym["text"], "doc": doc, "body": body,
+		 "op_symbol": text, "doc": doc, "body": body,
 		 "line": line }
 }
 
@@ -993,7 +1039,7 @@ func parse_class(Parser p) {
 			methods.push(m)
 		} else if (check(p, "T_OPERATOR")) {
 			advance(p)
-			methods.push(parse_operator_decl(p))
+			methods.push(parse_operator_decl(p, false))
 		} else if (check(p, "T_CONST") or check(p, "T_LET") or
 			   (check(p, "T_IDENT") and
 			    peek_at(p, 1)["type"] == "T_IDENT")) {
@@ -1083,7 +1129,7 @@ func parse_program(array tokens, str filename) {
 			match(p, "T_SEMI")
 		} else if (match(p, "T_OPERATOR")) {
 			d["kind"] = "DECL_OPERATOR"
-			d["func"] = parse_operator_decl(p)
+			d["func"] = parse_operator_decl(p, true)
 		} else if (match(p, "T_EVENT")) {
 			// `event MyEvent = event(payload params)`
 			var name = expect(p, "T_IDENT", "expected event name")

@@ -18,7 +18,7 @@
  * silently targets Linux, which is what this is fixing.
  *
  * This is only the default for a bare `oboec`; bin/oboe always passes
- * --target-os. The arms match legacy/codegen.c's, BSDs included: they fall
+ * --target-os. The arms match selfhost/hostos*.oboe, BSDs included: they fall
  * through to linux there too.
  *
  * Overridable with -D so the suite can build a deliberately foreign-hosted

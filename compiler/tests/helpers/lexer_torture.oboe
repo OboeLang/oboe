@@ -11,18 +11,22 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 //
-// Lexer corpus for the selfhost_lexer gate -- never run, only tokenized, so it
+// Lexer corpus for the snapshot_lexer test -- never run, only tokenized, so it
 // does not have to be a valid program. It collects the corners the real tests
 // happen not to reach: custom operators against the builtins they shadow, every
 // string escape, nested interpolation, the numeral/'.' ambiguity, exotic
 // whitespace, raw control bytes and the full punctuation set.
 
-// a declaration inside a comment still registers: operator <~>
+// a declaration inside a comment registers nothing, so <~> below stays three
+// tokens: operator <~>
+var quoted = "neither does one in a string: operator ~~>"
 operator ||> (int a, int b) { return a }
+operator ^_^ (int a, int b) { return a }
 operator ||>= (int a, int b) { return a }
 operator + (int a, int b) { return a }
 operator_not_a_decl = 1
-var shadowing = 1 ||>= 2 ||> 3 || 4 | 5 <~> 6
+var shadowing = 1 ||>= 2 ||> 3 || 4 | 5 <~> 6 ~~> 7
+var faces = 1 ^_^ 2 ^ _3 ^_4
 
 var escapes = "a\nb\tc\rd\\e\"f\$g\qh\0i"
 var interp = "${a} ${ {"k": nested("}")} } tail ${b}"

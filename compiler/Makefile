@@ -15,24 +15,16 @@ CC = gcc
 # _POSIX_C_SOURCE alone hides the BSD extensions we use (mkstemps): glibc still
 # exposes them under _DEFAULT_SOURCE, but darwin needs _DARWIN_C_SOURCE to do
 # the same. both are ignored by the libc they don't belong to.
-CFLAGS = -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -Wall -Wextra -Wno-unused-parameter -g -Iruntime -Isrc -Ilegacy
+CFLAGS = -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -Wall -Wextra -Wno-unused-parameter -g -Iruntime -Isrc
 
 # src/ is the live C: the CLI, the package manager, the katare client and the
 # wire-format code vendored from reedbed.
 SRC = src/projectjson.c src/sha256.c src/izim.c src/record.c src/kabuk.c \
       src/katare.c src/projectedit.c src/pkg.c src/main.c
-# legacy/ is the superseded C compiler. It is still linked in because main.c
-# reaches it two ways -- the deprecated OBOE_USE_C_FRONTEND path, and the
-# dump-tokens/dump-ast/emit-c commands the selfhost gates diff against -- but
-# nothing else should grow a dependency on it. See legacy/README.md.
-LEGACY = legacy/lexer.c legacy/parser.c legacy/codegen.c legacy/dump.c \
-         legacy/numfmt.c
-OBJ = $(SRC:.c=.o) $(LEGACY:.c=.o)
+OBJ = $(SRC:.c=.o)
 # every object depends on every header: the set is small, and without this a
-# change to ast.h or the runtime header silently leaves stale objects linked in
-HDR = legacy/ast.h legacy/lexer.h legacy/parser.h legacy/codegen.h \
-      legacy/dump.h legacy/numfmt.h \
-      src/projectjson.h src/sha256.h src/izim.h src/record.h \
+# change to a shared header leaves stale objects linked in
+HDR = src/projectjson.h src/sha256.h src/izim.h src/record.h \
       src/kabuk.h src/katare.h src/projectedit.h src/pkg.h \
       src/version.h runtime/oboe_runtime.h
 
@@ -78,9 +70,8 @@ $(OBOEC): bin bootstrap/oboec.c runtime/oboe_runtime.c runtime/oboe_runtime.h
 #   - selfhost/hostos.oboe is a per-OS module, so HOST_OS is resolved when this
 #     file is generated -- freezing bin/oboec to the generator's platform on
 #     every machine that later builds it. It becomes a preprocessor conditional,
-#     which is exactly what the constant means, and what legacy/codegen.c has
-#     always done. Both substitutions are checked, because a silent miss here
-#     would ship a compiler that quietly targets the wrong OS.
+#     which is exactly what the constant means. We check substitutions so a miss
+#     doesn't create a compiler targeting the wrong OS
 regen-bootstrap: $(BIN) $(OBOEC)
 	mkdir -p stage
 	$(OBOEC) selfhost/main.oboe -o stage/boot.c

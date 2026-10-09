@@ -1,5 +1,5 @@
 // Corners of the grammar that the golden tests do not otherwise reach, kept
-// for the selfhost_parser gate to diff the two parsers over. Never run: it is
+// for the snapshot_parser test to pin the tree of. Never run: it is
 // under tests/helpers/, which the suite does not glob, and several lines here
 // are deliberately strange rather than useful.
 //

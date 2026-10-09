@@ -11,9 +11,9 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 //
-// oboec -- the Oboe-written compiler front end. It is being brought up one
-// stage at a time against the C compiler in src/, each stage gated on emitting
-// bytes identical to its C counterpart.
+// oboec -- the compiler proper. bin/oboe execs it for every run, build and
+// install; --dump-tokens and --dump-ast are for debugging it, and are what the
+// suite's front-end snapshots are taken with.
 import os
 import lex_all from lexer
 import parse_program from parser
@@ -40,7 +40,7 @@ func read_source(str path) {
 }
 
 func main(array args) {
-	// compiling to a file is the job; the dump modes are development gates
+	// compiling to a file is the job; the dump modes are for debugging
 	var mode = "c"
 	var input = null
 	var output = null

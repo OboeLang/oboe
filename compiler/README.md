@@ -7,7 +7,6 @@ selfhost/   the compiler, written in Oboe        -> bin/oboec
 src/        the CLI and package manager, in C    -> bin/oboe
 runtime/    oboe_runtime.{c,h}, embedded into every compiled program
 bootstrap/  generated: the C that bin/oboec is built from
-legacy/     the superseded C compiler -- NOT how anything is compiled now
 tests/      the suite (see below), driven by tests/run_tests.sh
 ```
 
@@ -19,13 +18,15 @@ make
 
 Produces `bin/oboe` (the CLI, in C) and `bin/oboec` (the compiler proper, written in Oboe). Run the test suite with `make test`: each `tests/*.oboe` is run and diffed against its `.expected` output; `fail_*` tests assert that compilation/execution fails with the message in their `.expect_fail` file, and `_*.oboe` files are helper modules imported by other tests, not run directly.
 
+The suite does not test `bin/oboec` itself. Instead the suite first uses `bin/oboec` to build a compiler from the current `selfhost/` sources into `stage/suite/`, and runs everything against that.
+
 ## Self-hosting
 
 `selfhost/` is the compiler proper, written in Oboe, transpiling to C and handing the C to gcc. Only the compiler proper moved; the CLI, the package manager, the katare client and the vendored wire-format code are still in C for now, but I'd eventually like to move them to Oboe.
 
 Notes about miscellaneous/old/irrelevant crap:
 
-- `selfhost/{lexer,parser,codegen,dump,docs,diag,hostos,main}.oboe`: `oboec`. `bin/oboe` execs it for every `run`, `build` and `install`. Their C counterparts moved to `legacy/` and are no longer a front-end; they exist as the reference the gates below diff against, which will stop being useful when Oboe drifts enough
+- `selfhost/{lexer,parser,codegen,dump,docs,diag,hostos,main}.oboe`: `oboec`. `bin/oboe` execs it for every `run`, `build`, `install` and `doc`. 
 - `selfhost/mini/` is a compiler for a small Oboe-like subset, written in Oboe. It was the spike that proved the language could host a compiler at all, and it stays as a cheap regression test engine for the features that made that possible (break/continue, short-circuit `and`/`or`, `ord`, dict-shaped AST nodes, `eprint` + `os.exit`).
 
 ### Bootstrap
@@ -41,20 +42,17 @@ Both substitutions are verified by `regen-bootstrap` and pinned by the suite (`b
 
 `make bootstrap-check` is the proof that the compiler reproduces itself: stage1 is the committed bootstrap, stage2 is what it emits from today's `selfhost/` sources, stage3 is what a compiler built from stage2 emits from the same sources, and stage2 must equal stage3. stage1 may legitimately differ from both, having been generated before whatever change is under test.
 
-### Gates
+### Front-end snapshots
 
-I'm testing this based on the selfhoster emitting bytes identical to its C counterpart, which is what the hidden `oboe dump-tokens <file>`, `oboe dump-ast <file>` and `oboe emit-c <file>` commands are for. The two dump serializers live in `legacy/dump.c`, next to the definition of the format their twins in `selfhost/dump.oboe` have to reproduce; none of the three is in the usage line, since they are development tools rather than part of the CLI.
+`oboec --dump-tokens <file>` and `oboec --dump-ast <file>` print a file's tokens and syntax tree, for debugging the compiler. The suite also uses them to check stuff the golden tests don't:
 
-- `selfhost_lexer`: `oboec --dump-tokens` must match `oboe dump-tokens` byte for byte, exit status included, over every Oboe file in the tree.
-- `selfhost_parser`: the same for `--dump-ast`, over that corpus plus every malformed input in `tests/helpers/parse_errors.txt`, so the diagnostics are compared as closely as the trees are. The dump carries each node's kind, line and every field of its arm in `ast.h`.
-- `selfhost_codegen`: the same for `--emit-c`, over that corpus plus every input in `tests/helpers/codegen_errors.txt`, plus a small project tree the suite builds in `mktemp -d` (the project's `.oboe/libraries` search root and `os.project_root()` cannot be committed fixtures, because `.gitignore` excludes `.oboe/`). This one compares stdout and stderr separately: a codegen error can fire partway through emission, and the two compilers reach a merged stream in a different order, since C's stdout is block-buffered until exit while Oboe's `eprint` flushes stdout first. Both must still produce the same C, the same diagnostic and the same status.
-- `selfhost_lexer_coverage` / `selfhost_parser_coverage` / `selfhost_codegen_coverage`: agreement over constructs the corpus never builds proves nothing, so these assert that it produces every `TokenType`, every `ExprKind`/`StmtKind`/`DeclKind`/`ForIterKind`, and every runtime entry point named in a string literal in `codegen.c` (every operator fallback, primitive method, coercion and type check). All three derive the expected set from the source, so adding one that nothing exercises fails the suite.
-
-`docs.oboe` has no C counterpart.
+- `snapshot_lexer`: the tokens of `tests/helpers/lexer_torture*.oboe` and of a deliberately bad character.
+- `snapshot_parser`: the tree of `tests/helpers/parser_torture.oboe`, plus the diagnostic for every malformed input in `tests/helpers/parse_errors.txt`, which between them reach every reachable parse error.
+- `snapshot_codegen_errors`: the diagnostic for every input in `tests/helpers/codegen_errors.txt`, which reach every codegen error the `fail_*` tests don't.
 
 `tests/helpers/parser_torture.oboe` tests the grammar corners. Much of it is deliberately strange, in particular a block of expressions split so that each operator sits on its own line, which is the only way a wrong line-capture point in the parser becomes visible. `tests/codegen_corners.oboe` does the same for emission orderings that only differ when a program is shaped a particular way. For example, a class declared before its parent, an exact-count constructor overload behind one whose defaults also fit, a string that looks like an import.
 
-`oboec` gets the OS it targets by default from `selfhost/hostos.oboe`, which is a per-OS module file rather than a constant: that is the mechanism the language already has for this, and `hostos.oboe`/`hostos.macos.oboe`/`hostos.windows.oboe` reproduce exactly the three-way `#if` in `codegen.c`.
+`oboec` gets the OS it targets by default from `selfhost/hostos.oboe`, which is a per-OS module file rather than a constant: that is the mechanism the language already has for this, and `hostos.oboe`/`hostos.macos.oboe`/`hostos.windows.oboe` are the three arms of the `#if` in `bootstrap/hostos.h`.
 
 ## Usage
 
@@ -106,7 +104,7 @@ Classes compile to plain C structs, with a class's parent embedded as the struct
 
 Compilation runs over a unit list: the main file plus every transitively imported module. All sources are loaded (via a lightweight textual scan for `import` lines) and pre-scanned for `operator <sym>` declarations before anything is tokenized, then parsed, then the real import graph is resolved from the ASTs and code is generated in one pass. Import aliases and `from` bindings are scoped to the importing file; bare function calls resolve within their own unit.
 
-Operator overloading is dynamic: each binary operator call first checks whether the left-hand object's class (or an ancestor) registered a handler, falling back to the builtin behavior otherwise. Class overloads use the spec's `operator + (this, Vector2 other) { ... }` syntax and register at startup. Top-level `operator ||> (int a, int b) { ... }` declarations introduce new operator tokens; because symbols are registered before lexing, an operator declared in any file (including an imported module) is usable everywhere. Custom operators bind tighter than `and`/`or` and looser than comparisons, left-associative.
+Operator overloading is dynamic: each binary operator call first checks whether the left-hand object's class (or an ancestor) registered a handler, falling back to the builtin behavior otherwise. Class overloads use the spec's `operator + (this, Vector2 other) { ... }` syntax and register at startup. Top-level `operator ||> (int a, int b) { ... }` declarations introduce new operator tokens; because symbols are registered before lexing (by a text pre-scan that skips comments and string literals), an operator declared in any file (including an imported module) is usable everywhere. A symbol is built from `+-*/%<>=!&|^~?@#$:.`, with `_` also allowed after the first character (`^_^`). A word works too (`operator foo (a, b)`): like the builtin `x`, it is still lexed as an identifier and only read as an operator in infix position, and only when it is on the same line as its left operand, since semicolons are optional and a line starting with `foo(...)` has to stay a call. A top-level declaration of a *builtin* operator is an error, because builtin operators are only overloaded per class. Custom operators bind tighter than `and`/`or` and looser than the bitwise operators, left-associative.
 
 The events system compiles each `event E = event(...)` to a struct (payload fields become members) plus an `E__fire` function that constructs the payload object and calls every `on E` handler in declaration order -- dispatch is fully static, no runtime handler list. `on KeyboardInterruptEvent` installs a SIGINT handler with the spec's semantics: the first ^C runs the handlers and exits; a second ^C while they run exits immediately.
 

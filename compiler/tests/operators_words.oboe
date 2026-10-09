@@ -1,0 +1,64 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// © 2026 Sushii64
+// © 2026 robinpie
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License version 2 as
+// published by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+// custom operator symbols with underscores, and word operators
+
+// operator nope (a, b) -- a declaration in a comment registers nothing
+operator ^_^ (str a, str b) {
+    return a + " ^_^ " + b
+}
+
+operator owo (str a, str b) {
+    return a + " owo " + b
+}
+
+operator times (int a, int b) {
+    return a * b
+}
+
+class Money {
+    func init(this, int cents) {
+        this.cents = cents
+    }
+
+    operator plus (this, Money other) {
+        return Money(this.cents + other.cents)
+    }
+}
+
+func nope(a) {
+    return "nope is still just a function"
+}
+
+func main(array args) {
+    print("Hello" ^_^ "Oboe")
+    // the builtin xor next to it is untouched
+    print(6 ^ 3)
+
+    print("Hello" owo "Oboe")
+    // left-associative, and looser than + so the sum is one operand
+    print("a" owo "b" + "c" owo "d")
+    print(2 + 1 times 4)
+
+    // a word operator is still an ordinary name everywhere else
+    var owo = "a name"
+    print(owo)
+    print("left" owo owo)
+
+    // on a line of its own it starts a statement rather than continuing one
+    var s = "first"
+    nope(s)
+    print(nope(1))
+
+    var m = Money(150) plus Money(275)
+    print(m.cents)
+}

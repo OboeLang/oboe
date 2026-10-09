@@ -1,0 +1,1037 @@
+== parser_torture.oboe
+program
+  DECL_IMPORT module="m" alias=-
+    members
+  DECL_IMPORT module="m" alias="alias"
+    members
+  DECL_IMPORT module="m" alias=-
+    members
+      member name="one"
+  DECL_IMPORT module="m" alias=-
+    members
+      member name="one"
+      member name="two"
+      member name="three"
+  DECL_CIMPORT name="strlen" lib="libc.so.6" line=14
+  DECL_OPERATOR name="operator" line=17 ret=- static=0 private=0 op="||>" doc=-
+    params
+      param name="a" type="int"
+      param name="b" type="int"
+    body
+      STMT_RETURN line=17
+        value
+          EXPR_BINARY line=17 op="+"
+            EXPR_BINARY line=17 op="*"
+              EXPR_IDENT line=17 name="a"
+              EXPR_INT line=17 value=10
+            EXPR_IDENT line=17 name="b"
+  DECL_OPERATOR name="operator" line=18 ret=- static=0 private=0 op="<=>" doc=-
+    params
+      param name="a" type=-
+      param name="b" type=-
+    body
+      STMT_RETURN line=18
+        value
+          EXPR_INT line=18 value=0
+  DECL_EVENT name="Empty" line=20
+    params
+  DECL_EVENT name="Loaded" line=21
+    params
+      param name="name" type="str"
+      param name="size" type="int"
+  DECL_ON module=- event="Empty" var=- line=23
+    body
+  DECL_ON module=- event="Loaded" var="e" line=24
+    body
+      STMT_EXPR line=24
+        expr
+          EXPR_CALL line=24
+            callee
+              EXPR_IDENT line=24 name="print"
+            args
+              arg name=-
+                EXPR_FIELD line=24 name="name"
+                  EXPR_IDENT line=24 name="e"
+  DECL_CLASS name="Bare" parent=- doc=- line=26
+    fields
+    methods
+  DECL_CLASS name="Full" parent="Bare" doc=- line=28
+    fields
+      field name="count" type="int" static=1 private=0 const=0
+        init
+          EXPR_INT line=29 value=0
+      field name="tag" type=- static=0 private=1 const=1
+        init
+          EXPR_STRING line=30
+            part lit text="t"
+      field name="named" type="str" static=0 private=0 const=1
+        init
+          EXPR_STRING line=31
+            part lit text="n"
+      field name="untyped" type=- static=0 private=0 const=0
+      field name="typed" type="int" static=0 private=0 const=0
+      field name="everything" type=- static=1 private=1 const=1
+        init
+          EXPR_INT line=34 value=1
+    methods
+      method name="init" line=36 ret=- static=0 private=0 op=- doc=-
+        params
+          param name="this" type=-
+        body
+      method name="init" line=37 ret=- static=0 private=0 op=- doc=-
+        params
+          param name="this" type=-
+          param name="a" type="int"
+        body
+      method name="helper" line=38 ret="int" static=1 private=1 op=- doc=-
+        params
+          param name="a" type="int"
+            default
+              EXPR_INT line=38 value=1
+          param name="b" type="int"
+            default
+              EXPR_INT line=38 value=2
+        body
+          STMT_RETURN line=38
+            value
+              EXPR_IDENT line=38 name="a"
+      method name="odd" line=41 ret=- static=0 private=0 op=- doc=-
+        params
+          param name="this" type=-
+          param name="a" type="int"
+            default
+              EXPR_INT line=41 value=1
+          param name="this" type=-
+        body
+          STMT_RETURN line=41
+            value
+              EXPR_IDENT line=41 name="a"
+      method name="fields" line=42 ret=- static=0 private=0 op=- doc=-
+        params
+          param name="this" type=-
+        body
+          STMT_EXPR line=44
+            expr
+              EXPR_ASSIGN line=44
+                EXPR_FIELD line=44 name="a"
+                  EXPR_IDENT line=44 name="this"
+                EXPR_INT line=44 value=1
+          STMT_EXPR line=45
+            expr
+              EXPR_ASSIGN line=45
+                EXPR_FIELD line=45 name="b"
+                  EXPR_IDENT line=45 name="this"
+                EXPR_INT line=45 value=2
+      method name="operator" line=47 ret=- static=0 private=0 op="+" doc=-
+        params
+          param name="this" type=-
+          param name="o" type="Full"
+        body
+          STMT_RETURN line=47
+            value
+              EXPR_IDENT line=47 name="o"
+      method name="operator" line=48 ret=- static=0 private=0 op="-" doc=-
+        params
+          param name="this" type=-
+          param name="o" type="Full"
+        body
+          STMT_RETURN line=48
+            value
+              EXPR_IDENT line=48 name="o"
+  DECL_STMT
+    STMT_LET line=55 name="top" type=- const=0
+      init
+        EXPR_INT line=55 value=1
+  DECL_STMT
+    STMT_LET line=56 name="top2" type=- const=0
+      init
+        EXPR_INT line=56 value=2
+  DECL_FUNC name="typed_free" line=58 ret="int" static=0 private=0 op=- doc=-
+    params
+    body
+      STMT_RETURN line=58
+        value
+          EXPR_INT line=58 value=0
+  DECL_FUNC name="precedence" line=60 ret=- static=0 private=0 op=- doc=-
+    params
+    body
+      STMT_LET line=62 name="a" type=- const=0
+        init
+          EXPR_BINARY line=62 op="-"
+            EXPR_BINARY line=62 op="+"
+              EXPR_INT line=62 value=1
+              EXPR_BINARY line=62 op="%"
+                EXPR_BINARY line=62 op="*"
+                  EXPR_INT line=62 value=2
+                  EXPR_INT line=62 value=3
+                EXPR_INT line=62 value=4
+            EXPR_BINARY line=62 op="/"
+              EXPR_INT line=62 value=5
+              EXPR_INT line=62 value=6
+      STMT_LET line=63 name="b" type=- const=0
+        init
+          EXPR_BINARY line=63 op="x"
+            EXPR_STRING line=63
+              part lit text="ab"
+            EXPR_INT line=63 value=3
+      STMT_LET line=64 name="c" type=- const=0
+        init
+          EXPR_BINARY line=64 op=">>"
+            EXPR_BINARY line=64 op="<<"
+              EXPR_INT line=64 value=1
+              EXPR_INT line=64 value=2
+            EXPR_INT line=64 value=3
+      STMT_LET line=65 name="d" type=- const=0
+        init
+          EXPR_BINARY line=65 op=">="
+            EXPR_BINARY line=65 op=">"
+              EXPR_BINARY line=65 op="<="
+                EXPR_BINARY line=65 op="<"
+                  EXPR_INT line=65 value=1
+                  EXPR_INT line=65 value=2
+                EXPR_INT line=65 value=3
+              EXPR_INT line=65 value=4
+            EXPR_INT line=65 value=5
+      STMT_LET line=66 name="e" type=- const=0
+        init
+          EXPR_BINARY line=66 op="!="
+            EXPR_BINARY line=66 op="=="
+              EXPR_INT line=66 value=1
+              EXPR_INT line=66 value=2
+            EXPR_INT line=66 value=3
+      STMT_LET line=67 name="f" type=- const=0
+        init
+          EXPR_BINARY line=67 op="|"
+            EXPR_BINARY line=67 op="^"
+              EXPR_BINARY line=67 op="&"
+                EXPR_INT line=67 value=1
+                EXPR_INT line=67 value=2
+              EXPR_INT line=67 value=3
+            EXPR_INT line=67 value=4
+      STMT_LET line=68 name="g" type=- const=0
+        init
+          EXPR_BINARY line=68 op="<=>"
+            EXPR_BINARY line=68 op="||>"
+              EXPR_INT line=68 value=1
+              EXPR_INT line=68 value=2
+            EXPR_INT line=68 value=3
+      STMT_LET line=69 name="h" type=- const=0
+        init
+          EXPR_BINARY line=69 op="||"
+            EXPR_BINARY line=69 op="&&"
+              EXPR_BOOL line=69 value=1
+              EXPR_BOOL line=69 value=0
+            EXPR_BOOL line=69 value=1
+      STMT_LET line=70 name="i" type=- const=0
+        init
+          EXPR_BINARY line=70 op="||"
+            EXPR_BINARY line=70 op="&&"
+              EXPR_BOOL line=70 value=1
+              EXPR_BOOL line=70 value=0
+            EXPR_BOOL line=70 value=1
+      STMT_LET line=71 name="j" type=- const=0
+        init
+          EXPR_BINARY line=71 op="??"
+            EXPR_NULL line=71
+            EXPR_INT line=71 value=0
+      STMT_LET line=72 name="k" type=- const=0
+        init
+          EXPR_TERNARY line=72
+            EXPR_BOOL line=72 value=1
+            EXPR_INT line=72 value=1
+            EXPR_TERNARY line=72
+              EXPR_BOOL line=72 value=0
+              EXPR_INT line=72 value=2
+              EXPR_INT line=72 value=3
+      STMT_LET line=73 name="l" type=- const=0
+        init
+          EXPR_UNARY line=73 op="~"
+            EXPR_INT line=73 value=1
+      STMT_LET line=74 name="m" type=- const=0
+        init
+          EXPR_UNARY line=74 op="!"
+            EXPR_BOOL line=74 value=1
+      STMT_LET line=75 name="n" type=- const=0
+        init
+          EXPR_UNARY line=75 op="-"
+            EXPR_INT line=75 value=1
+      STMT_LET line=76 name="o" type=- const=0
+        init
+          EXPR_UNARY line=76 op="-"
+            EXPR_UNARY line=76 op="-"
+              EXPR_INT line=76 value=1
+      STMT_LET line=77 name="p" type=- const=0
+        init
+          EXPR_UNARY line=77 op="!"
+            EXPR_UNARY line=77 op="!"
+              EXPR_BOOL line=77 value=1
+      STMT_LET line=78 name="q" type=- const=0
+        init
+          EXPR_IS line=78 type="int"
+            EXPR_INT line=78 value=1
+      STMT_LET line=79 name="r" type=- const=0
+        init
+          EXPR_IS line=79 type="int"
+            EXPR_BINARY line=79 op="+"
+              EXPR_INT line=79 value=1
+              EXPR_INT line=79 value=2
+      STMT_LET line=81 name="s" type=- const=0
+        init
+          EXPR_INT line=81 value=0
+      STMT_LET line=82 name="t" type=- const=0
+        init
+          EXPR_INT line=82 value=0
+      STMT_EXPR line=83
+        expr
+          EXPR_ASSIGN line=83
+            EXPR_IDENT line=83 name="s"
+            EXPR_ASSIGN line=83
+              EXPR_IDENT line=83 name="t"
+              EXPR_INT line=83 value=9
+  DECL_FUNC name="postfix_chains" line=86 ret=- static=0 private=0 op=- doc=-
+    params
+      param name="d" type=-
+    body
+      STMT_EXPR line=87
+        expr
+          EXPR_FIELD line=87 name="c"
+            EXPR_FIELD line=87 name="b"
+              EXPR_FIELD line=87 name="a"
+                EXPR_IDENT line=87 name="d"
+      STMT_EXPR line=88
+        expr
+          EXPR_SAFE_FIELD line=88 name="b"
+            EXPR_SAFE_FIELD line=88 name="a"
+              EXPR_IDENT line=88 name="d"
+      STMT_EXPR line=89
+        expr
+          EXPR_FIELD line=89 name="c"
+            EXPR_SAFE_FIELD line=89 name="b"
+              EXPR_FIELD line=89 name="a"
+                EXPR_IDENT line=89 name="d"
+      STMT_EXPR line=90
+        expr
+          EXPR_INDEX line=90
+            EXPR_INDEX line=90
+              EXPR_INDEX line=90
+                EXPR_IDENT line=90 name="d"
+                EXPR_INT line=90 value=0
+              EXPR_INT line=90 value=1
+            EXPR_INT line=90 value=2
+      STMT_EXPR line=91
+        expr
+          EXPR_CALL line=91
+            callee
+              EXPR_CALL line=91
+                callee
+                  EXPR_FIELD line=91 name="f"
+                    EXPR_IDENT line=91 name="d"
+                args
+            args
+      STMT_EXPR line=92
+        expr
+          EXPR_CALL line=92
+            callee
+              EXPR_FIELD line=92 name="g"
+                EXPR_INDEX line=92
+                  EXPR_CALL line=92
+                    callee
+                      EXPR_FIELD line=92 name="f"
+                        EXPR_IDENT line=92 name="d"
+                    args
+                  EXPR_INT line=92 value=0
+            args
+      STMT_EXPR line=93
+        expr
+          EXPR_INDEX line=93
+            EXPR_SAFE_FIELD line=93 name="g"
+              EXPR_CALL line=93
+                callee
+                  EXPR_FIELD line=93 name="f"
+                    EXPR_INDEX line=93
+                      EXPR_IDENT line=93 name="d"
+                      EXPR_INT line=93 value=0
+                args
+            EXPR_INT line=93 value=1
+  DECL_FUNC name="calls" line=96 ret=- static=0 private=0 op=- doc=-
+    params
+    body
+      STMT_EXPR line=97
+        expr
+          EXPR_CALL line=97
+            callee
+              EXPR_IDENT line=97 name="f"
+            args
+      STMT_EXPR line=98
+        expr
+          EXPR_CALL line=98
+            callee
+              EXPR_IDENT line=98 name="f"
+            args
+              arg name=-
+                EXPR_INT line=98 value=1
+      STMT_EXPR line=99
+        expr
+          EXPR_CALL line=99
+            callee
+              EXPR_IDENT line=99 name="f"
+            args
+              arg name=-
+                EXPR_INT line=99 value=1
+              arg name=-
+                EXPR_INT line=99 value=2
+      STMT_EXPR line=100
+        expr
+          EXPR_CALL line=100
+            callee
+              EXPR_IDENT line=100 name="f"
+            args
+              arg name="a"
+                EXPR_INT line=100 value=1
+      STMT_EXPR line=101
+        expr
+          EXPR_CALL line=101
+            callee
+              EXPR_IDENT line=101 name="f"
+            args
+              arg name=-
+                EXPR_INT line=101 value=1
+              arg name="b"
+                EXPR_INT line=101 value=2
+      STMT_EXPR line=102
+        expr
+          EXPR_CALL line=102
+            callee
+              EXPR_IDENT line=102 name="f"
+            args
+              arg name="a"
+                EXPR_INT line=102 value=1
+              arg name="b"
+                EXPR_INT line=102 value=2
+      STMT_LET line=105 name="arr" type=- const=0
+        init
+          EXPR_ARRAY line=105
+            EXPR_ASSIGN line=105
+              EXPR_IDENT line=105 name="a"
+              EXPR_INT line=105 value=1
+      STMT_LET line=106 name="nested" type=- const=0
+        init
+          EXPR_ARRAY line=106
+            EXPR_ARRAY line=106
+              EXPR_INT line=106 value=1
+              EXPR_ARRAY line=106
+                EXPR_INT line=106 value=2
+                EXPR_ARRAY line=106
+                  EXPR_INT line=106 value=3
+            EXPR_ARRAY line=106
+      STMT_LET line=107 name="dict" type=- const=0
+        init
+          EXPR_DICT line=107
+            entry
+              EXPR_STRING line=107
+                part lit text="k"
+              EXPR_DICT line=107
+                entry
+                  EXPR_STRING line=107
+                    part lit text="k2"
+                  EXPR_ARRAY line=107
+                    EXPR_INT line=107 value=1
+            entry
+              EXPR_STRING line=107
+                part lit text="e"
+              EXPR_DICT line=107
+      STMT_LET line=108 name="empty_arr" type=- const=0
+        init
+          EXPR_ARRAY line=108
+      STMT_LET line=109 name="empty_dict" type=- const=0
+        init
+          EXPR_DICT line=109
+  DECL_FUNC name="strings" line=112 ret=- static=0 private=0 op=- doc=-
+    params
+    body
+      STMT_LET line=113 name="plain" type=- const=0
+        init
+          EXPR_STRING line=113
+            part lit text="no interpolation"
+      STMT_LET line=114 name="one" type=- const=0
+        init
+          EXPR_STRING line=114
+            part lit text="a"
+            part expr
+              EXPR_INT line=1 value=1
+            part lit text="b"
+      STMT_LET line=115 name="edges" type=- const=0
+        init
+          EXPR_STRING line=115
+            part expr
+              EXPR_INT line=1 value=1
+            part expr
+              EXPR_INT line=1 value=2
+      STMT_LET line=116 name="only" type=- const=0
+        init
+          EXPR_STRING line=116
+            part expr
+              EXPR_IDENT line=1 name="x"
+      STMT_LET line=117 name="braces" type=- const=0
+        init
+          EXPR_STRING line=117
+            part expr
+              EXPR_INDEX line=1
+                EXPR_DICT line=1
+                  entry
+                    EXPR_STRING line=1
+                      part lit text="a"
+                    EXPR_INT line=1 value=1
+                EXPR_STRING line=1
+                  part lit text="a"
+      STMT_LET line=118 name="nested" type=- const=0
+        init
+          EXPR_STRING line=118
+            part lit text="outer "
+            part expr
+              EXPR_STRING line=1
+                part lit text="inner "
+                part expr
+                  EXPR_BINARY line=1 op="+"
+                    EXPR_INT line=1 value=1
+                    EXPR_INT line=1 value=1
+            part lit text=" end"
+      STMT_LET line=121 name="escapes" type=- const=0
+        init
+          EXPR_STRING line=121
+            part lit text="\n\t\r\"\\ $ q"
+      STMT_LET line=122 name="dollar_no_brace" type=- const=0
+        init
+          EXPR_STRING line=122
+            part lit text="100$ or $x"
+      STMT_LET line=123 name="empty" type=- const=0
+        init
+          EXPR_STRING line=123
+  DECL_FUNC name="numbers" line=126 ret=- static=0 private=0 op=- doc=-
+    params
+    body
+      STMT_LET line=127 name="i" type=- const=0
+        init
+          EXPR_INT line=127 value=0
+      STMT_LET line=128 name="big" type=- const=0
+        init
+          EXPR_INT line=128 value=9223372036854775807
+      STMT_LET line=129 name="f1" type=- const=0
+        init
+          EXPR_FLOAT line=129 value=1.0
+      STMT_LET line=130 name="f2" type=- const=0
+        init
+          EXPR_FLOAT line=130 value=0.1
+      STMT_LET line=131 name="f3" type=- const=0
+        init
+          EXPR_FLOAT line=131 value=0.30000000000000004
+      STMT_LET line=132 name="f4" type=- const=0
+        init
+          EXPR_FLOAT line=132 value=3.14159265358979
+      STMT_LET line=134 name="member" type=- const=0
+        init
+          EXPR_CALL line=134
+            callee
+              EXPR_FIELD line=134 name="str"
+                EXPR_INT line=134 value=1
+            args
+  DECL_FUNC name="control" line=137 ret=- static=0 private=0 op=- doc=-
+    params
+    body
+      STMT_IF line=138
+        cond
+          EXPR_BOOL line=138 value=1
+        then
+        else
+          STMT_IF line=138
+            cond
+              EXPR_BOOL line=138 value=0
+            then
+            else
+      STMT_IF line=139
+        cond
+          EXPR_BOOL line=139 value=1
+        then
+        else
+      STMT_WHILE line=140
+        cond
+          EXPR_BOOL line=140 value=0
+        body
+          STMT_BREAK line=140
+      STMT_WHILE line=141
+        cond
+          EXPR_BOOL line=141 value=0
+        body
+          STMT_CONTINUE line=141
+      STMT_FOR line=142 var="i" var2=- iter=FOR_RANGE
+        range_a
+          EXPR_INT line=142 value=0
+        range_b
+          EXPR_INT line=142 value=1
+        body
+      STMT_FOR line=143 var="v" var2=- iter=FOR_ITER
+        iterable
+          EXPR_ARRAY line=143
+            EXPR_INT line=143 value=1
+        body
+      STMT_FOR line=144 var="k" var2="v" iter=FOR_PAIRS
+        iterable
+          EXPR_DICT line=144
+            entry
+              EXPR_STRING line=144
+                part lit text="a"
+              EXPR_INT line=144 value=1
+        body
+      STMT_FOR line=145 var="i" var2="v" iter=FOR_IPAIRS
+        iterable
+          EXPR_ARRAY line=145
+            EXPR_INT line=145 value=1
+        body
+      STMT_SWITCH line=146
+        subject
+          EXPR_INT line=146 value=1
+        cases
+      STMT_SWITCH line=147
+        subject
+          EXPR_INT line=147 value=1
+        cases
+          case
+            value
+              EXPR_INT line=147 value=1
+            body
+          case
+            value
+              EXPR_INT line=147 value=2
+            body
+      STMT_BLOCK line=148
+        body
+          STMT_LET line=148 name="scoped" type=- const=0
+            init
+              EXPR_INT line=148 value=1
+      STMT_TRY line=149
+        body
+        catches
+          catch type="Exception" var="e"
+            body
+        finally
+      STMT_TRY line=150
+        body
+        catches
+        finally
+      STMT_TRY line=151
+        body
+        catches
+          catch type="A" var="a"
+            body
+          catch type="b.c.d.E" var="e"
+            body
+        finally
+      STMT_THROW line=152 type="ValueError"
+      STMT_THROW line=153 type="ValueError"
+      STMT_THROW line=154 type="a.b.c.ValueError"
+        value
+          EXPR_STRING line=154
+            part lit text="msg"
+      STMT_RETURN line=155
+  DECL_FUNC name="line_capture" line=162 ret=- static=0 private=0 op=- doc=-
+    params
+    body
+      STMT_LET line=163 name="add" type=- const=0
+        init
+          EXPR_BINARY line=164 op="+"
+            EXPR_INT line=163 value=1
+            EXPR_INT line=165 value=2
+      STMT_LET line=166 name="mul" type=- const=0
+        init
+          EXPR_BINARY line=167 op="*"
+            EXPR_INT line=166 value=1
+            EXPR_INT line=168 value=2
+      STMT_LET line=169 name="rep" type=- const=0
+        init
+          EXPR_BINARY line=170 op="x"
+            EXPR_STRING line=169
+              part lit text="a"
+            EXPR_INT line=171 value=3
+      STMT_LET line=172 name="shift" type=- const=0
+        init
+          EXPR_BINARY line=173 op="<<"
+            EXPR_INT line=172 value=1
+            EXPR_INT line=174 value=2
+      STMT_LET line=175 name="cmp" type=- const=0
+        init
+          EXPR_BINARY line=176 op="<"
+            EXPR_INT line=175 value=1
+            EXPR_INT line=177 value=2
+      STMT_LET line=178 name="eq" type=- const=0
+        init
+          EXPR_BINARY line=179 op="=="
+            EXPR_INT line=178 value=1
+            EXPR_INT line=180 value=2
+      STMT_LET line=181 name="band" type=- const=0
+        init
+          EXPR_BINARY line=182 op="&"
+            EXPR_INT line=181 value=1
+            EXPR_INT line=183 value=2
+      STMT_LET line=184 name="bxor" type=- const=0
+        init
+          EXPR_BINARY line=185 op="^"
+            EXPR_INT line=184 value=1
+            EXPR_INT line=186 value=2
+      STMT_LET line=187 name="bor" type=- const=0
+        init
+          EXPR_BINARY line=188 op="|"
+            EXPR_INT line=187 value=1
+            EXPR_INT line=189 value=2
+      STMT_LET line=190 name="custom" type=- const=0
+        init
+          EXPR_BINARY line=191 op="||>"
+            EXPR_INT line=190 value=1
+            EXPR_INT line=192 value=2
+      STMT_LET line=193 name="conj" type=- const=0
+        init
+          EXPR_BINARY line=194 op="&&"
+            EXPR_BOOL line=193 value=1
+            EXPR_BOOL line=195 value=0
+      STMT_LET line=196 name="disj" type=- const=0
+        init
+          EXPR_BINARY line=197 op="||"
+            EXPR_BOOL line=196 value=1
+            EXPR_BOOL line=198 value=0
+      STMT_LET line=199 name="nullish" type=- const=0
+        init
+          EXPR_BINARY line=200 op="??"
+            EXPR_NULL line=199
+            EXPR_INT line=201 value=1
+      STMT_LET line=202 name="typecheck" type=- const=0
+        init
+          EXPR_IS line=204 type="int"
+            EXPR_IDENT line=202 name="add"
+      STMT_LET line=205 name="tern" type=- const=0
+        init
+          EXPR_TERNARY line=207
+            EXPR_BOOL line=205 value=1
+            EXPR_INT line=207 value=1
+            EXPR_INT line=209 value=2
+      STMT_LET line=210 name="neg" type=- const=0
+        init
+          EXPR_UNARY line=210 op="-"
+            EXPR_INT line=211 value=1
+      STMT_LET line=212 name="not" type=- const=0
+        init
+          EXPR_UNARY line=212 op="!"
+            EXPR_BOOL line=213 value=1
+      STMT_LET line=214 name="bnot" type=- const=0
+        init
+          EXPR_UNARY line=214 op="~"
+            EXPR_INT line=215 value=1
+      STMT_LET line=216 name="field" type=- const=0
+        init
+          EXPR_FIELD line=217 name="len"
+            EXPR_IDENT line=216 name="line_capture"
+      STMT_LET line=219 name="call" type=- const=0
+        init
+          EXPR_CALL line=220
+            callee
+              EXPR_IDENT line=219 name="line_capture"
+            args
+      STMT_LET line=222 name="index" type=- const=0
+        init
+          EXPR_INDEX line=223
+            EXPR_ARRAY line=222
+              EXPR_INT line=222 value=1
+            EXPR_INT line=224 value=0
+      STMT_LET line=226 name="assigned" type=- const=0
+        init
+          EXPR_INT line=226 value=0
+      STMT_EXPR line=227
+        expr
+          EXPR_ASSIGN line=229
+            EXPR_IDENT line=227 name="assigned"
+            EXPR_INT line=229 value=1
+      STMT_LET line=233 name="lonely" type=- const=0
+      STMT_EXPR line=234
+        expr
+          EXPR_IDENT line=234 name="add"
+  DECL_FUNC name="empty" line=237 ret=- static=0 private=0 op=- doc=-
+    params
+    body
+  DECL_FUNC name="documented" line=243 ret=- static=0 private=0 op=- doc="A docstring, with a \"quote\" and a\nnewline in it."
+    params
+      param name="a" type="int"
+      param name="b" type="str"
+        default
+          EXPR_STRING line=243
+            part lit text="x"
+    body
+      STMT_RETURN line=245
+        value
+          EXPR_IDENT line=245 name="a"
+  DECL_FUNC name="doc_only" line=248 ret=- static=0 private=0 op=- doc="Nothing but a docstring."
+    params
+    body
+  DECL_FUNC name="not_a_doc" line=252 ret=- static=0 private=0 op=- doc=-
+    params
+    body
+      STMT_EXPR line=254
+        expr
+          EXPR_STRING line=254
+            part expr
+              EXPR_CALL line=1
+                callee
+                  EXPR_IDENT line=1 name="documented"
+                args
+                  arg name=-
+                    EXPR_INT line=1 value=1
+      STMT_RETURN line=255
+        value
+          EXPR_INT line=255 value=0
+  DECL_FUNC name="second_string_is_a_statement" line=258 ret=- static=0 private=0 op=- doc="The docstring."
+    params
+    body
+      STMT_EXPR line=260
+        expr
+          EXPR_STRING line=260
+            part lit text="An ordinary expression statement."
+      STMT_RETURN line=261
+        value
+          EXPR_INT line=261 value=0
+  DECL_OPERATOR name="operator" line=264 ret=- static=0 private=0 op="<=>" doc="An operator can carry one too."
+    params
+      param name="a" type="int"
+      param name="b" type="int"
+    body
+      STMT_RETURN line=266
+        value
+          EXPR_BINARY line=266 op="-"
+            EXPR_IDENT line=266 name="a"
+            EXPR_IDENT line=266 name="b"
+  DECL_CLASS name="Documented" parent="Base" doc="A class docstring: no body statement to lift, so the string leads." line=269
+    fields
+      field name="count" type="int" static=1 private=0 const=0
+        init
+          EXPR_INT line=271 value=0
+    methods
+      method name="init" line=273 ret=- static=0 private=0 op=- doc="Even the constructor."
+        params
+          param name="this" type=-
+        body
+          STMT_EXPR line=275
+            expr
+              EXPR_ASSIGN line=275
+                EXPR_FIELD line=275 name="n"
+                  EXPR_IDENT line=275 name="this"
+                EXPR_INT line=275 value=0
+      method name="hidden" line=278 ret=- static=0 private=1 op=- doc="A private method still parses one."
+        params
+          param name="this" type=-
+        body
+          STMT_RETURN line=280
+            value
+              EXPR_FIELD line=280 name="n"
+                EXPR_IDENT line=280 name="this"
+      method name="operator" line=283 ret=- static=0 private=0 op="+" doc="And a method operator."
+        params
+          param name="this" type=-
+          param name="other" type="Documented"
+        body
+          STMT_RETURN line=285
+            value
+              EXPR_BINARY line=285 op="+"
+                EXPR_FIELD line=285 name="n"
+                  EXPR_IDENT line=285 name="this"
+                EXPR_FIELD line=285 name="n"
+                  EXPR_IDENT line=285 name="other"
+  DECL_CLASS name="Undocumented" parent=- doc=- line=289
+    fields
+    methods
+      method name="plain" line=290 ret=- static=0 private=0 op=- doc=-
+        params
+          param name="this" type=-
+        body
+          STMT_RETURN line=291
+            value
+              EXPR_INT line=291 value=1
+rc=0
+== bareinterp.oboe
+bareinterp.oboe:2: parse error: expected '}' (got '')
+rc=1
+== blockbrace.oboe
+blockbrace.oboe:1: parse error: expected '{' (got 'print')
+rc=1
+== blockclose.oboe
+blockclose.oboe:2: parse error: expected '}' (got '')
+rc=1
+== catchdot.oboe
+catchdot.oboe:1: parse error: expected identifier after '.' (got ')')
+rc=1
+== catchlp.oboe
+catchlp.oboe:1: parse error: expected '(' after catch (got 'e')
+rc=1
+== catchtype.oboe
+catchtype.oboe:1: parse error: expected exception type (got '3')
+rc=1
+== catchvar.oboe
+catchvar.oboe:1: parse error: expected exception variable name (got ')')
+rc=1
+== cimportfrom.oboe
+cimportfrom.oboe:1: parse error: expected 'from' in cimport (got 'l')
+rc=1
+== cimportlib.oboe
+cimportlib.oboe:1: parse error: expected a library path string in cimport (got 'l')
+rc=1
+== cimportname.oboe
+cimportname.oboe:1: parse error: expected C symbol name after cimport (got '3')
+rc=1
+== classbrace.oboe
+classbrace.oboe:1: parse error: expected '{' to start class body (got '(')
+rc=1
+== classclose.oboe
+classclose.oboe:2: parse error: expected '}' to close class (got '')
+rc=1
+== class_doc_interpolates.oboe
+class_doc_interpolates.oboe:1: parse error: a class docstring cannot interpolate (got '}')
+rc=1
+== classmember.oboe
+classmember.oboe:1: parse error: expected field or method declaration in class body (got '3')
+rc=1
+== classname.oboe
+classname.oboe:1: parse error: expected class name (got '{')
+rc=1
+== closedelim.oboe
+closedelim.oboe:1: parse error: expected closing delimiter (got '}')
+rc=1
+== defaultorder.oboe
+defaultorder.oboe:1: parse error: a parameter without a default cannot follow one with a default (got ')')
+rc=1
+== dictclose.oboe
+dictclose.oboe:2: parse error: expected '}' (got '')
+rc=1
+== dictcolon.oboe
+dictcolon.oboe:1: parse error: expected ':' in dict literal (got '1')
+rc=1
+== dotname.oboe
+dotname.oboe:1: parse error: expected member name after '.' (got '=')
+rc=1
+== emptyinterp.oboe
+emptyinterp.oboe:1: parse error: expected expression (got '')
+rc=1
+== eventassign.oboe
+eventassign.oboe:1: parse error: expected '=' in event declaration (got 'event')
+rc=1
+== eventctor.oboe
+eventctor.oboe:1: parse error: expected event(...) constructor (got '3')
+rc=1
+== eventname.oboe
+eventname.oboe:1: parse error: expected event name (got '=')
+rc=1
+== forin.oboe
+forin.oboe:1: parse error: expected 'in' in for loop (got 'y')
+rc=1
+== forlp.oboe
+forlp.oboe:1: parse error: expected '(' after for (got 'x')
+rc=1
+== funcname.oboe
+funcname.oboe:1: parse error: expected function name (got '(')
+rc=1
+== iflp.oboe
+iflp.oboe:1: parse error: expected '(' after if (got 'x')
+rc=1
+== importalias.oboe
+importalias.oboe:1: parse error: expected alias after 'as' (got '3')
+rc=1
+== importmod.oboe
+importmod.oboe:1: parse error: expected module name (got '3')
+rc=1
+== interperr.oboe
+interperr.oboe:1: parse error: expected expression (got '')
+rc=1
+== istype.oboe
+istype.oboe:1: parse error: expected type name after 'is' (got '3')
+rc=1
+== loopvar2.oboe
+loopvar2.oboe:1: parse error: expected second loop variable (got '3')
+rc=1
+== loopvar.oboe
+loopvar.oboe:1: parse error: expected loop variable (got '3')
+rc=1
+== nestinterp.oboe
+nestinterp.oboe:1: parse error: expected expression (got ']')
+rc=1
+== noexpr.oboe
+noexpr.oboe:1: parse error: expected expression (got '}')
+rc=1
+== onname.oboe
+onname.oboe:1: parse error: expected event name after 'on' (got '{')
+rc=1
+== onqualname.oboe
+onqualname.oboe:1: parse error: expected event name after '.' (got '{')
+rc=1
+== onvar.oboe
+onvar.oboe:1: parse error: expected variable name after 'as' (got '{')
+rc=1
+== opsymchar.oboe
+opsymchar.oboe:1: parse error: expected an operator symbol after 'operator': an operator symbol is punctuation from + - * / % < > = ! & | ^ ~ ? @ # $ : . (and _ after the first character), or a single word (got ';')
+rc=1
+== opsym.oboe
+opsym.oboe:1: parse error: expected an operator symbol after 'operator': an operator symbol is punctuation from + - * / % < > = ! & | ^ ~ ? @ # $ : . (and _ after the first character), or a single word (got '(')
+rc=1
+== opsymstray.oboe
+opsymstray.oboe:1: parse error: expected '(' after operator symbol '<>': an operator symbol is punctuation from + - * / % < > = ! & | ^ ~ ? @ # $ : . (and _ after the first character), or a single word (got '[')
+rc=1
+== optopbuiltin.oboe
+optopbuiltin.oboe:1: parse error: '+' is a built-in operator and cannot be redefined; overload it inside a class instead, as `operator + (this, other)`
+rc=1
+== optopx.oboe
+optopx.oboe:1: parse error: 'x' is a built-in operator and cannot be redefined; overload it inside a class instead, as `operator x (this, other)`
+rc=1
+== pairsneed2.oboe
+pairsneed2.oboe:1: parse error: pairs()/ipairs() need two loop variables, as in `for (k, v in pairs(d))` (got ')')
+rc=1
+== paramlp.oboe
+paramlp.oboe:1: parse error: expected '(' (got '{')
+rc=1
+== parentname.oboe
+parentname.oboe:1: parse error: expected parent class name (got '{')
+rc=1
+== qdotname.oboe
+qdotname.oboe:1: parse error: expected member name after '?.' (got '(')
+rc=1
+== rangecomma.oboe
+rangecomma.oboe:1: parse error: expected ',' in range() (got '2')
+rc=1
+== rbracket.oboe
+rbracket.oboe:1: parse error: expected ']' (got '}')
+rc=1
+== rparen.oboe
+rparen.oboe:1: parse error: expected ')' (got '}')
+rc=1
+== switchbrace.oboe
+switchbrace.oboe:1: parse error: expected '{' after switch subject (got 'case')
+rc=1
+== switchcase.oboe
+switchcase.oboe:1: parse error: expected 'case' (got '1')
+rc=1
+== switchclose.oboe
+switchclose.oboe:2: parse error: expected '}' to close switch (got '')
+rc=1
+== terncolon.oboe
+terncolon.oboe:1: parse error: expected ':' in ternary expression (got 'c')
+rc=1
+== throwdot.oboe
+throwdot.oboe:1: parse error: expected expression (got '.')
+rc=1
+== throwtype.oboe
+throwtype.oboe:1: parse error: expected exception type after throw (got '3')
+rc=1
+== twovars.oboe
+twovars.oboe:1: parse error: two loop variables require pairs() or ipairs() (got ')')
+rc=1
+== typedname.oboe
+typedname.oboe:1: parse error: expected name (got '3')
+rc=1
+== unterminterp.oboe
+unterminterp.oboe:2: parse error: expected '}' (got '')
+rc=1
+== whilelp.oboe
+whilelp.oboe:1: parse error: expected '(' after while (got 'x')
+rc=1

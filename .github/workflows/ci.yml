@@ -92,15 +92,6 @@ jobs:
           make clean
           make bootstrap-check
 
-      # The other jobs run the suite on the Oboe front end, which is the only
-      # supported one. This run keeps the deprecated in-process C codegen from
-      # rotting: the selfhost gates already compare its output to oboec's on
-      # every file, but nothing else exercises it as a whole compiler, and it
-      # is only worth keeping around as a fallback for as long as it works.
-      - name: Run the test suite on the deprecated C front end
-        working-directory: compiler
-        run: OBOE_USE_C_FRONTEND=1 make test
-
   macos:
     name: build & test (macOS)
     runs-on: macos-latest

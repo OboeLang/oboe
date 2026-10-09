@@ -1,10 +1,10 @@
-# Malformed inputs for the selfhost_parser gate: one per line, as
-# `<name><TAB><source>`. The suite writes each to its own file and requires the
-# two parsers to produce the identical diagnostic *and* the identical exit
-# status. Blank lines and lines starting with # are skipped.
+# Malformed inputs for the snapshot_parser test: one per line, as
+# `<name><TAB><source>`. The suite writes each to its own file and compares the
+# diagnostic *and* the exit status against parser.snapshot. Blank lines and
+# lines starting with # are skipped.
 #
-# Between them these reach every parse diagnostic in src/parser.c that can be
-# reached at all. Four cannot, because the test that selects the branch has
+# Between them these reach every parse diagnostic in selfhost/parser.oboe that
+# can be reached at all. Four cannot, because the test that selects the branch has
 # already established what the expect() re-checks:
 #
 #   "expected '(' after range"      looks_like_call_to() required the '('
@@ -42,6 +42,10 @@ paramlp	func f{ }
 defaultorder	func f(int a = 1, int b) { }
 funcname	func () { }
 opsym	operator ( a, b) { }
+opsymchar	operator ;; (a, b) { }
+opsymstray	operator <>[ (a, b) { }
+optopbuiltin	operator + (a, b) { }
+optopx	operator x (a, b) { }
 
 # ---- control flow
 iflp	func f() { if x {} }

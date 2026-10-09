@@ -18,7 +18,7 @@
  * silently targets Linux, which is what this is fixing.
  *
  * This is only the default for a bare `oboec`; bin/oboe always passes
- * --target-os. The arms match legacy/codegen.c's, BSDs included: they fall
+ * --target-os. The arms match selfhost/hostos*.oboe, BSDs included: they fall
  * through to linux there too.
  *
  * Overridable with -D so the suite can build a deliberately foreign-hosted
@@ -65,6 +65,10 @@ OboeValue lexer__is_ident_start(OboeValue c);
 OboeValue lexer__is_ident_char(OboeValue c);
 OboeValue lexer__is_op_char(OboeValue c);
 OboeValue lexer__register_custom_op(OboeValue sym);
+OboeValue lexer__register_word_op(OboeValue word);
+OboeValue lexer__is_word_op(OboeValue word);
+OboeValue lexer__is_op_tail(OboeValue c);
+OboeValue lexer__skip_string(OboeValue i);
 OboeValue lexer__prescan_ops(OboeValue src);
 OboeValue lexer__match_custom_op(OboeValue pos);
 OboeValue lexer__tok(OboeValue type, OboeValue text, OboeValue line);
@@ -98,6 +102,7 @@ OboeValue parser__parse_equality(OboeValue p);
 OboeValue parser__parse_bitand(OboeValue p);
 OboeValue parser__parse_bitxor(OboeValue p);
 OboeValue parser__parse_bitor(OboeValue p);
+OboeValue parser__at_custom_op(OboeValue p);
 OboeValue parser__parse_custom_op(OboeValue p);
 OboeValue parser__parse_and(OboeValue p);
 OboeValue parser__parse_or(OboeValue p);
@@ -119,7 +124,8 @@ OboeValue parser__parse_statement(OboeValue p);
 OboeValue parser__parse_block(OboeValue p);
 OboeValue parser__take_doc(OboeValue body);
 OboeValue parser__parse_func(OboeValue p, OboeValue is_static, OboeValue is_private);
-OboeValue parser__parse_operator_decl(OboeValue p);
+OboeValue parser__is_punct_symbol(OboeValue s);
+OboeValue parser__parse_operator_decl(OboeValue p, OboeValue top_level);
 OboeValue parser__parse_class(OboeValue p);
 OboeValue parser__parse_import(OboeValue p);
 OboeValue parser__parse_program(OboeValue tokens, OboeValue filename);
@@ -267,7 +273,9 @@ static OboeValue lexer__KEYWORDS;
 static OboeValue lexer__OPS2;
 static OboeValue lexer__OPS1;
 static OboeValue lexer__CUSTOM_OPS;
+static OboeValue lexer__WORD_OPS;
 static OboeValue lexer__BUILTIN_OPS;
+static OboeValue parser__OP_SYMBOL_HELP;
 static OboeValue dump__OUT;
 static OboeValue docs__OUT;
 static OboeValue codegen__CLASSES;
@@ -4504,9 +4512,20 @@ OboeValue parser__parse_bitor(OboeValue p) {
     return ob_null();
 }
 
+OboeValue parser__at_custom_op(OboeValue p) {
+    if (ob_truthy(parser__check(p, ob_interpolate(1, ob_string("T_CUSTOMOP"))))) {
+        return ob_bool(true);
+    }
+    if (ob_truthy(ob_bool(ob_truthy(ob_not(parser__check(p, ob_interpolate(1, ob_string("T_IDENT"))))) || ob_truthy(ob_not(lexer__is_word_op(ob_index_get(parser__peek(p), ob_interpolate(1, ob_string("text"))))))))) {
+        return ob_bool(false);
+    }
+    return ob_binop("==", ob_index_get(ob_index_get(((Parser*)((p).as.obj))->toks, ob_binop("-", ((Parser*)((p).as.obj))->pos, ob_int(1LL), ob_sub)), ob_interpolate(1, ob_string("line"))), ob_index_get(parser__peek(p), ob_interpolate(1, ob_string("line"))), ob_eq);
+    return ob_null();
+}
+
 OboeValue parser__parse_custom_op(OboeValue p) {
     OboeValue e = parser__parse_bitor(p);
-    while (ob_truthy(parser__check(p, ob_interpolate(1, ob_string("T_CUSTOMOP"))))) {
+    while (ob_truthy(parser__at_custom_op(p))) {
         OboeValue line = ob_index_get(parser__peek(p), ob_interpolate(1, ob_string("line")));
         OboeValue op = parser__advance(p);
         OboeValue b = parser__new_expr(ob_interpolate(1, ob_string("EXPR_BINARY")), line);
@@ -4930,16 +4949,40 @@ OboeValue parser__parse_func(OboeValue p, OboeValue is_static, OboeValue is_priv
     return ob_null();
 }
 
-OboeValue parser__parse_operator_decl(OboeValue p) {
-    OboeValue line = ob_index_get(parser__peek(p), ob_interpolate(1, ob_string("line")));
-    OboeValue sym = parser__advance(p);
-    if (ob_truthy(ob_bool(ob_truthy(ob_binop("==", ob_index_get(sym, ob_interpolate(1, ob_string("text"))), ob_string(""), ob_eq)) || ob_truthy(ob_binop("==", ob_index_get(sym, ob_interpolate(1, ob_string("type"))), ob_interpolate(1, ob_string("T_LPAREN")), ob_eq))))) {
-        (void)(parser__fail(p, ob_interpolate(1, ob_string("expected an operator symbol after 'operator'"))));
+OboeValue parser__is_punct_symbol(OboeValue s) {
+    if (ob_truthy(ob_binop("==", s, ob_string(""), ob_eq))) {
+        return ob_bool(false);
+    }
+    { OboeValue __it = s; int64_t __n = ob_iter_len(__it);
+    for (int64_t __i = 0; __i < __n; __i++) {
+        OboeValue c = ob_iter_value(__it, __i);
+        if (ob_truthy(ob_not(ob_m_contains(ob_interpolate(1, ob_string("+-*/%<>=!&|^~?@#$:._")), c)))) {
+            return ob_bool(false);
+        }
+    } }
+    return ob_bool(true);
+    return ob_null();
+}
+
+OboeValue parser__parse_operator_decl(OboeValue p, OboeValue top_level) {
+    OboeValue sym = parser__peek(p);
+    OboeValue line = ob_index_get(sym, ob_interpolate(1, ob_string("line")));
+    OboeValue text = ob_index_get(sym, ob_interpolate(1, ob_string("text")));
+    if (ob_truthy(ob_bool(ob_truthy(ob_binop("!=", ob_index_get(sym, ob_interpolate(1, ob_string("type"))), ob_interpolate(1, ob_string("T_IDENT")), ob_neq)) && ob_truthy(ob_not(parser__is_punct_symbol(text)))))) {
+        (void)(parser__fail(p, ob_binop("+", ob_interpolate(1, ob_string("expected an operator symbol after 'operator': ")), parser__OP_SYMBOL_HELP, ob_add)));
+    }
+    (void)(parser__advance(p));
+    if (ob_truthy(ob_not(parser__check(p, ob_interpolate(1, ob_string("T_LPAREN")))))) {
+        (void)(parser__fail(p, ob_binop("+", ob_binop("+", ob_binop("+", ob_interpolate(1, ob_string("expected '(' after operator symbol '")), text, ob_add), ob_interpolate(1, ob_string("': ")), ob_add), parser__OP_SYMBOL_HELP, ob_add)));
+    }
+    OboeValue custom = ob_bool(ob_truthy(ob_binop("==", ob_index_get(sym, ob_interpolate(1, ob_string("type"))), ob_interpolate(1, ob_string("T_CUSTOMOP")), ob_eq)) || ob_truthy(ob_bool(ob_truthy(ob_binop("==", ob_index_get(sym, ob_interpolate(1, ob_string("type"))), ob_interpolate(1, ob_string("T_IDENT")), ob_eq)) && ob_truthy(lexer__is_word_op(text)))));
+    if (ob_truthy(ob_bool(ob_truthy(top_level) && ob_truthy(ob_not(custom))))) {
+        (void)(diag__die(ob_binop("+", ob_binop("+", ob_binop("+", ob_binop("+", ob_binop("+", ob_binop("+", ob_binop("+", ob_binop("+", ((Parser*)((p).as.obj))->filename, ob_interpolate(1, ob_string(":")), ob_add), ob_str(line), ob_add), ob_interpolate(1, ob_string(": parse error: '")), ob_add), text, ob_add), ob_interpolate(1, ob_string("' is a built-in operator and cannot be redefined; ")), ob_add), ob_interpolate(1, ob_string("overload it inside a class instead, as `operator ")), ob_add), text, ob_add), ob_interpolate(1, ob_string(" (this, other)`")), ob_add)));
     }
     OboeValue params = parser__parse_params(p);
     OboeValue body = parser__parse_block(p);
     OboeValue doc = parser__take_doc(body);
-    return ({ OboeValue __d = ob_dict_new(); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("name"))), ob_interpolate(1, ob_string("operator"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("return_type"))), ob_null()); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("params"))), params); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("is_static"))), ob_bool(false)); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("is_private"))), ob_bool(false)); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("op_symbol"))), ob_index_get(sym, ob_interpolate(1, ob_string("text")))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("doc"))), doc); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("body"))), body); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("line"))), line); __d; });
+    return ({ OboeValue __d = ob_dict_new(); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("name"))), ob_interpolate(1, ob_string("operator"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("return_type"))), ob_null()); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("params"))), params); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("is_static"))), ob_bool(false)); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("is_private"))), ob_bool(false)); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("op_symbol"))), text); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("doc"))), doc); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("body"))), body); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("line"))), line); __d; });
     return ob_null();
 }
 
@@ -4988,7 +5031,7 @@ OboeValue parser__parse_class(OboeValue p) {
         else {
             if (ob_truthy(parser__check(p, ob_interpolate(1, ob_string("T_OPERATOR"))))) {
                 (void)(parser__advance(p));
-                (void)(ob_arr_push(methods, parser__parse_operator_decl(p)));
+                (void)(ob_arr_push(methods, parser__parse_operator_decl(p, ob_bool(false))));
             }
             else {
                 if (ob_truthy(ob_bool(ob_truthy(ob_bool(ob_truthy(parser__check(p, ob_interpolate(1, ob_string("T_CONST")))) || ob_truthy(parser__check(p, ob_interpolate(1, ob_string("T_LET")))))) || ob_truthy(ob_bool(ob_truthy(parser__check(p, ob_interpolate(1, ob_string("T_IDENT")))) && ob_truthy(ob_binop("==", ob_index_get(parser__peek_at(p, ob_int(1LL)), ob_interpolate(1, ob_string("type"))), ob_interpolate(1, ob_string("T_IDENT")), ob_eq))))))) {
@@ -5068,7 +5111,7 @@ OboeValue parser__parse_program(OboeValue tokens, OboeValue filename) {
             else {
                 if (ob_truthy(parser__match(p, ob_interpolate(1, ob_string("T_OPERATOR"))))) {
                     (void)(ob_index_set(d, ob_interpolate(1, ob_string("kind")), ob_interpolate(1, ob_string("DECL_OPERATOR"))));
-                    (void)(ob_index_set(d, ob_interpolate(1, ob_string("func")), parser__parse_operator_decl(p)));
+                    (void)(ob_index_set(d, ob_interpolate(1, ob_string("func")), parser__parse_operator_decl(p, ob_bool(true))));
                 }
                 else {
                     if (ob_truthy(parser__match(p, ob_interpolate(1, ob_string("T_EVENT"))))) {
@@ -5135,6 +5178,7 @@ OboeValue parser__parse_program(OboeValue tokens, OboeValue filename) {
 }
 
 static void __oboe_toplevel_3(void) {
+    parser__OP_SYMBOL_HELP = ob_interpolate(1, ob_string("an operator symbol is punctuation from + - * / % < > = ! & | ^ ~ ? @ # $ : . (and _ after the first character), or a single word"));
 }
 
 OboeValue diag__fail(OboeValue msg) {
@@ -5220,12 +5264,82 @@ OboeValue lexer__register_custom_op(OboeValue sym) {
     return ob_null();
 }
 
+OboeValue lexer__register_word_op(OboeValue word) {
+    if (ob_truthy(ob_bool(ob_truthy(ob_bool(ob_truthy(ob_dict_has_m(lexer__KEYWORDS, word)) || ob_truthy(ob_binop("==", word, ob_interpolate(1, ob_string("x")), ob_eq)))) || ob_truthy(ob_m_contains(lexer__WORD_OPS, word))))) {
+        return ob_null();
+    }
+    if (ob_truthy(ob_binop(">=", ob_m_len(lexer__WORD_OPS), ob_int(64LL), ob_gte))) {
+        (void)(diag__fail(ob_interpolate(1, ob_string("too many custom operators"))));
+    }
+    (void)(ob_arr_push(lexer__WORD_OPS, word));
+    return ob_null();
+}
+
+OboeValue lexer__is_word_op(OboeValue word) {
+    return ob_m_contains(lexer__WORD_OPS, word);
+    return ob_null();
+}
+
+OboeValue lexer__is_op_tail(OboeValue c) {
+    return ob_bool(ob_truthy(lexer__is_op_char(c)) || ob_truthy(ob_binop("==", c, ob_int(95LL), ob_eq)));
+    return ob_null();
+}
+
+OboeValue lexer__skip_string(OboeValue i) {
+    OboeValue p = ob_binop("+", i, ob_int(1LL), ob_add);
+    while (ob_truthy(ob_binop("<", p, lexer__SLEN, ob_lt))) {
+        OboeValue c = lexer__ch(p);
+        if (ob_truthy(ob_binop("==", c, ob_interpolate(1, ob_string("\\")), ob_eq))) {
+            (void)((p = ob_binop("+", p, ob_int(2LL), ob_add)));
+        }
+        else {
+            if (ob_truthy(ob_binop("==", c, ob_interpolate(1, ob_string("\"")), ob_eq))) {
+                return ob_binop("+", p, ob_int(1LL), ob_add);
+            }
+            else {
+                if (ob_truthy(ob_bool(ob_truthy(ob_binop("==", c, ob_interpolate(1, ob_string("$")), ob_eq)) && ob_truthy(ob_binop("==", lexer__ch(ob_binop("+", p, ob_int(1LL), ob_add)), ob_interpolate(1, ob_string("{")), ob_eq))))) {
+                    OboeValue depth = ob_int(1LL);
+                    (void)((p = ob_binop("+", p, ob_int(2LL), ob_add)));
+                    while (ob_truthy(ob_bool(ob_truthy(ob_binop("<", p, lexer__SLEN, ob_lt)) && ob_truthy(ob_binop(">", depth, ob_int(0LL), ob_gt))))) {
+                        OboeValue d = lexer__ch(p);
+                        if (ob_truthy(ob_binop("==", d, ob_interpolate(1, ob_string("{")), ob_eq))) {
+                            (void)((depth = ob_binop("+", depth, ob_int(1LL), ob_add)));
+                        }
+                        else {
+                            if (ob_truthy(ob_binop("==", d, ob_interpolate(1, ob_string("}")), ob_eq))) {
+                                (void)((depth = ob_binop("-", depth, ob_int(1LL), ob_sub)));
+                            }
+                        }
+                        (void)((p = ob_binop("+", p, ob_int(1LL), ob_add)));
+                    }
+                }
+                else {
+                    (void)((p = ob_binop("+", p, ob_int(1LL), ob_add)));
+                }
+            }
+        }
+    }
+    return p;
+    return ob_null();
+}
+
 OboeValue lexer__prescan_ops(OboeValue src) {
     (void)((lexer__SRC = src));
     (void)((lexer__SLEN = ob_m_len(src)));
     OboeValue i = ob_int(0LL);
     while (ob_truthy(ob_binop("<", ob_binop("+", i, ob_int(8LL), ob_add), lexer__SLEN, ob_lt))) {
-        if (ob_truthy(ob_bool(ob_truthy(ob_binop("!=", lexer__ch(i), ob_interpolate(1, ob_string("o")), ob_neq)) || ob_truthy(ob_binop("!=", ob_str_substr(lexer__SRC, i, ob_int(8LL)), ob_interpolate(1, ob_string("operator")), ob_neq))))) {
+        OboeValue c = lexer__ch(i);
+        if (ob_truthy(ob_bool(ob_truthy(ob_binop("==", c, ob_interpolate(1, ob_string("/")), ob_eq)) && ob_truthy(ob_binop("==", lexer__ch(ob_binop("+", i, ob_int(1LL), ob_add)), ob_interpolate(1, ob_string("/")), ob_eq))))) {
+            while (ob_truthy(ob_bool(ob_truthy(ob_binop("<", i, lexer__SLEN, ob_lt)) && ob_truthy(ob_binop("!=", lexer__ch(i), ob_interpolate(1, ob_string("\n")), ob_neq))))) {
+                (void)((i = ob_binop("+", i, ob_int(1LL), ob_add)));
+            }
+            continue;
+        }
+        if (ob_truthy(ob_binop("==", c, ob_interpolate(1, ob_string("\"")), ob_eq))) {
+            (void)((i = lexer__skip_string(i)));
+            continue;
+        }
+        if (ob_truthy(ob_bool(ob_truthy(ob_binop("!=", c, ob_interpolate(1, ob_string("o")), ob_neq)) || ob_truthy(ob_binop("!=", ob_str_substr(lexer__SRC, i, ob_int(8LL)), ob_interpolate(1, ob_string("operator")), ob_neq))))) {
             (void)((i = ob_binop("+", i, ob_int(1LL), ob_add)));
             continue;
         }
@@ -5242,13 +5356,21 @@ OboeValue lexer__prescan_ops(OboeValue src) {
             (void)((p = ob_binop("+", p, ob_int(1LL), ob_add)));
         }
         OboeValue start = p;
-        while (ob_truthy(ob_bool(ob_truthy(ob_binop("<", p, lexer__SLEN, ob_lt)) && ob_truthy(lexer__is_op_char(lexer__byte_at(p)))))) {
-            (void)((p = ob_binop("+", p, ob_int(1LL), ob_add)));
-        }
-        if (ob_truthy(ob_binop(">", p, start, ob_gt))) {
+        if (ob_truthy(lexer__is_op_char(lexer__byte_at(p)))) {
+            while (ob_truthy(ob_bool(ob_truthy(ob_binop("<", p, lexer__SLEN, ob_lt)) && ob_truthy(lexer__is_op_tail(lexer__byte_at(p)))))) {
+                (void)((p = ob_binop("+", p, ob_int(1LL), ob_add)));
+            }
             (void)(lexer__register_custom_op(ob_str_substr(lexer__SRC, start, ob_binop("-", p, start, ob_sub))));
         }
-        (void)((i = ob_binop("+", i, ob_int(1LL), ob_add)));
+        else {
+            if (ob_truthy(lexer__is_ident_start(lexer__byte_at(p)))) {
+                while (ob_truthy(ob_bool(ob_truthy(ob_binop("<", p, lexer__SLEN, ob_lt)) && ob_truthy(lexer__is_ident_char(lexer__byte_at(p)))))) {
+                    (void)((p = ob_binop("+", p, ob_int(1LL), ob_add)));
+                }
+                (void)(lexer__register_word_op(ob_str_substr(lexer__SRC, start, ob_binop("-", p, start, ob_sub))));
+            }
+        }
+        (void)((i = ob_binop("+", i, ob_int(8LL), ob_add)));
     }
     return ob_null();
 }
@@ -5429,6 +5551,7 @@ static void __oboe_toplevel_1(void) {
     lexer__OPS2 = ({ OboeValue __d = ob_dict_new(); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("->"))), ob_interpolate(1, ob_string("T_ARROW"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("=="))), ob_interpolate(1, ob_string("T_EQ"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("!="))), ob_interpolate(1, ob_string("T_NEQ"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("<="))), ob_interpolate(1, ob_string("T_LTE"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("<<"))), ob_interpolate(1, ob_string("T_SHL"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string(">="))), ob_interpolate(1, ob_string("T_GTE"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string(">>"))), ob_interpolate(1, ob_string("T_SHR"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("&&"))), ob_interpolate(1, ob_string("T_ANDAND"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("||"))), ob_interpolate(1, ob_string("T_OROR"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("??"))), ob_interpolate(1, ob_string("T_QQ"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("?."))), ob_interpolate(1, ob_string("T_QDOT"))); __d; });
     lexer__OPS1 = ({ OboeValue __d = ob_dict_new(); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("{"))), ob_interpolate(1, ob_string("T_LBRACE"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("}"))), ob_interpolate(1, ob_string("T_RBRACE"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("("))), ob_interpolate(1, ob_string("T_LPAREN"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string(")"))), ob_interpolate(1, ob_string("T_RPAREN"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("["))), ob_interpolate(1, ob_string("T_LBRACKET"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("]"))), ob_interpolate(1, ob_string("T_RBRACKET"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string(","))), ob_interpolate(1, ob_string("T_COMMA"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("."))), ob_interpolate(1, ob_string("T_DOT"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string(":"))), ob_interpolate(1, ob_string("T_COLON"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string(";"))), ob_interpolate(1, ob_string("T_SEMI"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("+"))), ob_interpolate(1, ob_string("T_PLUS"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("-"))), ob_interpolate(1, ob_string("T_MINUS"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("*"))), ob_interpolate(1, ob_string("T_STAR"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("/"))), ob_interpolate(1, ob_string("T_SLASH"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("%"))), ob_interpolate(1, ob_string("T_PERCENT"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("="))), ob_interpolate(1, ob_string("T_ASSIGN"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("<"))), ob_interpolate(1, ob_string("T_LT"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string(">"))), ob_interpolate(1, ob_string("T_GT"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("!"))), ob_interpolate(1, ob_string("T_NOT"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("&"))), ob_interpolate(1, ob_string("T_AMP"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("|"))), ob_interpolate(1, ob_string("T_PIPE"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("^"))), ob_interpolate(1, ob_string("T_CARET"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("~"))), ob_interpolate(1, ob_string("T_TILDE"))); ob_dict_set(__d, ob_to_cstr(ob_interpolate(1, ob_string("?"))), ob_interpolate(1, ob_string("T_QUESTION"))); __d; });
     lexer__CUSTOM_OPS = ({ OboeValue __a = ob_array_new(); __a; });
+    lexer__WORD_OPS = ({ OboeValue __a = ob_array_new(); __a; });
     lexer__BUILTIN_OPS = ({ OboeValue __a = ob_array_new(); ob_array_push(__a, ob_interpolate(1, ob_string("+"))); ob_array_push(__a, ob_interpolate(1, ob_string("-"))); ob_array_push(__a, ob_interpolate(1, ob_string("*"))); ob_array_push(__a, ob_interpolate(1, ob_string("/"))); ob_array_push(__a, ob_interpolate(1, ob_string("%"))); ob_array_push(__a, ob_interpolate(1, ob_string("="))); ob_array_push(__a, ob_interpolate(1, ob_string("=="))); ob_array_push(__a, ob_interpolate(1, ob_string("!="))); ob_array_push(__a, ob_interpolate(1, ob_string("<"))); ob_array_push(__a, ob_interpolate(1, ob_string("<="))); ob_array_push(__a, ob_interpolate(1, ob_string(">"))); ob_array_push(__a, ob_interpolate(1, ob_string(">="))); ob_array_push(__a, ob_interpolate(1, ob_string("&&"))); ob_array_push(__a, ob_interpolate(1, ob_string("||"))); ob_array_push(__a, ob_interpolate(1, ob_string("??"))); ob_array_push(__a, ob_interpolate(1, ob_string("?."))); ob_array_push(__a, ob_interpolate(1, ob_string("!"))); ob_array_push(__a, ob_interpolate(1, ob_string("?"))); ob_array_push(__a, ob_interpolate(1, ob_string("."))); ob_array_push(__a, ob_interpolate(1, ob_string("->"))); ob_array_push(__a, ob_interpolate(1, ob_string(":"))); ob_array_push(__a, ob_interpolate(1, ob_string("&"))); ob_array_push(__a, ob_interpolate(1, ob_string("|"))); ob_array_push(__a, ob_interpolate(1, ob_string("^"))); ob_array_push(__a, ob_interpolate(1, ob_string("~"))); ob_array_push(__a, ob_interpolate(1, ob_string("<<"))); ob_array_push(__a, ob_interpolate(1, ob_string(">>"))); __a; });
 }
 

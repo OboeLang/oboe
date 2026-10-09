@@ -10,10 +10,10 @@
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
-//
-// The OS oboec was built for, which is the OS it compiles for unless told
-// otherwise. C would get this from the preprocessor; the Oboe spelling is a
-// per-OS module file, which is the mechanism the language already has for
-// exactly this. Resolution prefers hostos.<target>.oboe and falls back here,
-// so this file is the `#else` arm -- and the BSDs land in it.
-var HOST_OS = "linux"
+// ';' cannot appear in an operator symbol
+operator ;; (a, b) {
+    return a
+}
+
+func main(array args) {
+}

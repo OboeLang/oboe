@@ -48,6 +48,31 @@ fixture() {
     fi
 }
 
+# ---- the compiler under test -------------------------------------------
+#
+# bin/oboec is built from the committed bootstrap/oboec.c, which only moves on a
+# deliberate `make regen-bootstrap`. Testing it would test whatever selfhost/
+# looked like the last time someone regenerated, so a change to selfhost/ would
+# pass or fail the suite without having run at all. Everything below runs
+# against stage/suite/ instead: an install tree laid out like bin/'s parent,
+# whose oboec is built from today's selfhost/ -- by bin/oboec, so the bootstrap
+# is still exercised, just as the thing that builds the compiler under test.
+# stage/ is the bootstrap chain's gitignored scratch, and the relative path
+# keeps "$OLDPWD/$OBOE" working in the tests that cd elsewhere.
+suite=stage/suite
+rm -rf "$suite"
+mkdir -p "$suite/bin"
+ln -s ../../runtime "$suite/runtime"
+cp "$OBOE" "$suite/bin/oboe"
+if ! "$OBOE" build selfhost/main.oboe -o "$suite/bin/oboec" >"$suite/build.log" 2>&1
+then
+    echo "FAIL selfhost_build (could not build selfhost/main.oboe with bin/oboec)"
+    sed 's/^/    /' "$suite/build.log" | head -20
+    exit 1
+fi
+OBOE=$suite/bin/oboe
+OBOEC=$suite/bin/oboec
+
 for src in tests/*.oboe; do
     name="${src%.oboe}"
     base="$(basename "$name")"
@@ -342,191 +367,109 @@ else
 fi
 rm -rf "$tmp"
 
-# ---- self-hosted lexer --------------------------------------------------
+# ---- front-end snapshots ------------------------------------------------
 #
-# selfhost/lexer.oboe is the port of legacy/lexer.c, and this is the gate on it:
-# `oboe dump-tokens` and `oboec --dump-tokens` must agree byte for byte -- token
-# type, line and escaped lexeme -- over every Oboe file in the tree, plus the
-# torture fixtures for the corners the real tests miss and a deliberately bad
-# character for the diagnostic. Exit status is compared too, so an error that
-# prints the right text with the wrong status still fails.
+# These fixtures were written for the gates that diffed oboec against the C
+# compiler it replaced, and between them they reach the lexer and parser corners
+# the golden tests miss and every reachable parse and codegen diagnostic. With
+# that compiler gone there is no second opinion to diff against, so what they
+# are checked against now is oboec's own output, frozen at the point where it
+# still agreed with the C compiler byte for byte. A difference is not
+# necessarily a bug -- the language is free to move now -- but it is a change
+# to how something lexes, parses or is diagnosed, and it has to be looked at.
+# UPDATE_SNAPSHOTS=1 rewrites the files, which then show up in the diff.
 tmp="$(mktemp -d)"
-if "$OBOE" build selfhost/main.oboe -o "$tmp/oboec" >/dev/null 2>&1; then
-    printf 'var a = 1\nvar b = `x`\n' > "$tmp/badchar.oboe"
-    diffs=""
-    n=0
-    : > "$tmp/seen"
-    for src in tests/*.oboe tests/helpers/*.oboe selfhost/*.oboe \
-               selfhost/mini/*.oboe "$tmp/badchar.oboe"; do
-        n=$((n+1))
-        a="$("$OBOE" dump-tokens "$src" 2>&1; printf 'rc=%s' "$?")"
-        b="$("$tmp/oboec" --dump-tokens "$src" 2>&1; printf 'rc=%s' "$?")"
-        [ "$a" = "$b" ] || diffs="$diffs $src"
-        printf '%s\n' "$a" | awk '{print $1}' >> "$tmp/seen"
-    done
-    if [ -z "$diffs" ]; then
-        echo "PASS selfhost_lexer ($n files)"
+abs_oboec="$PWD/$OBOEC"
+
+# <dir> <file> <flag>: one fixture's output, exit status included, run from its
+# own directory so a diagnostic's path is the bare filename on every machine
+snap_one() {
+    printf '== %s\n' "$2"
+    ( cd "$1" && "$abs_oboec" $3 "$2" 2>&1; printf 'rc=%s\n' "$?" )
+}
+
+# <name> <got-file>
+snap_check() {
+    want="tests/helpers/$1.snapshot"
+    if [ -n "$UPDATE_SNAPSHOTS" ]; then
+        cp "$2" "$want"
+        echo "PASS snapshot_$1 (rewritten)"
+        pass=$((pass+1))
+    elif cmp -s "$2" "$want"; then
+        echo "PASS snapshot_$1"
         pass=$((pass+1))
     else
-        echo "FAIL selfhost_lexer (differs:$diffs)"
+        echo "FAIL snapshot_$1 (UPDATE_SNAPSHOTS=1 rewrites it once the change is intended)"
+        diff "$want" "$2" | head -40 | sed 's/^/    /'
         fail=$((fail+1))
     fi
+}
 
-    # Agreeing on tokens the corpus never produces proves nothing, so pin the
-    # coverage: every TokenType in the enum has to show up somewhere above.
-    # T_X_OP is the one exception -- the lexer never emits it, the parser
-    # retags an identifier spelled `x` in operator position.
-    sed -n '/^typedef enum {/,/^} TokenType;/p' legacy/lexer.h |
-        grep -o '\bT_[A-Z_0-9]*' | grep -v '^T_X_OP$' | sort -u > "$tmp/want"
-    sort -u "$tmp/seen" > "$tmp/got"
-    missing="$(comm -23 "$tmp/want" "$tmp/got" | tr '\n' ' ')"
-    if [ -z "$missing" ]; then
-        echo "PASS selfhost_lexer_coverage ($(wc -l < "$tmp/want" | tr -d ' ') token types)"
-        pass=$((pass+1))
-    else
-        echo "FAIL selfhost_lexer_coverage (no corpus file produces: $missing)"
-        fail=$((fail+1))
-    fi
-
-    # ---- self-hosted parser ---------------------------------------------
-    #
-    # The same gate one stage further on: `oboe dump-ast` against
-    # `oboec --dump-ast`, over the same corpus plus every malformed input in
-    # tests/helpers/parse_errors.txt. The AST dump carries each node's kind,
-    # line and every field of its arm in legacy/ast.h, so this catches a
-    # mis-shaped tree and not just one that happens to print the same.
-    mkdir -p "$tmp/pe"
+# <list> <dir>: writes each `<name><TAB><source>` line of a list as its own file
+explode() {
+    mkdir -p "$2"
     while IFS="$(printf '\t')" read -r name src; do
         case "$name" in ''|'#'*) continue ;; esac
-        printf '%s\n' "$src" > "$tmp/pe/$name.oboe"
-    done < tests/helpers/parse_errors.txt
+        printf '%s\n' "$src" > "$2/$name.oboe"
+    done < "$1"
+}
 
-    diffs=""
-    n=0
-    : > "$tmp/kinds"
-    for src in tests/*.oboe tests/helpers/*.oboe selfhost/*.oboe \
-               selfhost/mini/*.oboe "$tmp/pe"/*.oboe; do
-        n=$((n+1))
-        a="$("$OBOE" dump-ast "$src" 2>&1; printf 'rc=%s' "$?")"
-        b="$("$tmp/oboec" --dump-ast "$src" 2>&1; printf 'rc=%s' "$?")"
-        [ "$a" = "$b" ] || diffs="$diffs $src"
-        printf '%s\n' "$a" | grep -oE '\b(EXPR|STMT|DECL|FOR)_[A-Z_]+' \
-            >> "$tmp/kinds" || true
-    done
-    if [ -z "$diffs" ]; then
-        echo "PASS selfhost_parser ($n files)"
-        pass=$((pass+1))
-    else
-        echo "FAIL selfhost_parser (differs:$diffs)"
-        fail=$((fail+1))
-    fi
+printf 'var a = 1\nvar b = `x`\n' > "$tmp/badchar.oboe"
+{ for f in lexer_torture.oboe lexer_torture_tail.oboe; do
+      snap_one tests/helpers "$f" --dump-tokens
+  done
+  snap_one "$tmp" badchar.oboe --dump-tokens
+} > "$tmp/lexer.got"
+snap_check lexer "$tmp/lexer.got"
 
-    # As with the tokens: agreement over kinds the corpus never builds proves
-    # nothing, so every ExprKind, StmtKind, DeclKind and ForIterKind in ast.h
-    # has to appear in one of the dumps above.
-    { sed -n '/^typedef enum {/,/} ExprKind;/p;/^typedef enum {/,/} StmtKind;/p
-              /^typedef enum {/,/} DeclKind;/p' legacy/ast.h
-      grep 'ForIterKind' legacy/ast.h
-    } | grep -oE '\b(EXPR|STMT|DECL|FOR)_[A-Z_]+' | sort -u > "$tmp/kwant"
-    sort -u "$tmp/kinds" > "$tmp/kgot"
-    missing="$(comm -23 "$tmp/kwant" "$tmp/kgot" | tr '\n' ' ')"
-    if [ -z "$missing" ]; then
-        echo "PASS selfhost_parser_coverage ($(wc -l < "$tmp/kwant" | tr -d ' ') AST kinds)"
-        pass=$((pass+1))
-    else
-        echo "FAIL selfhost_parser_coverage (no corpus file produces: $missing)"
-        fail=$((fail+1))
-    fi
+explode tests/helpers/parse_errors.txt "$tmp/pe"
+{ snap_one tests/helpers parser_torture.oboe --dump-ast
+  for f in "$tmp/pe"/*.oboe; do
+      snap_one "$tmp/pe" "$(basename "$f")" --dump-ast
+  done
+} > "$tmp/parser.got"
+snap_check parser "$tmp/parser.got"
 
-    # ---- self-hosted codegen ---------------------------------------------
-    #
-    # The last stage, and the strictest: the C handed to gcc must be identical,
-    # byte for byte, between `oboe emit-c` and `oboec --emit-c`. That covers
-    # module resolution and the whole unit graph too, since a wrong import order
-    # renumbers __oboe_toplevel_N.
-    #
-    # stdout and stderr are compared separately rather than merged: a codegen
-    # error can fire partway through emission, and the two compilers reach the
-    # combined stream in a different order (C's stdout is block-buffered and
-    # flushed at exit, Oboe's eprint flushes stdout first). Both must still
-    # produce the same C, the same diagnostic and the same status.
-    mkdir -p "$tmp/ce"
-    while IFS="$(printf '\t')" read -r name src; do
-        case "$name" in ''|'#'*) continue ;; esac
-        printf '%s\n' "$src" > "$tmp/ce/$name.oboe"
-    done < tests/helpers/codegen_errors.txt
+# only the diagnostic and the status: the partial C a failing codegen leaves on
+# stdout is not part of the contract. Names starting with _ are helpers that
+# other entries import.
+explode tests/helpers/codegen_errors.txt "$tmp/ce"
+for f in "$tmp/ce"/*.oboe; do
+    b="$(basename "$f")"
+    case "$b" in _*) continue ;; esac
+    printf '== %s\n' "$b"
+    ( cd "$tmp/ce" && "$abs_oboec" --emit-c "$b" 2>&1 >/dev/null
+      printf 'rc=%s\n' "$?" )
+done > "$tmp/codegen.got"
+snap_check codegen_errors "$tmp/codegen.got"
 
-    # A project tree, built here rather than committed: the third and last
-    # module-search root is the *project's* .oboe/libraries, which only comes
-    # into play for a file in a subdirectory, and os.project_root() only differs
-    # from the script's own directory when a project.jsonc sits above it.
-    # Neither can be a fixture in the repo, because .gitignore excludes .oboe/.
-    # app.oboe imports one module from each root, so the two are told apart.
-    mkdir -p "$tmp/proj/.oboe/libraries" "$tmp/proj/sub"
-    printf '{ "project": { "name": "p", "entry": "sub/app.oboe" } }\n' \
-        > "$tmp/proj/project.jsonc"
-    printf 'func shout(str s) { return s.upper() }\n' \
-        > "$tmp/proj/.oboe/libraries/holler.oboe"
-    printf 'func near() { return "sibling" }\n' > "$tmp/proj/sub/nextdoor.oboe"
-    printf 'import shout from holler\nimport near from nextdoor\nimport os\nfunc main(array args) {\nprint(shout("hi"), near(), os.project_root())\n}\n' \
-        > "$tmp/proj/sub/app.oboe"
-
-    diffs=""
-    n=0
-    : > "$tmp/emitted"
-    for src in tests/*.oboe tests/helpers/*.oboe selfhost/*.oboe \
-               selfhost/mini/*.oboe "$tmp/ce"/*.oboe \
-               "$tmp/proj/sub/app.oboe"; do
-        n=$((n+1))
-        "$OBOE" emit-c "$src" > "$tmp/a.out" 2> "$tmp/a.err"; ra=$?
-        "$tmp/oboec" --emit-c "$src" > "$tmp/b.out" 2> "$tmp/b.err"; rb=$?
-        if ! cmp -s "$tmp/a.out" "$tmp/b.out" ||
-           ! cmp -s "$tmp/a.err" "$tmp/b.err" || [ "$ra" != "$rb" ]; then
-            diffs="$diffs $src"
-        fi
-        cat "$tmp/a.out" >> "$tmp/emitted"
-    done
-
-    # Once more by bare filename, from the file's own directory: that is the
-    # only way dirname() is asked about a path with no '/' in it, and it has to
-    # answer "." on both sides.
-    abs_oboe="$PWD/$OBOE"
-    n=$((n+1))
-    ( cd "$tmp/proj/sub" && "$abs_oboe" emit-c app.oboe ) \
-        > "$tmp/a.out" 2> "$tmp/a.err"; ra=$?
-    ( cd "$tmp/proj/sub" && "$tmp/oboec" --emit-c app.oboe ) \
-        > "$tmp/b.out" 2> "$tmp/b.err"; rb=$?
-    if ! cmp -s "$tmp/a.out" "$tmp/b.out" ||
-       ! cmp -s "$tmp/a.err" "$tmp/b.err" || [ "$ra" != "$rb" ]; then
-        diffs="$diffs app.oboe(bare)"
-    fi
-
-    if [ -z "$diffs" ]; then
-        echo "PASS selfhost_codegen ($n files)"
-        pass=$((pass+1))
-    else
-        echo "FAIL selfhost_codegen (differs:$diffs)"
-        fail=$((fail+1))
-    fi
-
-    # Same argument as the token and AST coverage: agreement on emissions the
-    # corpus never asks for proves nothing. Every runtime entry point named in
-    # a string literal in legacy/codegen.c -- every operator fallback, every
-    # primitive method, every coercion and type check -- has to appear in the C
-    # the corpus generated.
-    grep -oE '"[^"]*"' legacy/codegen.c | grep -oE '\bob_[a-z_0-9]+' |
-        sort -u > "$tmp/cwant"
-    grep -oE '\bob_[a-z_0-9]+' "$tmp/emitted" | sort -u > "$tmp/cgot"
-    missing="$(comm -23 "$tmp/cwant" "$tmp/cgot" | tr '\n' ' ')"
-    if [ -z "$missing" ]; then
-        echo "PASS selfhost_codegen_coverage ($(wc -l < "$tmp/cwant" | tr -d ' ') runtime entry points)"
-        pass=$((pass+1))
-    else
-        echo "FAIL selfhost_codegen_coverage (nothing emits: $missing)"
-        fail=$((fail+1))
-    fi
+# ---- module search roots -------------------------------------------------
+#
+# A project tree, built here rather than committed: the third and last
+# module-search root is the *project's* .oboe/libraries, which only comes into
+# play for a file in a subdirectory, and os.project_root() only differs from the
+# script's own directory when a project.jsonc sits above it. Neither can be a
+# fixture in the repo, because .gitignore excludes .oboe/. app.oboe imports one
+# module from each root, so the two are told apart. It runs twice -- by path,
+# and by bare filename from its own directory, which is the only way dirname()
+# is asked about a path with no '/' in it.
+mkdir -p "$tmp/proj/.oboe/libraries" "$tmp/proj/sub"
+printf '{ "project": { "name": "p", "entry": "sub/app.oboe" } }\n' \
+    > "$tmp/proj/project.jsonc"
+printf 'func shout(str s) { return s.upper() }\n' \
+    > "$tmp/proj/.oboe/libraries/holler.oboe"
+printf 'func near() { return "sibling" }\n' > "$tmp/proj/sub/nextdoor.oboe"
+printf 'import shout from holler\nimport near from nextdoor\nimport os\nfunc main(array args) {\nprint(shout("hi"), near(), os.project_root())\n}\n' \
+    > "$tmp/proj/sub/app.oboe"
+root="$(cd "$tmp/proj" && pwd -P)"
+a="$("$OBOE" run "$tmp/proj/sub/app.oboe" 2>&1)"
+b="$(cd "$tmp/proj/sub" && "$OLDPWD/$OBOE" run app.oboe 2>&1)"
+if [ "$a" = "HI sibling $root" ] && [ "$b" = "$a" ]; then
+    echo "PASS module_search_roots"
+    pass=$((pass+1))
 else
-    echo "FAIL selfhost_lexer (could not build selfhost/main.oboe)"
+    echo "FAIL module_search_roots (wanted 'HI sibling $root')"
+    printf 'by path: %s\nbare:    %s\n' "$a" "$b" | sed 's/^/    /'
     fail=$((fail+1))
 fi
 

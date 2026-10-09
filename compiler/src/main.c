@@ -11,10 +11,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
  * GNU General Public License for more details.
  */
-#include "codegen.h"
-#include "dump.h"
-#include "lexer.h"
-#include "parser.h"
 #include "pkg.h"
 #include "projectedit.h"
 #include "projectjson.h"
@@ -113,53 +109,27 @@ static const char *g_build_target_os = HOST_OS;
 /* The compiler proper is bin/oboec, written in Oboe (see selfhost/). It is a
    separate process rather than a library call because it is an Oboe program:
    it is compiled to C, built against the runtime, and cannot be linked into
-   this one.
- *
- * DEPRECATED: OBOE_USE_C_FRONTEND=1 still routes back through the in-process C
- * codegen. It is not a supported way to build anything and is deliberately
- * undocumented; it exists so that a bad day for oboec is recoverable without a
- * git checkout, and so the C compiler that the selfhost gates diff against
- * cannot quietly stop being able to compile a whole program. Deleting the
- * branch is safe the moment neither of those is worth having -- but deleting
- * lexer.c/parser.c/codegen.c along with it would take the gates too, and then
- * nothing checks oboec against anything but itself. */
+   this one. */
 static char *transpile_to_c(const char *oboe_path, const char *c_out_path)
 {
-	char path_copy[4096];
-	snprintf(path_copy, sizeof path_copy, "%s", oboe_path);
-	char *dir = dirname(path_copy);
-
-	if (!getenv("OBOE_USE_C_FRONTEND")) {
-		char *home = oboe_home();
-		char oboec[4096];
-		snprintf(oboec, sizeof oboec, "%s/oboec", home);
-		free(home);
-		if (access(oboec, X_OK) != 0) {
-			fprintf(stderr,
-				"oboe: cannot find the compiler at '%s' (run `make` to build it)\n",
-				oboec);
-			exit(1);
-		}
-		char cmd[8192];
-		snprintf(cmd, sizeof cmd,
-			 "\"%s\" \"%s\" -o \"%s\" --target-os \"%s\"", oboec,
-			 oboe_path, c_out_path, g_build_target_os);
-		int rc = system(cmd);
-		/* oboec has already written its own diagnostic to our stderr;
-		   adding one here would only bury it */
-		if (rc != 0)
-			exit(1);
-		return strdup(c_out_path);
-	}
-
-	codegen_set_source_dir(dir);
-	FILE *out = fopen(c_out_path, "w");
-	if (!out) {
-		fprintf(stderr, "oboe: cannot write '%s'\n", c_out_path);
+	char *home = oboe_home();
+	char oboec[4096];
+	snprintf(oboec, sizeof oboec, "%s/oboec", home);
+	free(home);
+	if (access(oboec, X_OK) != 0) {
+		fprintf(stderr,
+			"oboe: cannot find the compiler at '%s' (run `make` to build it)\n",
+			oboec);
 		exit(1);
 	}
-	codegen_compile(oboe_path, out);
-	fclose(out);
+	char cmd[8192];
+	snprintf(cmd, sizeof cmd, "\"%s\" \"%s\" -o \"%s\" --target-os \"%s\"",
+		 oboec, oboe_path, c_out_path, g_build_target_os);
+	int rc = system(cmd);
+	/* oboec has already written its own diagnostic to our stderr; adding one
+	   here would only bury it */
+	if (rc != 0)
+		exit(1);
 	return strdup(c_out_path);
 }
 
@@ -762,7 +732,6 @@ static void cmd_build(BuildOpts *o)
 	const char *target = normalize_target(o->target);
 	o->target = target;
 	bool is_windows = strcmp(target, "windows") == 0;
-	codegen_set_target_os(target);
 	g_build_target_os = target;
 
 	/* Building several declared targets in one go, with no `output` naming
@@ -1003,50 +972,6 @@ static void cmd_remove(const char *name)
 		printf("oboe: nothing to remove for '%s'.\n", name);
 }
 
-/* ---- dump-tokens / dump-ast / emit-c ----
-   The gates for the Oboe-written compiler: selfhost/ prints the same bytes for
-   the same input and the suite diffs the two over the whole corpus. The
-   serializers themselves live in dump.c, next to their twins' definition.
-   All three are deliberately absent from the usage line -- they are development
-   gates, not part of the CLI. */
-static int cmd_dump_tokens(const char *path)
-{
-	char *src = read_whole_file(path);
-	if (!src) {
-		fprintf(stderr, "oboe: cannot read '%s'\n", path);
-		return 1;
-	}
-	int n = 0;
-	Token *toks = lex_all(src, &n);
-	dump_tokens(toks, n, stdout);
-	return 0;
-}
-
-static int cmd_dump_ast(const char *path)
-{
-	char *src = read_whole_file(path);
-	if (!src) {
-		fprintf(stderr, "oboe: cannot read '%s'\n", path);
-		return 1;
-	}
-	int n = 0;
-	Token *toks = lex_all(src, &n);
-	dump_ast(parse_program(toks, n, path), stdout);
-	return 0;
-}
-
-/* The C `oboe build` would hand to gcc, on stdout instead. Everything the
-   generated text depends on -- the source directory, the target OS -- is set
-   the way transpile_to_c sets it, so the two agree byte for byte. */
-static int cmd_emit_c(const char *path)
-{
-	char path_copy[4096];
-	snprintf(path_copy, sizeof path_copy, "%s", path);
-	codegen_set_source_dir(dirname(path_copy));
-	codegen_compile(path, stdout);
-	return 0;
-}
-
 /* `oboe doc <file>` -- markdown for a file's docstrings, on stdout. The
    rendering lives in selfhost/docs.oboe. */
 static int cmd_doc(const char *path)
@@ -1186,27 +1111,6 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		return cmd_doc(argv[2]);
-	}
-	if (strcmp(cmd, "dump-tokens") == 0) {
-		if (argc < 3) {
-			fprintf(stderr, "oboe: dump-tokens needs a file\n");
-			return 1;
-		}
-		return cmd_dump_tokens(argv[2]);
-	}
-	if (strcmp(cmd, "dump-ast") == 0) {
-		if (argc < 3) {
-			fprintf(stderr, "oboe: dump-ast needs a file\n");
-			return 1;
-		}
-		return cmd_dump_ast(argv[2]);
-	}
-	if (strcmp(cmd, "emit-c") == 0) {
-		if (argc < 3) {
-			fprintf(stderr, "oboe: emit-c needs a file\n");
-			return 1;
-		}
-		return cmd_emit_c(argv[2]);
 	}
 
 	fprintf(stderr, "oboe: unknown command '%s'\n", cmd);

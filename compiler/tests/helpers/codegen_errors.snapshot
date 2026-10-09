@@ -1,0 +1,78 @@
+== ancestorarity.oboe
+ancestorarity.oboe:1: error: no ancestor constructor matches this argument count
+rc=1
+== badtarget.oboe
+badtarget.oboe:1: error: invalid assignment target
+rc=1
+== chrarity.oboe
+chrarity.oboe:1: error: chr() takes exactly 1 argument
+rc=1
+== classopargs.oboe
+classopargs.oboe:1: error: a class operator must take exactly (this, other)
+rc=1
+== eventexists.oboe
+eventexists.oboe:1: error: an event or class with this name already exists
+rc=1
+== inputarity.oboe
+inputarity.oboe:1: error: input() takes no arguments
+rc=1
+== methodarity.oboe
+methodarity.oboe:1: error: 'upper' takes 0 argument(s), got 1
+rc=1
+== modhasnofunc.oboe
+modhasnofunc.oboe:1: error: '_cehelper' has no function 'thing'
+rc=1
+== noancestor.oboe
+noancestor.oboe:1: error: no ancestor constructor matches this argument count
+rc=1
+== nofield.oboe
+nofield.oboe:1: error: no such field on this class (or its ancestors)
+rc=1
+== notcallable.oboe
+notcallable.oboe:1: error: unsupported call expression
+rc=1
+== opredefined.oboe
+opredefined.oboe:1: error: operator is already defined
+rc=1
+== ordarity.oboe
+ordarity.oboe:1: error: ord() takes exactly 1 argument
+rc=1
+== posafternamed.oboe
+posafternamed.oboe:1: error: positional argument after a named argument in call to 'g'
+rc=1
+== privfield.oboe
+privfield.oboe:1: error: field is private
+rc=1
+== rangearity.oboe
+rangearity.oboe:1: error: range() takes exactly 2 arguments
+rc=1
+== stdarity.oboe
+stdarity.oboe:1: error: 'abs' takes 1 argument(s)
+rc=1
+== stdoptarity.oboe
+stdoptarity.oboe:1: error: 'os.run' takes 1 or 2 argument(s)
+rc=1
+== stdoptdirect.oboe
+stdoptdirect.oboe:1: error: 'run' takes 1 or 2 argument(s)
+rc=1
+== stdvalue.oboe
+stdvalue.oboe:1: error: this standard-library member is a function; call it
+rc=1
+== superfield.oboe
+superfield.oboe:1: error: no such field on the parent class (or its ancestors)
+rc=1
+== supermethod.oboe
+supermethod.oboe:1: error: no such method on the parent class (or its ancestors)
+rc=1
+== superprivate.oboe
+superprivate.oboe:1: error: method is private
+rc=1
+== topopargs.oboe
+topopargs.oboe:1: error: a top-level operator must take exactly two parameters
+rc=1
+== undefassign.oboe
+undefassign.oboe:1: error: undefined variable 'nope'
+rc=1
+== unknownrecv.oboe
+unknownrecv.oboe:1: error: cannot resolve the static type of this expression for member access (compile-time dispatch requires a known class)
+rc=1

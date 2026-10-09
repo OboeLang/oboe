@@ -11,18 +11,18 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 //
-// The lexer, ported from src/lexer.c. A token is a dict rather than a struct:
+// The lexer. Originally a port of the C compiler's lexer.c, since deleted. A
+// token is a dict rather than a struct:
 //
 //     { "type": "T_IDENT", "text": "counter", "line": 12 }
 //
-// "type" holds the C enum constant's own spelling so the two lexers can be
-// diffed literally -- see `oboe dump-tokens` and selfhost/dump.oboe. The C
-// Token also carries ival/dval, but both are a pure function of "text"
-// (atoll/strtod), so they are derived where they are used instead of stored.
+// "type" keeps the C enum constant's spelling from the port, which is also what
+// `oboec --dump-tokens` prints. A number's value is not stored: it is a pure
+// function of "text", so it is derived where it is used.
 import fail from diag
 
-// The source under the cursor. Module-level, mirroring lexer.c's file statics:
-// the C lexer is not re-entrant either, and one file is lexed at a time.
+// The source under the cursor. Module-level, so the lexer is not re-entrant:
+// one file is lexed at a time.
 var SRC = ""
 var SLEN = 0
 var POS = 0
@@ -69,9 +69,7 @@ const var KEYWORDS = {
 	"cimport": "T_CIMPORT"
 }
 
-// lexer.c dispatches punctuation through a switch that tries the two-byte
-// spelling before the one-byte one; these two tables are that switch, in the
-// same order of preference.
+// Punctuation: the two-byte spelling is tried before the one-byte one.
 const var OPS2 = {
 	"->": "T_ARROW",
 	"==": "T_EQ",
@@ -116,8 +114,8 @@ const var OPS1 = {
 // ---- cursor ----
 
 // The byte value at i, or -1 at or past the end. -1 matches no classification,
-// which is what lets the callers drop lexer.c's explicit `pos + 1 < len`
-// guards on lookahead.
+// which is what lets the callers skip explicit `pos + 1 < len` guards on
+// lookahead.
 func byte_at(int i) {
 	if (i < 0 or i >= SLEN) {
 		return -1
@@ -177,6 +175,13 @@ func is_op_char(int c) {
 // changes how `+` itself lexes.
 var CUSTOM_OPS = []
 
+// `operator owo (...)` declares a word operator instead. Those are never
+// tokens of their own: the lexer leaves `owo` a T_IDENT, so it is still usable
+// as a name, and the parser takes it as an operator only in infix position --
+// the same arrangement as the builtin `x`. Registered under the same rules as
+// the symbols.
+var WORD_OPS = []
+
 const var BUILTIN_OPS = ["+", "-", "*", "/", "%", "=", "==", "!=", "<", "<=",
 			 ">", ">=", "&&", "||", "??", "?.", "!", "?", ".",
 			 "->", ":", "&", "|", "^", "~", "<<", ">>"]
@@ -194,19 +199,85 @@ func register_custom_op(str sym) {
 	CUSTOM_OPS.push(sym)
 }
 
+// keywords already lex as something else, and `x` is the repetition operator
+func register_word_op(str word) {
+	if (KEYWORDS.has(word) or word == "x" or WORD_OPS.contains(word)) {
+		return
+	}
+	if (WORD_OPS.len() >= 64) {
+		fail("too many custom operators")
+	}
+	WORD_OPS.push(word)
+}
+
+func is_word_op(str word) {
+	return WORD_OPS.contains(word)
+}
+
+// Whether c may continue an operator symbol: any operator character, and `_`
+// so faces like `^_^` work. `_` cannot *start* one -- the lexer only looks for
+// a custom operator at an operator character, which is what keeps every
+// identifier beginning with `_` an identifier.
+func is_op_tail(int c) {
+	return is_op_char(c) or c == 95
+}
+
+// Skips the string literal whose opening quote is at i, returning the index
+// just past its closing quote. Mirrors read_string_body: `\` escapes one
+// character, and a `${...}` runs to its matching brace, quotes and all.
+func skip_string(int i) {
+	var p = i + 1
+	while (p < SLEN) {
+		var c = ch(p)
+		if (c == "\\") {
+			p = p + 2
+		} else if (c == "\"") {
+			return p + 1
+		} else if (c == "$" and ch(p + 1) == "{") {
+			var depth = 1
+			p = p + 2
+			while (p < SLEN and depth > 0) {
+				var d = ch(p)
+				if (d == "{") {
+					depth = depth + 1
+				} else if (d == "}") {
+					depth = depth - 1
+				}
+				p = p + 1
+			}
+		} else {
+			p = p + 1
+		}
+	}
+	return p
+}
+
 // Registers the `operator <sym>` declarations in src without tokenizing it, so
 // a symbol declared in one file lexes correctly in another. Seats the cursor on
 // src as a side effect; lex_all re-seats it afterwards.
 //
-// Bug-compatible with lexer.c: a raw text scan with no comment or string
-// awareness, so a commented-out `operator ||>` registers too.
+// Comments and string literals are skipped, so neither a commented-out
+// declaration nor the word "operator" in prose registers anything -- which
+// matters for word operators, where `"operator must take..."` would otherwise
+// quietly declare `must`.
 func prescan_ops(str src) {
 	SRC = src
 	SLEN = src.len()
 	var i = 0
 	while (i + 8 < SLEN) {
+		var c = ch(i)
+		if (c == "/" and ch(i + 1) == "/") {
+			while (i < SLEN and ch(i) != "\n") {
+				i = i + 1
+			}
+			continue
+		}
+		if (c == "\"") {
+			i = skip_string(i)
+			continue
+		}
 		// cheap reject before paying for the substring
-		if (ch(i) != "o" or SRC.substr(i, 8) != "operator") {
+		if (c != "o" or SRC.substr(i, 8) != "operator") {
 			i = i + 1
 			continue
 		}
@@ -224,13 +295,18 @@ func prescan_ops(str src) {
 			p = p + 1
 		}
 		var start = p
-		while (p < SLEN and is_op_char(byte_at(p))) {
-			p = p + 1
-		}
-		if (p > start) {
+		if (is_op_char(byte_at(p))) {
+			while (p < SLEN and is_op_tail(byte_at(p))) {
+				p = p + 1
+			}
 			register_custom_op(SRC.substr(start, p - start))
+		} else if (is_ident_start(byte_at(p))) {
+			while (p < SLEN and is_ident_char(byte_at(p))) {
+				p = p + 1
+			}
+			register_word_op(SRC.substr(start, p - start))
 		}
-		i = i + 1
+		i = i + 8
 	}
 }
 

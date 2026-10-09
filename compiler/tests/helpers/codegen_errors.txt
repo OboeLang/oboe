@@ -1,16 +1,20 @@
-# Inputs that make codegen fail, for the selfhost_codegen gate: one per line, as
-# `<name><TAB><source>`. The suite writes each to its own file and requires the
-# two compilers to produce the identical diagnostic, the identical partial
-# output, and the identical exit status. Blank lines and lines starting with #
-# are skipped. A name beginning with _ is a helper another line imports.
+# Inputs that make codegen fail, for the snapshot_codegen_errors test: one per
+# line, as `<name><TAB><source>`. The suite writes each to its own file and
+# compares the diagnostic and exit status against codegen_errors.snapshot.
+# Blank lines and lines starting with # are skipped. A name beginning with _ is
+# a helper another line imports.
 #
-# Between them these reach every codegen diagnostic in src/codegen.c that the
-# ordinary tests/fail_*.oboe do not already reach. Two cannot be reached at all:
+# Between them these reach every codegen diagnostic in selfhost/codegen.oboe
+# that the ordinary tests/fail_*.oboe do not already reach. Three cannot be
+# reached at all:
 #
-#   "unknown expression kind"   the switch over ExprKind is exhaustive, so the
-#                               statement after it is dead
-#   "cannot read '<file>'"      codegen_compile's own read; every CLI path that
-#                               reaches it has already opened the file
+#   "unknown expression kind"   the dispatch over expression kinds is
+#                               exhaustive, so the statement after it is dead
+#   "cannot read '<file>'"      every CLI path that reaches codegen has already
+#                               opened the file
+#   "unknown binary operator"   the lexer only makes an operator token out of a
+#                               symbol some `operator` declaration registered,
+#                               and that declaration defines it
 #
 # Keeping each case to one line is deliberate: a diagnostic's line number is
 # part of what is compared, and a one-line case makes it obvious.
@@ -38,9 +42,6 @@ noancestor	class A { } class B extends A { func init(this) { super(1) } }
 ancestorarity	class A { func init(this, int q) { } } class B extends A { func init(this) { super() } }
 
 # ---- operators
-# the `operator` pre-scan is a raw text scan with no comment awareness, so the
-# symbol below is registered for lexing while the declaration never exists
-undeclaredop	func f() { print(1 <=> 2) } // operator <=> (a, b) { }
 topopargs	operator ||> (a) { }
 opredefined	operator ||> (a, b) { } operator ||> (c, d) { }
 classopargs	class A { operator + (this) { } }

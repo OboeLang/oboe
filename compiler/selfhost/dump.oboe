@@ -11,9 +11,9 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 // GNU General Public License for more details.
 //
-// Serializations used to gate the port against the C compiler. Every function
-// here has a twin in the C tree that must produce the identical bytes -- see
-// cmd_dump_tokens in src/main.c and the selfhost_lexer test.
+// The token and AST dumps behind `oboec --dump-tokens` and `--dump-ast`. The
+// format was fixed by the C compiler this replaced, whose output these had to
+// match byte for byte; tests/helpers/*.snapshot now pin it instead.
 
 // Three octal digits. C's \xNN is greedy and would swallow a following hex
 // digit, so the escape below is octal, and octal escapes are only unambiguous
@@ -64,9 +64,9 @@ func dump_tokens(array toks) {
 }
 
 // ---- the AST ----
-// An indented tree, two spaces per level, one node per line. The shape is
-// specified next to dump_ast in src/dump.c; this half only has to reproduce
-// it. The pieces are collected in an array and joined once at the end, since
+// An indented tree, two spaces per level, one node per line: its kind and
+// scalar fields as key=value, with child nodes and lists indented beneath it.
+// The pieces are collected in an array and joined once at the end, since
 // growing a string in a loop over a whole file's AST is quadratic.
 
 var OUT = []
@@ -93,8 +93,7 @@ func field_str(str key, val) {
 }
 
 // str() on a float is already the shortest representation that round-trips,
-// with ".0" kept on whole numbers -- which is exactly what field_double in
-// src/dump.c reimplements, so the two agree without further work.
+// with ".0" kept on whole numbers.
 func field_double(str key, value) {
 	emit(" " + key + "=" + str(value))
 }

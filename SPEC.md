@@ -535,6 +535,32 @@ When defining an operator, you are given two variables.
 
 `a`, which is the left side, and `b`, the right side.
 
+An operator's symbol is made of the characters `+ - * / % < > = ! & | ^ ~ ? @ # $ : .`, and may also contain `_` anywhere but its first character:
+
+```
+operator ^_^ (str a, str b) {
+    return a + " ^_^ " + b
+}
+
+print("Hello" ^_^ "Oboe") // prints Hello ^_^ Oboe
+```
+
+It can also be a single word:
+
+```
+operator owo (str a, str b) {
+    return a + " owo " + b
+}
+
+print("Hello" owo "Oboe") // prints Hello owo Oboe
+```
+
+A word operator is still an ordinary name everywhere except between two operands, the same as the built-in `x`, so `var owo = 1` still works. Because semicolons are optional, a word only acts as an operator when it is on the same line as its left operand; a line starting with `owo(...)` is a call. Keywords and `x` can't be word operators.
+
+Custom operators bind tighter than `and`/`or` and looser than the bitwise operators, and are left-associative. Like events, they are global: one declared in an imported module works everywhere.
+
+A built-in operator such as `+` can't be redefined at the top level, since its meaning for the built-in types is fixed. Give it a meaning for a class instead (see below).
+
 # Operator overloading
 
 ```

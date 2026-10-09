@@ -4,4 +4,3 @@
 -D_DARWIN_C_SOURCE
 -Iruntime
 -Isrc
--Ilegacy
